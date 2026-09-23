@@ -2,7 +2,7 @@ import os
 import sys
 import tempfile
 import unittest
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, closing
 from datetime import timedelta
 
 from mcp import ClientSession, StdioServerParameters
@@ -148,7 +148,7 @@ class MCPTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(data['data']['simulated_effects_recorded'], 1)
                 self.assertNotIn('token', str(data))
             import sqlite3
-            with sqlite3.connect(root / 'jarvis-hermes' / 'approvals.sqlite3') as db:
+            with closing(sqlite3.connect(root / 'jarvis-hermes' / 'approvals.sqlite3')) as db:
                 self.assertEqual(db.execute('SELECT COUNT(*) FROM simulated_effects').fetchone()[0], 1)
 
     async def test_declined_mcp_elicitation_records_no_simulated_effect(self):
@@ -161,7 +161,7 @@ class MCPTests(unittest.IsolatedAsyncioTestCase):
                 self.assertTrue(result.structuredContent['ok'])
                 self.assertEqual(result.structuredContent['data']['status'], 'cancelled')
             import sqlite3
-            with sqlite3.connect(root / 'jarvis-hermes' / 'approvals.sqlite3') as db:
+            with closing(sqlite3.connect(root / 'jarvis-hermes' / 'approvals.sqlite3')) as db:
                 self.assertEqual(db.execute('SELECT COUNT(*) FROM simulated_effects').fetchone()[0], 0)
 
     async def test_simulated_approval_fails_closed_without_configured_approver(self):
