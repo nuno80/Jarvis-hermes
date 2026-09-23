@@ -1,8 +1,8 @@
 # ADR 0004: Conferma persistente per un effetto simulato
 
-Stato: implementata la logica locale; callback Telegram e integrazione Hermes da verificare sul PC.
+Stato: implementata la logica locale e MCP elicitation; conferma end-to-end Telegram da verificare sul PC.
 
-`ApprovalStore` espone un confine destinato soltanto a un adapter del gateway affidabile. L'adapter dovrà ricavare l'ID numerico dell'utente dalla sessione autenticata e verificare la chat autorizzata. Né il modello né un argomento MCP possono stabilire quell'identità o decidere una conferma. Per questo `decide()` non è pubblicato nel catalogo MCP. Nessun polling Telegram viene aggiunto.
+`ApprovalStore` espone un confine destinato soltanto a un adapter del gateway affidabile. Hermes v0.20.0 implementa MCP form-mode elicitation sulla superficie di approvazione della sessione gateway attiva. Il processo Jarvis associa l'esito di quella UI all'unico `JARVIS_APPROVER_ID` configurato localmente; il valore va fatto coincidere con l'unico ID di `TELEGRAM_ALLOWED_USERS`. Né il modello né un argomento MCP possono stabilire quell'identità o decidere una conferma. Per questo `actor_id` e `decide()` non sono esposti nel catalogo MCP. Timeout, errore, cancellazione e rifiuto non registrano effetti. Nessun polling Telegram viene aggiunto.
 
 `request()` prepara esclusivamente l'azione `simulate`: riepilogo con target, contenuto, digest SHA-256 dei parametri canonici e scadenza; token opaco casuale monouso, memorizzato solo come hash. Il token viene restituito all'adapter affinché lo consegni sul canale autenticato, mai inserito nel riepilogo. `decide()` controlla token, ID, digest, stato e tempo. Una transazione SQLite `BEGIN IMMEDIATE` registra l'effetto simulato e consuma la conferma in modo atomico; callback duplicate non ripetono l'effetto. L'annullamento consuma il token senza effetto; la scadenza lo rende inutilizzabile. I database runtime rimangono locali e ignorati da Git.
 
@@ -10,4 +10,6 @@ Il database della demo contiene soltanto un registro di effetti simulati. Non es
 
 Prova senza Telegram: `uv run jarvis approval-demo`. La CLI crea un database temporaneo, conferma una sola simulazione, prova a ripetere la callback e riporta il numero di effetti. Non emette il token. Il test automatico verifica anche identità diversa, modifica di target/parametri, `approved=true`, annullamento, scadenza, persistenza e callback concorrenti.
 
-Per chiudere l'issue #3, completare prima #2 sul PC: identificare l'unico gateway Hermes e il suo punto di callback affidabile; collegare il riepilogo e i pulsanti di @nuno_agent_bot; provare approvazione, annullamento e duplicati da telefono senza aprire un secondo consumer. Conservare le prove senza token o ID personali nel repository.
+Il tool `simulate_with_approval` crea una richiesta, mostra target/parametri canonici/digest/scadenza tramite `ctx.elicit` e registra l'effetto simulato solo se la UI del client restituisce `accept`. L'accettazione di Hermes restituisce un form vuoto; è usata esclusivamente come decisione yes/no e non come fonte di dati d'identità. Il test MCP end-to-end del repository copre accettazione, rifiuto, singolo effetto e assenza di `actor_id` nello schema; la prova della UI Telegram reale resta necessaria. Il percorso non esegue azioni esterne.
+
+Per chiudere l'issue #3, eseguire sul PC la conferma e l'annullamento dalla sessione Telegram autorizzata e verificare il registro locale. Il test con un secondo account non è possibile perché l'utente ne possiede uno solo; resta esplicitamente non verificato. Conservare le prove senza token o ID personali nel repository.
