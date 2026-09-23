@@ -28,7 +28,7 @@ class DoctorTests(unittest.TestCase):
         self.assertLessEqual(report["disk"]["free_bytes"], report["disk"]["total_bytes"])
         self.assertEqual(report["scope"], "current_host_only")
         self.assertEqual(report["integrations"]["telegram"], "not_verified")
-        self.assertEqual(report["integrations"]["mcp"], "not_implemented")
+        self.assertEqual(report["integrations"]["mcp"], "stdio_available")
         self.assertEqual(report["vault"]["status"], "not_configured")
 
     def test_vault_presence_without_leaking_path_or_reading_note(self):

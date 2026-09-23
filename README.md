@@ -2,13 +2,14 @@
 
 Assistente personale MCP-first basato su Hermes, controllabile da Telegram, con memoria Obsidian e strumenti per Windows/WSL, sviluppo e viaggi.
 
-**Stato:** inizializzazione del progetto. Disponibili documentazione, issue e una CLI di diagnostica locale con test. L'integrazione Hermes/MCP/Telegram non è ancora implementata.
+**Stato:** inizializzazione del progetto. Disponibili documentazione, issue, diagnostica e server MCP locale in sola lettura con test di protocollo. Il collegamento a Hermes/Telegram sul PC resta da verificare.
 
 Bot esistente da riutilizzare: **@nuno_agent_bot**. La presenza del bot è confermata dall'utente; connessione al gateway e host devono ancora essere verificati.
 
 ## Documenti
 
 - [Specifica V1](docs/specs/jarvis-v1.md)
+- [Server MCP e collegamento locale](docs/mcp-readonly.md)
 - [Roadmap e 30 issue](docs/roadmap.md)
 - [Cosa verificare al ritorno al PC](docs/return-to-pc.md)
 - [Decisioni architetturali](docs/adr/)
@@ -37,3 +38,7 @@ Task definiti applicando `to-tickets` di Matt Pocock. La fonte dello stato è Gi
 Le skill si installano nell'agente locale secondo il catalogo mattpocock/skills; qui non sono state vendorizzate.
 
 Nessuna issue host-dependent va chiusa senza prova sul dispositivo reale. Le prove cloud della CLI non validano GUI, GPU, gateway esistente o accesso al vault dell'utente.
+
+## Incremento MCP
+
+`uv run jarvis serve` espone quattro tool stdio: stato macchina, spazio disco, ricerca e lettura di note. Configurare il percorso del vault nel processo che lo avvia; i test usano solo directory temporanee. Nessuna nota del vault personale è stata letta o modificata. Vedere [contratti e limiti](docs/mcp-readonly.md).

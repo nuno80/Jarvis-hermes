@@ -30,7 +30,7 @@ def diagnose(disk_path: Path, vault_path: str | None) -> dict:
             "hermes": "not_verified",
             "telegram": "not_verified",
             "windows_gui": "not_verified",
-            "mcp": "not_implemented",
+            "mcp": "stdio_available",
         },
     }
 
@@ -41,7 +41,12 @@ def main() -> int:
     doctor = sub.add_parser("doctor", help="Inspect only the current host, without connections")
     doctor.add_argument("--json", action="store_true", dest="as_json")
     doctor.add_argument("--disk-path", type=Path, default=Path.cwd())
+    sub.add_parser("serve", help="Run the local read-only MCP server over stdio")
     args = parser.parse_args()
+    if args.command == "serve":
+        from .server import main as serve
+        serve()
+        return 0
     try:
         report = diagnose(args.disk_path, os.environ.get("JARVIS_VAULT_PATH"))
     except OSError:
@@ -53,6 +58,6 @@ def main() -> int:
         print(f"Host: {report['host']['system']}; Python: {report['host']['python']}")
         print(f"Free disk: {report['disk']['free_bytes'] / (1024**3):.1f} GiB")
         print(f"Vault: {report['vault']['status']}")
-        print("Hermes, Telegram and Windows GUI: not verified. MCP: not implemented.")
+        print("Hermes, Telegram and Windows GUI: not verified. MCP: local stdio server available; host connection not verified.")
         print("This report describes the current host only.")
     return 0

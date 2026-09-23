@@ -48,3 +48,7 @@ Subito avviabili: #1 (diagnostica, parzialmente predisposta) e #20 (verifica pro
 5. Autostart, restore e verifica complessiva (#28–#30).
 
 Il bot @nuno_agent_bot esiste già: la #2 verifica l’installazione reale prima di modificarla.
+
+## Incremento MCP remoto
+
+#2 e #12: implementate le parti server stdio e lettura vault con test di protocollo su directory temporanee. Restano aperte: collegamento Hermes/Telegram, allowlist e verifica sul PC dell’utente. Nessun blocker end-to-end è considerato risolto dal solo test sul runner.

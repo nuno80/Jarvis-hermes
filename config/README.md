@@ -1,7 +1,7 @@
 # Local configuration
 
-The scaffold consumes only the optional environment variable JARVIS_VAULT_PATH.
-It checks directory availability without reading notes; it does not load .env automatically.
+The doctor consumes optional JARVIS_VAULT_PATH. The MCP server additionally uses JARVIS_DEVICE_ID (default local).
+The doctor checks directory availability without reading notes; the MCP server can read visible Markdown notes under that configured root; it does not load .env automatically.
 Keep the actual absolute path in local environment configuration, outside Git.
 
 Future schema validation, provider settings and policy configuration are tracked in issues.
