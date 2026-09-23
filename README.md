@@ -2,7 +2,7 @@
 
 Assistente personale MCP-first basato su Hermes, controllabile da Telegram, con memoria Obsidian e strumenti per Windows/WSL, sviluppo e viaggi.
 
-**Stato:** inizializzazione del progetto. Disponibili documentazione, issue, diagnostica e server MCP locale in sola lettura con test di protocollo. Il collegamento a Hermes/Telegram sul PC resta da verificare.
+**Stato:** inizializzazione del progetto. Disponibili documentazione, issue, diagnostica, server MCP locale in sola lettura e conferma isolata per un effetto simulato. Il collegamento a Hermes/Telegram sul PC resta da verificare.
 
 Bot esistente da riutilizzare: **@nuno_agent_bot**. La presenza del bot è confermata dall'utente; connessione al gateway e host devono ancora essere verificati.
 
@@ -10,6 +10,7 @@ Bot esistente da riutilizzare: **@nuno_agent_bot**. La presenza del bot è confe
 
 - [Specifica V1](docs/specs/jarvis-v1.md)
 - [Server MCP e collegamento locale](docs/mcp-readonly.md)
+- [Confine delle conferme simulate](docs/adr/0004-simulated-approval-gate.md)
 - [Roadmap e 30 issue](docs/roadmap.md)
 - [Cosa verificare al ritorno al PC](docs/return-to-pc.md)
 - [Decisioni architetturali](docs/adr/)
@@ -27,6 +28,8 @@ uv run jarvis doctor --json
 ```
 
 Il doctor legge solo dati del proprio host e verifica la presenza opzionale del vault. Non contatta Telegram, non legge note e non dimostra il funzionamento del tuo PC da remoto.
+
+`uv run jarvis approval-demo` prova localmente una conferma monouso in un database temporaneo. Registra un effetto soltanto simulato, senza Telegram o operazioni sul PC.
 
 ## Organizzazione
 

@@ -6,6 +6,7 @@ import json
 import os
 import platform
 import shutil
+import tempfile
 from pathlib import Path
 
 
@@ -42,7 +43,23 @@ def main() -> int:
     doctor.add_argument("--json", action="store_true", dest="as_json")
     doctor.add_argument("--disk-path", type=Path, default=Path.cwd())
     sub.add_parser("serve", help="Run the local read-only MCP server over stdio")
+    sub.add_parser("approval-demo", help="Run an isolated simulated approval, without Telegram or external effects")
     args = parser.parse_args()
+    if args.command == "approval-demo":
+        from .approval import ApprovalError, ApprovalStore
+        with tempfile.TemporaryDirectory(prefix="jarvis-approval-demo-") as directory:
+            store = ApprovalStore(Path(directory) / "demo.sqlite3")
+            action = {"actor_id": 123456, "target": "demo-only", "arguments": {"message": "test"}}
+            pending = store.request(**action)
+            accepted = store.decide(token=pending["token"], approve=True, **action)
+            try:
+                store.decide(token=pending["token"], approve=True, **action)
+            except ApprovalError as exc:
+                replay = exc.code
+            print(json.dumps({"scope": "isolated_simulation", "digest": pending["digest"],
+                              "first": accepted["status"], "replay": replay,
+                              "effects_recorded": len(store.effects()), "telegram": "not_connected"}))
+        return 0
     if args.command == "serve":
         from .server import main as serve
         serve()
