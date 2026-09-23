@@ -1,0 +1,16 @@
+[build-system]
+requires = ["hatchling==1.27.0"]
+build-backend = "hatchling.build"
+
+[project]
+name = "jarvis-hermes"
+version = "0.1.0"
+description = "MCP-first personal assistant foundations for Hermes"
+requires-python = ">=3.12"
+dependencies = []
+
+[project.scripts]
+jarvis = "jarvis_hermes.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/jarvis_hermes"]
