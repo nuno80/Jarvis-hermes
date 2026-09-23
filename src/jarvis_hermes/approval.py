@@ -11,6 +11,7 @@ import json
 import secrets
 import sqlite3
 import time
+from contextlib import closing, contextmanager
 from pathlib import Path
 from typing import Callable
 
@@ -59,10 +60,12 @@ class ApprovalStore:
                 );
             ''')
 
+    @contextmanager
     def _connect(self):
-        connection = sqlite3.connect(self.path, timeout=10)
-        connection.execute('PRAGMA foreign_keys = ON')
-        return connection
+        with closing(sqlite3.connect(self.path, timeout=10)) as connection:
+            connection.execute('PRAGMA foreign_keys = ON')
+            with connection:
+                yield connection
 
     @staticmethod
     def _actor(actor_id: int):
@@ -94,8 +97,7 @@ class ApprovalStore:
             raise ApprovalError('INVALID_ARGUMENT')
         payload, digest = _payload(target, arguments)
         token_hash = hashlib.sha256(token.encode('utf-8')).hexdigest()
-        connection = self._connect()
-        try:
+        with self._connect() as connection:
             connection.execute('BEGIN IMMEDIATE')
             row = connection.execute(
                 'SELECT actor_id, digest, expires_at, status FROM approvals WHERE token_hash = ?',
@@ -111,13 +113,7 @@ class ApprovalStore:
                                    (token_hash, payload, int(self.clock())))
             status = 'executed' if approve else 'cancelled'
             connection.execute('UPDATE approvals SET status = ? WHERE token_hash = ?', (status, token_hash))
-            connection.commit()
             return {'status': status, 'digest': digest}
-        except BaseException:
-            connection.rollback()
-            raise
-        finally:
-            connection.close()
 
     def effects(self) -> list[dict]:
         """Inspect the local simulation ledger for tests and dry-run adapters."""
