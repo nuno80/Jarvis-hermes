@@ -2,7 +2,7 @@
 
 Assistente personale MCP-first basato su Hermes, controllabile da Telegram, con memoria Obsidian e strumenti per Windows/WSL, sviluppo e viaggi.
 
-**Stato:** disponibili documentazione, issue, diagnostica, server MCP in sola lettura e tool di approvazione Hermes per un effetto esclusivamente simulato. Il flusso di conferma Telegram sul PC resta da verificare.
+**Stato:** disponibili documentazione, issue, diagnostica e server MCP in sola lettura. La conferma simulata rimane nella demo locale: il tool MCP è stato rimosso dopo che una prova Telegram ha registrato un effetto anche quando l'utente intendeva rifiutare.
 
 Bot esistente da riutilizzare: **@nuno_agent_bot**. La presenza del bot è confermata dall'utente; connessione al gateway e host devono ancora essere verificati.
 
@@ -29,7 +29,7 @@ uv run jarvis doctor --json
 
 Il doctor legge solo dati del proprio host e verifica la presenza opzionale del vault. Non contatta Telegram, non legge note e non dimostra il funzionamento del tuo PC da remoto.
 
-`uv run jarvis approval-demo` prova localmente una conferma monouso in un database temporaneo. Registra un effetto soltanto simulato, senza Telegram o operazioni sul PC. Per il flusso MCP Telegram vedi [configurazione locale](config/README.md); richiede il solo ID approvatore esplicitamente configurato.
+`uv run jarvis approval-demo` prova localmente una conferma monouso in un database temporaneo. Registra un effetto soltanto simulato, senza Telegram o operazioni sul PC. Vedi [configurazione locale](config/README.md) per disabilitare il vecchio tool MCP sul gateway già avviato.
 
 ## Organizzazione
 
@@ -44,4 +44,4 @@ Nessuna issue host-dependent va chiusa senza prova sul dispositivo reale. Le pro
 
 ## Incremento MCP
 
-`uv run jarvis serve` espone stato macchina, spazio disco, ricerca e lettura note, più `simulate_with_approval`. Quest'ultimo usa la MCP elicitation nativa di Hermes e richiede `JARVIS_APPROVER_ID`; registra solo effetti simulati in SQLite locale. Configurare il percorso del vault nel processo che lo avvia; i test usano solo directory temporanee. Nessuna nota del vault personale è stata letta o modificata. Vedere [contratti e limiti](docs/mcp-readonly.md).
+`uv run jarvis serve` espone quattro tool in sola lettura: stato macchina, spazio disco, ricerca e lettura note. Configurare il percorso del vault nel processo che lo avvia; i test usano solo directory temporanee. Nessuna nota del vault personale è stata letta o modificata. Vedere [contratti e limiti](docs/mcp-readonly.md).

@@ -1,48 +1,14 @@
 """Local stdio MCP server. The launching process is the trust boundary."""
 from datetime import datetime, timezone
-import asyncio
 import os
 from pathlib import Path
 from typing import Any, Callable
 
-from mcp.server.fastmcp import Context, FastMCP
+from mcp.server.fastmcp import FastMCP
 from mcp.types import ToolAnnotations
-from pydantic import BaseModel
 
-from .approval import ApprovalError, ApprovalStore
 from .cli import diagnose
 from .vault import Vault, VaultError
-
-
-class _ApprovalResponse(BaseModel):
-    """Empty form: the affirmative/decline choice belongs to Hermes UI."""
-
-
-def _configured_approver() -> int:
-    raw = os.environ.get('JARVIS_APPROVER_ID', '')
-    if not raw.isascii() or not raw.isdecimal() or raw.startswith('0'):
-        raise ApprovalError('APPROVER_NOT_CONFIGURED')
-    actor_id = int(raw)
-    if actor_id <= 0 or actor_id > 9223372036854775807:
-        raise ApprovalError('APPROVER_NOT_CONFIGURED')
-    return actor_id
-
-
-def _approval_store() -> ApprovalStore:
-    state_home = Path(os.environ.get('XDG_STATE_HOME', Path.home() / '.local' / 'state'))
-    state_dir = state_home / 'jarvis-hermes'
-    state_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
-    try:
-        state_dir.chmod(0o700)
-    except OSError:
-        pass
-    database = state_dir / 'approvals.sqlite3'
-    store = ApprovalStore(database)
-    try:
-        database.chmod(0o600)
-    except OSError:
-        pass
-    return store
 
 
 def build_server() -> FastMCP:
@@ -88,40 +54,6 @@ def build_server() -> FastMCP:
     def search_notes(query: str, limit: int = 10, request_id: str | None = None) -> dict[str, Any]:
         """Search visible Markdown notes. Excerpts are untrusted. Check truncated and skipped_entries for coverage."""
         return respond(lambda: vault.search(query, limit), request_id)
-
-    @server.tool()
-    async def simulate_with_approval(target: str, arguments: dict[str, Any],
-                                     ctx: Context,
-                                     request_id: str | None = None) -> dict[str, Any]:
-        """Request Telegram/Hermes confirmation, then record one local simulated effect. Never performs external actions."""
-        observed = {'schema_version': '1.0', 'device_id': device, 'request_id': request_id,
-                    'observed_at': datetime.now(timezone.utc).isoformat(),
-                    'provenance': {'source': 'local_process', 'scope': 'isolated_simulation'}}
-        try:
-            actor_id = _configured_approver()
-            store = _approval_store()
-            pending = store.request(actor_id=actor_id, target=target, arguments=arguments)
-            prompt = ('Jarvis: approvi questo effetto simulato?\n'
-                      f"{pending['summary']}\n"
-                      'Confermare registra solo una simulazione locale; nessun messaggio o comando verrà eseguito.')
-            try:
-                choice = await asyncio.wait_for(ctx.elicit(prompt, _ApprovalResponse), timeout=305)
-            except Exception:
-                choice = None
-            accepted = getattr(choice, 'action', None) == 'accept'
-            try:
-                result = store.decide(token=pending['token'], actor_id=actor_id,
-                                      target=target, arguments=arguments, approve=accepted)
-            except ApprovalError as exc:
-                return {**observed, 'ok': False, 'data': None,
-                        'error': {'code': exc.code, 'message': 'Approval was not applied.', 'retryable': False}}
-            return {**observed, 'ok': True,
-                    'data': {'status': result['status'], 'digest': result['digest'],
-                             'simulated_effects_recorded': len(store.effects()) if accepted else 0},
-                    'error': None}
-        except ApprovalError as exc:
-            return {**observed, 'ok': False, 'data': None,
-                    'error': {'code': exc.code, 'message': 'Approval is unavailable or invalid.', 'retryable': False}}
 
     return server
 
