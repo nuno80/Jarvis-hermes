@@ -24,7 +24,7 @@ I parametri sono una descrizione del collegamento, non un file Hermes da sostitu
 
 Ogni risultato applicativo contiene `ok`, `data`, `error`, `schema_version`, `request_id`, `device_id`, `observed_at` e provenienza. Un errore applicativo ha `ok=false`; errori di protocollo/schema sono gestiti dal SDK. `request_id` è un identificatore di correlazione, non credenziale o autorizzazione.
 
-Note visibili `.md`, UTF-8, entro 256 KiB; risposta paginata in massimo 8.000 caratteri con `next_offset` e versione SHA-256. Ogni lettura è fresca; una modifica manuale nella stessa sessione cambia il contenuto e la versione restituiti. Non c'è un indice persistente da sincronizzare.
+Note visibili `.md`, UTF-8, entro 256 KiB; risposta paginata in massimo 8.000 caratteri con `next_offset` e versione SHA-256. Il testo restituito normalizza i fine riga a LF, mentre SHA-256 identifica i byte originali; il file non viene riscritto. Ogni lettura è fresca; una modifica manuale nella stessa sessione cambia il contenuto e la versione restituiti. Non c'è un indice persistente da sincronizzare.
 
 Ricerca case-insensitive per sottostringa su massimo 500 note e 5.000 voci di directory, 20 risultati per richiesta. `truncated` segnala una copertura limitata o ulteriori risultati; `skipped_entries` segnala note/directory non leggibili. Nessuna ricerca semantica, modifica o apprendimento delle preferenze è implementato qui.
 

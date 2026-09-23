@@ -56,7 +56,9 @@ class Vault:
             raw = stream.read(MAX_NOTE_BYTES + 1)
         if len(raw) > MAX_NOTE_BYTES:
             raise VaultError('NOTE_TOO_LARGE', 'The note exceeds the 256 KiB reading limit.')
-        return raw.decode('utf-8'), sha256(raw).hexdigest()
+        # Stable text offsets across Windows/Unix; version still identifies raw bytes.
+        text = raw.decode('utf-8').replace('\r\n', '\n').replace('\r', '\n')
+        return text, sha256(raw).hexdigest()
 
     def read(self, note_id: str, offset: int = 0, limit: int = 8000) -> dict:
         if not 0 <= offset or not 1 <= limit <= 8000:

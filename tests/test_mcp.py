@@ -43,7 +43,7 @@ class MCPTests(unittest.IsolatedAsyncioTestCase):
         with tempfile.TemporaryDirectory() as directory:
             vault = Path(directory)
             note = vault / 'Viaggio.md'
-            note.write_text('# Bali\nBudget 800 euro', encoding='utf-8')
+            note.write_bytes(b'# Bali\r\nBudget 800 euro')
             async with connected(vault) as client:
                 result = await client.call_tool('search_notes', {'query': 'BALI'})
                 data = result.structuredContent
