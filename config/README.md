@@ -48,3 +48,19 @@ Lo strumento:
 - Esegue la redazione automatica dei pattern di segreti (token, api key, password).
 - Distingue errori puntuali: `FILE_NOT_FOUND`, `PERMISSION_DENIED`, `WSL_UNAVAILABLE`, `DEVICE_OFFLINE`.
 
+## Checkpoint e ripristino file di progetto
+
+La modifica sicura di file di progetto avviene tramite tre strumenti MCP con supporto a snapshot/checkpoint isolati:
+1. `create_checkpoint(job_id, project_id, relative_path, device_id)`:
+   - Cattura lo stato iniziale del file (incluso file vuoto/nuovo o file esistente con modifiche non committate dell'utente).
+   - Registra hash iniziale e copia snapshot in `$XDG_STATE_HOME/jarvis-hermes/checkpoints/`.
+2. `write_project_file(checkpoint_id, project_id, relative_path, content, expected_initial_hash, device_id)`:
+   - Verifica che l'hash corrente del file corrisponda a `expected_initial_hash`.
+   - Se il file è stato modificato concurrentemente (ad es. modifica manuale dall'utente), fallisce con errore `CONFLICT` senza sovrascrivere.
+   - Esegue la scrittura atomica del file.
+3. `restore_checkpoint(checkpoint_id, expected_job_id)`:
+   - Ripristina il file al suo stato originale salvato nel checkpoint.
+   - Fornisce il diff unificato tra la versione modificata dal job e la versione ripristinata.
+   - È limitato al solo file del checkpoint e al solo job associato (nessun reset globale del repository).
+
+

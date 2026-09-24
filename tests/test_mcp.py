@@ -142,7 +142,7 @@ class MCPTests(unittest.IsolatedAsyncioTestCase):
             names = {t.name for t in catalog.tools}
             self.assertIn('simulate_with_approval', names)
             self.assertTrue(all(t.annotations.readOnlyHint for t in catalog.tools
-                                if t.name != 'simulate_with_approval'))
+                                if t.name not in ('simulate_with_approval', 'create_checkpoint', 'write_project_file', 'restore_checkpoint')))
 
     async def test_simulated_approval_records_once_and_counts_only_this_decision(self):
         from pathlib import Path
@@ -289,4 +289,84 @@ class MCPTests(unittest.IsolatedAsyncioTestCase):
                 })).structuredContent
                 self.assertFalse(offline['ok'])
                 self.assertEqual(offline['error']['code'], 'DEVICE_OFFLINE')
+
+    async def test_checkpoint_write_and_restore_via_mcp(self):
+        from pathlib import Path
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            state_dir = base / "state"
+            proj_dir = base / "proj"
+            proj_dir.mkdir(parents=True)
+            source_file = proj_dir / "calc.py"
+            source_file.write_text("def add(a, b): return a + b\n", encoding="utf-8")
+
+            cfg_file = base / "projects.json"
+            cfg_file.write_text(f'''{{
+                "devices": {{"test-node": {{"environment": "wsl"}}}},
+                "projects": {{
+                    "my-calc": {{
+                        "paths": {{"test-node": "{proj_dir.as_posix()}"}}
+                    }}
+                }}
+            }}''', encoding="utf-8")
+
+            async with connected(projects_config=cfg_file, state_home=state_dir) as client:
+                # 1. Create checkpoint
+                cp_res = (await client.call_tool('create_checkpoint', {
+                    'job_id': 'job-42',
+                    'project_id': 'my-calc',
+                    'relative_path': 'calc.py',
+                    'device_id': 'test-node'
+                })).structuredContent
+                self.assertTrue(cp_res['ok'])
+                cp_id = cp_res['data']['checkpoint_id']
+                init_hash = cp_res['data']['initial_hash']
+
+                # 2. Safe write
+                write_res = (await client.call_tool('write_project_file', {
+                    'checkpoint_id': cp_id,
+                    'project_id': 'my-calc',
+                    'relative_path': 'calc.py',
+                    'expected_initial_hash': init_hash,
+                    'content': "def add(a, b): return a + b + 1\n",
+                    'device_id': 'test-node'
+                })).structuredContent
+                self.assertTrue(write_res['ok'])
+                self.assertEqual(source_file.read_text(encoding="utf-8"), "def add(a, b): return a + b + 1\n")
+
+                # 3. Restore checkpoint
+                restore_res = (await client.call_tool('restore_checkpoint', {
+                    'checkpoint_id': cp_id,
+                    'expected_job_id': 'job-42'
+                })).structuredContent
+                self.assertTrue(restore_res['ok'])
+                self.assertEqual(source_file.read_text(encoding="utf-8"), "def add(a, b): return a + b\n")
+                self.assertIn("-def add(a, b): return a + b + 1", restore_res['data']['diff'])
+
+                # 4. Conflict detection on external edit
+                cp_res2 = (await client.call_tool('create_checkpoint', {
+                    'job_id': 'job-43',
+                    'project_id': 'my-calc',
+                    'relative_path': 'calc.py',
+                    'device_id': 'test-node'
+                })).structuredContent
+                cp_id2 = cp_res2['data']['checkpoint_id']
+                init_hash2 = cp_res2['data']['initial_hash']
+
+                # External edit happens
+                source_file.write_text("def add(a, b): return manual_edit(a, b)\n", encoding="utf-8")
+
+                # Write fails with CONFLICT
+                conflict_res = (await client.call_tool('write_project_file', {
+                    'checkpoint_id': cp_id2,
+                    'project_id': 'my-calc',
+                    'relative_path': 'calc.py',
+                    'expected_initial_hash': init_hash2,
+                    'content': "def add(a, b): return 0\n",
+                    'device_id': 'test-node'
+                })).structuredContent
+                self.assertFalse(conflict_res['ok'])
+                self.assertEqual(conflict_res['error']['code'], 'CONFLICT')
+                self.assertEqual(source_file.read_text(encoding="utf-8"), "def add(a, b): return manual_edit(a, b)\n")
+
 
