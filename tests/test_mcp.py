@@ -12,13 +12,16 @@ from mcp.types import ElicitResult
 
 
 @asynccontextmanager
-async def connected(vault=None, *, approver_id=None, approval_action='accept', state_home=None, elicit=True):
+async def connected(vault=None, *, approver_id=None, approval_action='accept', state_home=None, elicit=True, projects_config=None):
     env = dict(os.environ)
     env.pop('JARVIS_VAULT_PATH', None)
     env.pop('JARVIS_APPROVER_ID', None)
+    env.pop('JARVIS_PROJECTS_CONFIG', None)
     env['JARVIS_DEVICE_ID'] = 'test-node'
     if vault is not None:
         env['JARVIS_VAULT_PATH'] = str(vault)
+    if projects_config is not None:
+        env['JARVIS_PROJECTS_CONFIG'] = str(projects_config)
     if approver_id is not None:
         env['JARVIS_APPROVER_ID'] = str(approver_id)
     if state_home is not None:
@@ -222,3 +225,68 @@ class MCPTests(unittest.IsolatedAsyncioTestCase):
                 search = (await client.call_tool('search_notes', {'query': 'x'})).structuredContent
                 self.assertEqual(search['data']['matches'], [])
                 self.assertEqual(search['data']['skipped_entries'], 2)
+
+    async def test_read_project_file_mcp_tool(self):
+        from pathlib import Path
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            proj_dir = base / "my projects" / "fantavega"
+            proj_dir.mkdir(parents=True)
+            log_file = proj_dir / "service.log"
+            log_file.write_text("info: started\nsecret_token: 'secret123456'\n", encoding="utf-8")
+            
+            cfg_file = base / "projects.json"
+            cfg_file.write_text(f'''{{
+                "devices": {{
+                    "test-node": {{"environment": "wsl"}},
+                    "other-node": {{"environment": "windows"}}
+                }},
+                "projects": {{
+                    "fantavega": {{
+                        "paths": {{
+                            "test-node": "{proj_dir.as_posix()}"
+                        }}
+                    }}
+                }}
+            }}''', encoding="utf-8")
+
+            async with connected(projects_config=cfg_file) as client:
+                # 1. Success read with secret redaction
+                res = (await client.call_tool('read_project_file', {
+                    'project_id': 'fantavega',
+                    'relative_path': 'service.log',
+                    'device_id': 'test-node'
+                })).structuredContent
+                self.assertTrue(res['ok'])
+                self.assertEqual(res['data']['project_id'], 'fantavega')
+                self.assertIn("info: started", res['data']['content'])
+                self.assertNotIn("secret123456", res['data']['content'])
+                self.assertIn("[REDACTED]", res['data']['content'])
+
+                # 2. File not found
+                missing = (await client.call_tool('read_project_file', {
+                    'project_id': 'fantavega',
+                    'relative_path': 'nonexistent.log',
+                    'device_id': 'test-node'
+                })).structuredContent
+                self.assertFalse(missing['ok'])
+                self.assertEqual(missing['error']['code'], 'FILE_NOT_FOUND')
+
+                # 3. Path traversal blocked
+                traversal = (await client.call_tool('read_project_file', {
+                    'project_id': 'fantavega',
+                    'relative_path': '../projects.json',
+                    'device_id': 'test-node'
+                })).structuredContent
+                self.assertFalse(traversal['ok'])
+                self.assertEqual(traversal['error']['code'], 'PERMISSION_DENIED')
+
+                # 4. Offline/unreachable device
+                offline = (await client.call_tool('read_project_file', {
+                    'project_id': 'fantavega',
+                    'relative_path': 'service.log',
+                    'device_id': 'other-node'
+                })).structuredContent
+                self.assertFalse(offline['ok'])
+                self.assertEqual(offline['error']['code'], 'DEVICE_OFFLINE')
+
