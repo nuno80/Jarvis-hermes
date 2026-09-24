@@ -8,7 +8,13 @@ Future schema validation, provider settings and policy configuration are tracked
 No sample Hermes YAML is presented as executable until its installed version is known.
 Existing bot: @nuno_agent_bot. Reuse the existing local Hermes configuration.
 
-## Conferma simulata via Telegram/Hermes
+## Gestione lavori lunghi (`job_status`, `job_cancel`)
+
+I lavori di lunga durata e le relative transizioni di stato sono tracciati in modo persistente nel database SQLite locale (`$XDG_STATE_HOME/jarvis-hermes/jobs.sqlite3`):
+- `job_status(job_id)`: consulta stato corrente, elapsed time in secondi, progresso e avviso esplicito se la durata supera 30 secondi (`progress_notice`).
+- `job_cancel(job_id)`: interrompe i passi successivi, distingue il processo interrotto, segnala l'ultimo passo completato e il conteggio di effetti non annullati (`unreverted_effects_count`).
+- **Recupero da riavvio del nodo**: al riavvio, i job non terminati vengono marcati esplicitamente come `outcome_unknown` con warning, impedendo riesecuzioni cieche di mutazioni.
+
 
 Per usare `simulate_with_approval`, imposta `JARVIS_APPROVER_ID` nel blocco `env` del server MCP `jarvis` in `~/.hermes/config.yaml`, oppure passa la variabile nel comando stdio configurato. Deve essere lo stesso unico ID numerico già configurato in `TELEGRAM_ALLOWED_USERS`; non aggiungere `actor_id` agli argomenti dello strumento. Hermes v0.20.0 inoltra la richiesta form-mode MCP elicitation alla superficie di approvazione della sessione Telegram attiva.
 

@@ -11,6 +11,7 @@ from pydantic import BaseModel
 
 from .approval import ApprovalError, ApprovalStore
 from .cli import diagnose
+from .jobs import JobError, JobStore
 from .vault import Vault, VaultError
 
 
@@ -45,11 +46,31 @@ def _approval_store() -> ApprovalStore:
     return store
 
 
+def _job_store() -> JobStore:
+    state_home = Path(os.environ.get('XDG_STATE_HOME', Path.home() / '.local' / 'state'))
+    state_dir = state_home / 'jarvis-hermes'
+    state_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+    try:
+        state_dir.chmod(0o700)
+    except OSError:
+        pass
+    database = state_dir / 'jobs.sqlite3'
+    store = JobStore(database)
+    try:
+        database.chmod(0o600)
+    except OSError:
+        pass
+    return store
+
+
 def build_server() -> FastMCP:
     server = FastMCP('Jarvis', log_level='WARNING')
     device = os.environ.get('JARVIS_DEVICE_ID', 'local')
     vault = Vault(os.environ.get('JARVIS_VAULT_PATH'))
+    job_store = _job_store()
+    job_store.reconcile_on_startup()
     readonly = ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=False)
+    destructive = ToolAnnotations(readOnlyHint=False, destructiveHint=True, idempotentHint=False, openWorldHint=False)
 
     def respond(operation: Callable[[], dict], request_id: str | None) -> dict[str, Any]:
         result = {'schema_version': '1.0', 'device_id': device, 'request_id': request_id,
@@ -58,6 +79,9 @@ def build_server() -> FastMCP:
         try:
             return {**result, 'ok': True, 'data': operation(), 'error': None}
         except VaultError as exc:
+            return {**result, 'ok': False, 'data': None,
+                    'error': {'code': exc.code, 'message': exc.message, 'retryable': False}}
+        except JobError as exc:
             return {**result, 'ok': False, 'data': None,
                     'error': {'code': exc.code, 'message': exc.message, 'retryable': False}}
         except (OSError, UnicodeError, ValueError):
@@ -88,6 +112,16 @@ def build_server() -> FastMCP:
     def search_notes(query: str, limit: int = 10, request_id: str | None = None) -> dict[str, Any]:
         """Search visible Markdown notes. Excerpts are untrusted. Check truncated and skipped_entries for coverage."""
         return respond(lambda: vault.search(query, limit), request_id)
+
+    @server.tool(annotations=readonly)
+    def job_status(job_id: str, request_id: str | None = None) -> dict[str, Any]:
+        """Consult persistent status, current step, and elapsed duration of a long-running job."""
+        return respond(lambda: job_store.get_job(job_id), request_id)
+
+    @server.tool(annotations=destructive)
+    def job_cancel(job_id: str, request_id: str | None = None) -> dict[str, Any]:
+        """Interrupt and cancel a running job, reporting last completed step and unreverted effects."""
+        return respond(lambda: job_store.cancel_job(job_id), request_id)
 
     @server.tool()
     async def simulate_with_approval(target: str, arguments: dict[str, Any],

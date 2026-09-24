@@ -139,7 +139,7 @@ class MCPTests(unittest.IsolatedAsyncioTestCase):
             names = {t.name for t in catalog.tools}
             self.assertIn('simulate_with_approval', names)
             self.assertTrue(all(t.annotations.readOnlyHint for t in catalog.tools
-                                if t.name != 'simulate_with_approval'))
+                                if t.name not in ('simulate_with_approval', 'job_cancel')))
 
     async def test_simulated_approval_records_once_and_counts_only_this_decision(self):
         from pathlib import Path
@@ -222,3 +222,42 @@ class MCPTests(unittest.IsolatedAsyncioTestCase):
                 search = (await client.call_tool('search_notes', {'query': 'x'})).structuredContent
                 self.assertEqual(search['data']['matches'], [])
                 self.assertEqual(search['data']['skipped_entries'], 2)
+
+    async def test_job_lifecycle_mcp_tools(self):
+        from pathlib import Path
+        with tempfile.TemporaryDirectory() as directory:
+            state_dir = Path(directory)
+            from jarvis_hermes.jobs import JobStore
+            # Pre-populate a job
+            db_file = state_dir / 'jarvis-hermes' / 'jobs.sqlite3'
+            store = JobStore(db_file)
+            j = store.create_job(actor_id=123, target="test_task", description="test long task")
+            jid = j['job_id']
+            store.update_status(jid, 'running', step='executing phase 1', effects_count=1)
+
+            async with connected(state_home=state_dir) as client:
+                # 1. Query job status (note: on server startup, running jobs are reconciled to outcome_unknown)
+                st = (await client.call_tool('job_status', {'job_id': jid})).structuredContent
+                self.assertTrue(st['ok'])
+                self.assertEqual(st['data']['status'], 'outcome_unknown')
+                self.assertEqual(st['data']['last_step'], 'executing phase 1')
+                self.assertEqual(st['data']['effects_count'], 1)
+                self.assertIn('Node restarted during execution', st['data']['warnings'])
+
+                # 2. Cancel non-existent job
+                missing = (await client.call_tool('job_cancel', {'job_id': 'job-missing'})).structuredContent
+                self.assertFalse(missing['ok'])
+                self.assertEqual(missing['error']['code'], 'NOT_FOUND')
+
+                # 3. Create a fresh running job through store and cancel via MCP
+                j2 = store.create_job(actor_id=123, target="task2", description="second task")
+                jid2 = j2['job_id']
+                store.update_status(jid2, 'running', step='active step', effects_count=2)
+
+                cancel_res = (await client.call_tool('job_cancel', {'job_id': jid2})).structuredContent
+                self.assertTrue(cancel_res['ok'])
+                self.assertEqual(cancel_res['data']['status'], 'cancelled')
+                self.assertEqual(cancel_res['data']['last_completed_step'], 'active step')
+                self.assertEqual(cancel_res['data']['unreverted_effects_count'], 2)
+                self.assertTrue(cancel_res['data']['process_stopped'])
+
