@@ -8,16 +8,14 @@ Future schema validation, provider settings and policy configuration are tracked
 No sample Hermes YAML is presented as executable until its installed version is known.
 Existing bot: @nuno_agent_bot. Reuse the existing local Hermes configuration.
 
-## Disabilitazione della vecchia conferma MCP
+## Conferma simulata via Telegram/Hermes
 
-La prova Telegram ha restituito `executed` quando l'utente intendeva rifiutare, e il registro mostrava tre effetti simulati. Non usare `simulate_with_approval` dalla chat. La versione corrente del server MCP espone soltanto quattro tool in sola lettura.
+Per usare `simulate_with_approval`, imposta `JARVIS_APPROVER_ID` nel blocco `env` del server MCP `jarvis` in `~/.hermes/config.yaml`, oppure passa la variabile nel comando stdio configurato. Deve essere lo stesso unico ID numerico già configurato in `TELEGRAM_ALLOWED_USERS`; non aggiungere `actor_id` agli argomenti dello strumento. Hermes v0.20.0 inoltra la richiesta form-mode MCP elicitation alla superficie di approvazione della sessione Telegram attiva.
 
-Se il gateway usa ancora il vecchio processo, aggiungi temporaneamente questo filtro sotto `mcp_servers.jarvis` in `~/.hermes/config.yaml`:
+Se l'ID manca o non è valido, la richiesta fallisce in modo chiuso. Il registro SQLite è in `$XDG_STATE_HOME/jarvis-hermes/approvals.sqlite3` oppure `~/.local/state/jarvis-hermes/approvals.sqlite3`, fuori dal repository.
 
-```yaml
-    tools:
-      exclude:
-        - simulate_with_approval
-```
+Questo server non espone resources né prompts. FastMCP 1.30 pubblicizza comunque quelle capacità, quindi Hermes aggiunge quattro wrapper (`list_resources`, `read_resource`, `list_prompts`, `get_prompt`) ai cinque tool reali: nove voci in `tools list`. Disattivarli con `tools.resources: false` e `tools.prompts: false` sotto `mcp_servers.jarvis`, come documentato nel riferimento di configurazione MCP di Hermes. Dopo la modifica serve un `/reload_mcp`.
 
-Aggiorna il repository, esegui `/reload_mcp` e verifica con `hermes mcp test jarvis` che il tool non appaia. `JARVIS_APPROVER_ID` può essere rimosso dal blocco `env` dopo il riavvio: non serve ai quattro tool in sola lettura. Il database delle prove rimane locale sotto `$XDG_STATE_HOME/jarvis-hermes/approvals.sqlite3` (oppure `~/.local/state/jarvis-hermes/approvals.sqlite3`).
+L'esito del tool riporta `decision` (`accept`, `decline`, `unavailable`) e `effects_recorded` per quella singola decisione: 1 se approvata, 0 se annullata. Il valore non è il totale del registro. **Ogni chiamata chiede una nuova conferma**: il cancello impedisce il riuso dello stesso consenso, non la ripetizione della domanda. Se l'agente ripete la richiesta, riceverai un secondo prompt e una seconda approvazione produrrà un secondo effetto. Il tool resta limitato a effetti simulati.
+
+Dopo aver modificato config.yaml, esegui `/reload_mcp` in Hermes e avvia una nuova sessione Telegram. Verifica con `hermes mcp test jarvis` che il catalogo contenga i quattro tool in sola lettura più `simulate_with_approval`, e ricorda che quest'ultimo non mostra `readOnlyHint`.

@@ -113,7 +113,9 @@ class ApprovalStore:
                                    (token_hash, payload, int(self.clock())))
             status = 'executed' if approve else 'cancelled'
             connection.execute('UPDATE approvals SET status = ? WHERE token_hash = ?', (status, token_hash))
-            return {'status': status, 'digest': digest}
+            # Count for THIS decision, never the ledger total: a caller must not read a
+            # shared count as proof its own action executed (issue #3).
+            return {'status': status, 'digest': digest, 'effects_recorded': 1 if approve else 0}
 
     def effects(self) -> list[dict]:
         """Inspect the local simulation ledger for tests and dry-run adapters."""

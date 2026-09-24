@@ -33,7 +33,10 @@ class ApprovalTests(unittest.TestCase):
         self.assertIn('demo-target', pending['summary'])
         self.assertIn('hello', pending['summary'])
         reopened = ApprovalStore(self.path, clock=lambda: self.now)
-        self.assertEqual(reopened.decide(token=pending['token'], approve=True, **self.action)['status'], 'executed')
+        executed = reopened.decide(token=pending['token'], approve=True, **self.action)
+        self.assertEqual(executed['status'], 'executed')
+        # The count must describe this decision, not the whole ledger (#3).
+        self.assertEqual(executed['effects_recorded'], 1)
         with self.assertRaises(ApprovalError) as caught:
             self.decide(pending['token'])
         self.assertEqual(caught.exception.code, 'APPROVAL_USED')
@@ -51,7 +54,9 @@ class ApprovalTests(unittest.TestCase):
 
     def test_cancel_and_expiry_are_terminal(self):
         cancelled = self.request()
-        self.assertEqual(self.store.decide(token=cancelled['token'], approve=False, **self.action)['status'], 'cancelled')
+        declined = self.store.decide(token=cancelled['token'], approve=False, **self.action)
+        self.assertEqual(declined['status'], 'cancelled')
+        self.assertEqual(declined['effects_recorded'], 0)
         with self.assertRaises(ApprovalError) as caught:
             self.decide(cancelled['token'])
         self.assertEqual(caught.exception.code, 'APPROVAL_USED')
@@ -66,12 +71,14 @@ class ApprovalTests(unittest.TestCase):
         pending = self.request()
         def confirm(_):
             try:
-                return self.decide(pending['token'])['status']
+                return self.decide(pending['token'])
             except ApprovalError as exc:
                 return exc.code
         with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
             results = list(pool.map(confirm, range(8)))
-        self.assertEqual(results.count('executed'), 1)
+        statuses = [r['status'] for r in results if isinstance(r, dict)]
+        self.assertEqual(statuses, ['executed'])
+        self.assertEqual(sum(r['effects_recorded'] for r in results if isinstance(r, dict)), 1)
         self.assertEqual(results.count('APPROVAL_USED'), 7)
         self.assertEqual(len(self.store.effects()), 1)
 

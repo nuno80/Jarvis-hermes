@@ -57,8 +57,9 @@ def main() -> int:
             except ApprovalError as exc:
                 replay = exc.code
             print(json.dumps({"scope": "isolated_simulation", "digest": pending["digest"],
-                              "first": accepted["status"], "replay": replay,
-                              "effects_recorded": len(store.effects()), "telegram": "not_connected"}))
+                              "first": accepted["status"], "effects_recorded": accepted["effects_recorded"],
+                              "replay": replay, "ledger_total": len(store.effects()),
+                              "telegram": "not_connected"}))
         return 0
     if args.command == "serve":
         from .server import main as serve

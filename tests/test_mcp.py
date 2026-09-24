@@ -1,25 +1,41 @@
 import os
+import sqlite3
 import sys
 import tempfile
 import unittest
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, closing
 from datetime import timedelta
 
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
+from mcp.types import ElicitResult
 
 
 @asynccontextmanager
-async def connected(vault=None):
+async def connected(vault=None, *, approver_id=None, approval_action='accept', state_home=None, elicit=True):
     env = dict(os.environ)
     env.pop('JARVIS_VAULT_PATH', None)
+    env.pop('JARVIS_APPROVER_ID', None)
     env['JARVIS_DEVICE_ID'] = 'test-node'
     if vault is not None:
         env['JARVIS_VAULT_PATH'] = str(vault)
+    if approver_id is not None:
+        env['JARVIS_APPROVER_ID'] = str(approver_id)
+    if state_home is not None:
+        env['XDG_STATE_HOME'] = str(state_home)
     params = StdioServerParameters(command=sys.executable, args=['-m', 'jarvis_hermes', 'serve'], env=env)
     with tempfile.TemporaryFile(mode='w+') as errors:
         async with stdio_client(params, errlog=errors) as (read, write):
-            async with ClientSession(read, write, read_timeout_seconds=timedelta(seconds=15)) as session:
+            kwargs = {}
+            if elicit:
+                async def callback(context, request):
+                    if 'Simulated effect' not in request.message:
+                        raise AssertionError('approval prompt must include action summary')
+                    return ElicitResult(action=approval_action,
+                                        content={} if approval_action == 'accept' else None)
+                kwargs['elicitation_callback'] = callback
+            async with ClientSession(read, write, read_timeout_seconds=timedelta(seconds=15),
+                                     **kwargs) as session:
                 await session.initialize()
                 yield session
 
@@ -120,8 +136,69 @@ class MCPTests(unittest.IsolatedAsyncioTestCase):
             machine = (await client.call_tool('device_status', {'device_id': 'another-node'})).structuredContent
             self.assertEqual(machine['error']['code'], 'DEVICE_NOT_FOUND')
             catalog = await client.list_tools()
-            self.assertEqual({t.name for t in catalog.tools}, {'device_status', 'disk_usage', 'read_note', 'search_notes'})
-            self.assertTrue(all(t.annotations.readOnlyHint for t in catalog.tools))
+            names = {t.name for t in catalog.tools}
+            self.assertIn('simulate_with_approval', names)
+            self.assertTrue(all(t.annotations.readOnlyHint for t in catalog.tools
+                                if t.name != 'simulate_with_approval'))
+
+    async def test_simulated_approval_records_once_and_counts_only_this_decision(self):
+        from pathlib import Path
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            async with connected(approver_id=424242, state_home=root) as client:
+                tool = next(t for t in (await client.list_tools()).tools if t.name == 'simulate_with_approval')
+                self.assertNotIn('actor_id', tool.inputSchema['properties'])
+                first = (await client.call_tool('simulate_with_approval', {
+                    'target': 'demo-target', 'arguments': {'message': 'hello'}})).structuredContent
+                self.assertTrue(first['ok'], first)
+                self.assertEqual(first['data']['status'], 'executed')
+                self.assertEqual(first['data']['effects_recorded'], 1)
+                self.assertEqual(first['data']['decision'], 'accept')
+                self.assertNotIn('token', str(first))
+                # A second confirmation is its own decision: it must not report the first
+                # effect as if this call had produced it (#3 regression).
+                second = (await client.call_tool('simulate_with_approval', {
+                    'target': 'demo-target', 'arguments': {'message': 'hello'}})).structuredContent
+                self.assertEqual(second['data']['effects_recorded'], 1)
+            with closing(sqlite3.connect(root / 'jarvis-hermes' / 'approvals.sqlite3')) as db:
+                self.assertEqual(db.execute('SELECT COUNT(*) FROM simulated_effects').fetchone()[0], 2)
+
+    async def test_declined_mcp_elicitation_records_no_simulated_effect(self):
+        from pathlib import Path
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            async with connected(approver_id=424242, approval_action='decline', state_home=root) as client:
+                data = (await client.call_tool('simulate_with_approval', {
+                    'target': 'demo-target', 'arguments': {'message': 'hello'}})).structuredContent
+                self.assertTrue(data['ok'], data)
+                self.assertEqual(data['data']['status'], 'cancelled')
+                self.assertEqual(data['data']['effects_recorded'], 0)
+                self.assertEqual(data['data']['decision'], 'decline')
+            with closing(sqlite3.connect(root / 'jarvis-hermes' / 'approvals.sqlite3')) as db:
+                self.assertEqual(db.execute('SELECT COUNT(*) FROM simulated_effects').fetchone()[0], 0)
+
+    async def test_client_without_elicitation_support_cannot_execute(self):
+        # No callback means no consent surface: the server must fail closed, not assume
+        # an affirmative answer because it could not ask (#3).
+        from pathlib import Path
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            async with connected(approver_id=424242, state_home=root, elicit=False) as client:
+                data = (await client.call_tool('simulate_with_approval', {
+                    'target': 'demo-target', 'arguments': {'message': 'hello'}})).structuredContent
+                self.assertTrue(data['ok'], data)
+                self.assertEqual(data['data']['status'], 'cancelled')
+                self.assertEqual(data['data']['effects_recorded'], 0)
+                self.assertEqual(data['data']['decision'], 'unavailable')
+            with closing(sqlite3.connect(root / 'jarvis-hermes' / 'approvals.sqlite3')) as db:
+                self.assertEqual(db.execute('SELECT COUNT(*) FROM simulated_effects').fetchone()[0], 0)
+
+    async def test_simulated_approval_fails_closed_without_configured_approver(self):
+        async with connected() as client:
+            data = (await client.call_tool('simulate_with_approval', {
+                'target': 'demo-target', 'arguments': {'message': 'hello'}})).structuredContent
+            self.assertFalse(data['ok'])
+            self.assertEqual(data['error']['code'], 'APPROVER_NOT_CONFIGURED')
 
     async def test_disk_usage_is_timestamped_and_device_scoped(self):
         async with connected() as client:

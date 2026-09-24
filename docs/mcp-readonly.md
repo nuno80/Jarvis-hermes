@@ -1,6 +1,6 @@
 # MCP locale in sola lettura
 
-Incremento per #2 e #12. Espone `device_status`, `disk_usage`, `search_notes`, `read_note` attraverso il protocollo MCP stdio. Il client MCP avvia il processo; stdout è riservato al protocollo. Nessun endpoint HTTP, secondo gateway Telegram o comando remoto è avviato.
+Incremento per #2, #3 e #12. Espone `device_status`, `disk_usage`, `search_notes`, `read_note` e `simulate_with_approval` attraverso il protocollo MCP stdio. Il client MCP avvia il processo; stdout è riservato al protocollo. Nessun endpoint HTTP, secondo gateway Telegram o comando remoto è avviato.
 
 ## Avvio e configurazione
 
@@ -14,7 +14,8 @@ L'avvio manuale resta in ascolto su stdin: è normale che non stampi una rispost
 - command: percorso assoluto all'interprete Python della `.venv` di questo progetto;
 - args: `-m`, `jarvis_hermes`, `serve`;
 - env `JARVIS_DEVICE_ID`: identificatore locale, default `local`;
-- env `JARVIS_VAULT_PATH`: percorso assoluto del vault, nello stesso ambiente del processo.
+- env `JARVIS_VAULT_PATH`: percorso assoluto del vault, nello stesso ambiente del processo;
+- env `JARVIS_APPROVER_ID`: ID Telegram dell'unico proprietario, richiesto soltanto da `simulate_with_approval`.
 
 I parametri sono una descrizione del collegamento, non un file Hermes da sostituire alla cieca. Se Hermes gira su Windows e il server in WSL, prima validare il bridge fra i due ambienti. Nessuna modifica alla configurazione o al token del bot esistente è stata effettuata.
 
@@ -30,10 +31,10 @@ Ricerca case-insensitive per sottostringa su massimo 500 note e 5.000 voci di di
 
 File/cartelle nascosti, symlink, junction, hardlink, file non regolari e percorsi esterni sono esclusi. Nessun percorso assoluto compare nei risultati. Il contenuto delle note è marcato non fidato: non può concedere permessi. Questi controlli applicativi assumono un filesystem locale sotto controllo del proprietario, senza processi ostili che sostituiscono simultaneamente le directory; non sono un sandbox OS contro race su cartelle.
 
-La fiducia è nel processo che avvia il server e nella configurazione locale. Il server non autentica utenti Telegram: l'allowlist e il flusso completo del gateway restano da verificare in #2. Non esporre stdio tramite un bridge remoto non autenticato.
+La fiducia è nel processo che avvia il server e nella configurazione locale. Il server non autentica utenti Telegram: l'allowlist e il flusso completo del gateway restano da verificare in #2. `simulate_with_approval` non accetta `actor_id` né un flag di approvazione: l'identità viene solo da `JARVIS_APPROVER_ID` e la decisione solo dalla risposta del client all'elicitation, con esito fail-closed (`decline`) per timeout ed errori. Ogni chiamata è una nuova richiesta di conferma: `effects_recorded` descrive quella singola decisione, mai il totale del registro. Non esporre stdio tramite un bridge remoto non autenticato.
 
 ## Verifica
 
-`uv run python -m unittest discover -s tests -v` avvia un vero client MCP e un sottoprocesso server, usa soltanto vault temporanei e prova catalogo, status/disco, errori, letture fresche, paginazione, ricerca oltre la prima pagina, traversal, file nascosti, link e limiti dimensionali. Un test symlink può risultare skipped se l'OS non concede tale capacità all'account: leggere il riepilogo CI.
+`uv run python -m unittest discover -s tests -v` avvia un vero client MCP e un sottoprocesso server, usa soltanto vault temporanei e prova catalogo, status/disco, errori, letture fresche, paginazione, ricerca oltre la prima pagina, traversal, file nascosti, link e limiti dimensionali. Gli stessi test coprono l'approvazione simulata con un client MCP reale: accept registra un effetto, decline non ne registra nessuno, l'identità di ripiego e l'approvatore mancante falliscono in modo chiuso. Un test symlink può risultare skipped se l'OS non concede tale capacità all'account: leggere il riepilogo CI.
 
 Il test sul runner non dimostra il collegamento a @nuno_agent_bot, né l'accesso al vault reale. #2 e #12 restano aperte fino alle prove end-to-end richieste.

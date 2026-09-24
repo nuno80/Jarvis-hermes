@@ -8,4 +8,4 @@
 6. Imposta JARVIS_VAULT_PATH al percorso assoluto locale del vault per verificare la presenza della directory; il doctor non legge le note; il server MCP può cercare e leggere le note se avviato con questo percorso.
 7. Segui l'issue JARVIS-02 per Telegram → Hermes → MCP e le successive per conferme, Windows/WSL e GUI.
 
-Il codice attuale comprende un server MCP locale in sola lettura. Non collega ancora Telegram, non usa API cloud e non esegue comandi remoti. Segui docs/mcp-readonly.md per il collegamento dopo aver ispezionato Hermes.
+Il codice attuale comprende un server MCP locale con quattro tool in sola lettura e la conferma monouso di un effetto simulato. Non collega ancora Telegram a effetti reali, non usa API cloud e non esegue comandi remoti. Segui docs/mcp-readonly.md per il collegamento dopo aver ispezionato Hermes.
