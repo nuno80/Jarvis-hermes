@@ -117,6 +117,20 @@ L'esecuzione di comandi amministrativi e da terminale non è vincolata a una whi
   - **Nessuna concessione da parte di classificazioni LLM**: la classificazione è deterministica lato server; prompt injection o asserzioni del modello non possono concedere permessi né scavalcare la policy.
   - **Target protetti immutabili**: file di policy, file di configurazione (`config.yaml`, `projects.json`), secret store (`.env`, credentials, chiavi SSH, `shadow`, database di stato) non sono mai accessibili o sovrascrivibili tramite `run_command` (`PROTECTED_TARGET_DENIED`).
 
+## Interazione pagina web e consenso invii esterni (`read_web_page`, `submit_web_form`, J07, C3, AT05)
+
+L'interazione con pagine web e l'invio di moduli esterni avvengono sotto controllo rigoroso del consenso:
+- `read_web_page(url, timeout_seconds)`:
+  - Scarica la pagina ed estrae titolo, testo e moduli HTML (`<form>`, input, campi textarea).
+  - **Dati non fidati**: il contenuto della pagina web è trattato puramente come dato grezzo e mai come istruzioni eseguibili. Eventuali tentativi di prompt injection nella pagina non possono concedere privilegi o bypassare i gate di sicurezza.
+- `submit_web_form(action_url, method, fields, ctx, page_url, timeout_seconds)`:
+  - Richiede approvazione Telegram tramite MCP elicitation (o token monouso dallo store).
+  - Mostra il riepilogo approvato con l'URL di destinazione esatto, metodo HTTP, bozza dei campi compilati e digest SHA-256.
+  - **Redazione credenziali**: password, token, chiavi o segreti inseriti nei campi vengono mascherati (`[REDACTED]`) nei log e nei riepiloghi utente.
+  - **Vincolo atomico**: se l'URL o i parametri inviati differiscono anche di un solo carattere rispetto al riepilogo approvato, l'invio è respinto (`APPROVAL_DENIED`).
+  - **Esito incerto senza retry ciechi (AT04 / C2)**: se durante l'invio la connessione cade o si verifica un timeout, l'operazione restituisce `OUTCOME_UNKNOWN` e non viene ritentata ciecamente per evitare doppi invii indesiderati.
+
+
 
 
 

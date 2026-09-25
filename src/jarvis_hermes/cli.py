@@ -47,6 +47,7 @@ def main() -> int:
     push_demo = sub.add_parser("push-demo", help="Run a push approval demo against an isolated local bare repository")
     gui_demo = sub.add_parser("gui-demo", help="Run an isolated GUI demo (or status check if locked/non-interactive)")
     cmd_demo = sub.add_parser("command-demo", help="Run an isolated administrative command demo showing policy enforcement")
+    web_demo = sub.add_parser("web-demo", help="Run an isolated web page read, fill, and consent-gated submission demo")
     args = parser.parse_args()
     if args.command == "approval-demo":
         from .approval import ApprovalError, ApprovalStore
@@ -213,6 +214,110 @@ def main() -> int:
                     "requires_approval": classification.requires_approval,
                     "executed": approved_res["exit_code"] == 0,
                 }
+            }))
+        return 0
+    if args.command == "web-demo":
+        import http.server
+        import socketserver
+        import threading
+        from urllib.parse import parse_qs, urlparse
+        from .approval import ApprovalStore
+        from .web import WebManager, WebError
+
+        # Start a local test server
+        received_posts = []
+
+        class DemoHandler(http.server.BaseHTTPRequestHandler):
+            def log_message(self, format, *args):
+                pass
+
+            def do_GET(self):
+                body = """<!DOCTYPE html>
+                <html><head><title>Demo Form Page</title></head>
+                <body>
+                    <h1>Test Feedback</h1>
+                    <form action="/demo-submit" method="POST">
+                        <input type="text" name="user" value="Alice" />
+                        <input type="email" name="email" value="alice@example.com" />
+                        <input type="password" name="password" value="secret123" />
+                        <textarea name="feedback">Tutto ottimo</textarea>
+                    </form>
+                </body></html>"""
+                self.send_response(200)
+                self.send_header("Content-Type", "text/html; charset=utf-8")
+                self.send_header("Content-Length", str(len(body.encode("utf-8"))))
+                self.end_headers()
+                self.wfile.write(body.encode("utf-8"))
+
+            def do_POST(self):
+                content_len = int(self.headers.get("Content-Length", 0))
+                data = self.rfile.read(content_len).decode("utf-8")
+                received_posts.append(parse_qs(data))
+                resp = b'{"status": "ok"}'
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(resp)))
+                self.end_headers()
+                self.wfile.write(resp)
+
+        class ThreadedServer(socketserver.ThreadingMixIn, http.server.HTTPServer):
+            daemon_threads = True
+
+        server = ThreadedServer(("127.0.0.1", 0), DemoHandler)
+        port = server.server_address[1]
+        t = threading.Thread(target=server.serve_forever, daemon=True)
+        t.start()
+
+        with tempfile.TemporaryDirectory(prefix="jarvis-web-demo-") as directory:
+            store = ApprovalStore(Path(directory) / "approvals.sqlite3")
+            manager = WebManager(approval_store=store)
+            actor_id = 12345
+            page_url = f"http://127.0.0.1:{port}/demo-form"
+
+            # 1. Read and draft
+            draft = manager.draft_form_submission(
+                page_url=page_url,
+                form_index=0,
+                fields={"user": "Alice", "feedback": "Modifica approvata", "password": "mypassword"},
+                actor_id=actor_id
+            )
+
+            # 2. Blocked without approval token
+            blocked_without_token = False
+            try:
+                manager.submit_web_form(
+                    action_url=draft["action_url"],
+                    method=draft["method"],
+                    fields=draft["draft"],
+                    approval_token=None,
+                    actor_id=actor_id
+                )
+            except WebError as exc:
+                if exc.code == "APPROVAL_REQUIRED":
+                    blocked_without_token = True
+
+            # 3. Successful submission with token
+            res = manager.submit_web_form(
+                action_url=draft["action_url"],
+                method=draft["method"],
+                fields=draft["draft"],
+                approval_token=draft["approval_token"],
+                actor_id=actor_id
+            )
+
+            server.shutdown()
+            server.server_close()
+
+            print(json.dumps({
+                "scope": "isolated_web_demo",
+                "page_url": page_url,
+                "draft_status": draft["status"],
+                "summary_masked": "[REDACTED]" in draft["summary_text"] and "mypassword" not in draft["summary_text"],
+                "blocked_without_approval": blocked_without_token,
+                "submitted": res["submitted"],
+                "status_code": res["status_code"],
+                "received_count": len(received_posts),
+                "digest": draft["digest"]
             }))
         return 0
     if args.command == "serve":

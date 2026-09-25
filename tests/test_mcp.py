@@ -32,7 +32,7 @@ async def connected(vault=None, *, approver_id=None, approval_action='accept', s
             kwargs = {}
             if elicit:
                 async def callback(context, request):
-                    if 'Simulated effect' not in request.message and 'autorizzi il push' not in request.message and 'autorizzi l\'esecuzione del comando' not in request.message:
+                    if 'Simulated effect' not in request.message and 'autorizzi il push' not in request.message and 'autorizzi l\'esecuzione del comando' not in request.message and 'autorizzi l\'invio esterno' not in request.message:
                         raise AssertionError('approval prompt must include action summary')
                     return ElicitResult(action=approval_action,
                                         content={} if approval_action == 'accept' else None)
@@ -142,7 +142,7 @@ class MCPTests(unittest.IsolatedAsyncioTestCase):
             names = {t.name for t in catalog.tools}
             self.assertIn('simulate_with_approval', names)
             self.assertTrue(all(t.annotations.readOnlyHint for t in catalog.tools
-                                if t.name not in ('simulate_with_approval', 'git_push', 'job_cancel', 'create_checkpoint', 'write_project_file', 'restore_checkpoint', 'commit_project_changes', 'execute_gui_action', 'run_command')))
+                                if t.name not in ('simulate_with_approval', 'git_push', 'job_cancel', 'create_checkpoint', 'write_project_file', 'restore_checkpoint', 'commit_project_changes', 'execute_gui_action', 'run_command', 'submit_web_form')))
 
     async def test_simulated_approval_records_once_and_counts_only_this_decision(self):
         from pathlib import Path
@@ -593,6 +593,88 @@ class MCPTests(unittest.IsolatedAsyncioTestCase):
                 self.assertTrue(res_maint['ok'])
                 self.assertEqual(res_maint['data']['category'], 'UNPARSEABLE_COMPLEX')
                 self.assertTrue(res_maint['data']['requires_approval'])
+
+    async def test_web_tools_via_mcp(self):
+        import http.server
+        import socketserver
+        import threading
+        from pathlib import Path
+        from urllib.parse import parse_qs
+
+        posts = []
+        class WebHandler(http.server.BaseHTTPRequestHandler):
+            def log_message(self, format, *args):
+                pass
+            def do_GET(self):
+                body = """<!DOCTYPE html><html><head><title>Test Page</title></head><body>
+                    <h1>Test Page</h1>
+                    <form action="/submit" method="POST">
+                        <input type="text" name="title" value="Hello" />
+                    </form>
+                </body></html>"""
+                self.send_response(200)
+                self.send_header("Content-Type", "text/html; charset=utf-8")
+                self.send_header("Content-Length", str(len(body.encode("utf-8"))))
+                self.end_headers()
+                self.wfile.write(body.encode("utf-8"))
+            def do_POST(self):
+                clen = int(self.headers.get("Content-Length", 0))
+                posts.append(self.rfile.read(clen).decode("utf-8"))
+                self.send_response(200)
+                self.end_headers()
+                self.wfile.write(b"OK")
+
+        class ThreadedServer(socketserver.ThreadingMixIn, http.server.HTTPServer):
+            daemon_threads = True
+
+        server = ThreadedServer(("127.0.0.1", 0), WebHandler)
+        port = server.server_address[1]
+        t = threading.Thread(target=server.serve_forever, daemon=True)
+        t.start()
+
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            state_dir = base / "state"
+
+            # 1. Read web page via MCP tool
+            async with connected(approver_id=12345, state_home=state_dir) as client:
+                catalog = await client.list_tools()
+                names = {t.name for t in catalog.tools}
+                self.assertIn('read_web_page', names)
+                self.assertIn('submit_web_form', names)
+
+                read_res = (await client.call_tool('read_web_page', {
+                    'url': f'http://127.0.0.1:{port}/'
+                })).structuredContent
+                self.assertTrue(read_res['ok'])
+                self.assertIn('Test Page', read_res['data']['title'])
+                self.assertEqual(len(read_res['data']['forms']), 1)
+
+            # 2. Submit web form with approval
+            async with connected(approver_id=12345, approval_action='accept', state_home=state_dir) as client:
+                submit_res = (await client.call_tool('submit_web_form', {
+                    'action_url': f'http://127.0.0.1:{port}/submit',
+                    'method': 'POST',
+                    'fields': {'title': 'Updated Title'}
+                })).structuredContent
+                self.assertTrue(submit_res['ok'])
+                self.assertTrue(submit_res['data']['submitted'])
+                self.assertEqual(len(posts), 1)
+                self.assertIn('title=Updated+Title', posts[0])
+
+            # 3. Submit web form with decline
+            async with connected(approver_id=12345, approval_action='decline', state_home=state_dir) as client:
+                deny_res = (await client.call_tool('submit_web_form', {
+                    'action_url': f'http://127.0.0.1:{port}/submit',
+                    'method': 'POST',
+                    'fields': {'title': 'Should Not Arrive'}
+                })).structuredContent
+                self.assertFalse(deny_res['ok'])
+                self.assertEqual(deny_res['error']['code'], 'APPROVAL_DECLINED')
+                self.assertEqual(len(posts), 1)
+
+        server.shutdown()
+        server.server_close()
 
 
 
