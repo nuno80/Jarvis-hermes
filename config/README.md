@@ -94,5 +94,17 @@ L'invio sul remoto di modifiche (`git_push`) richiede consenso esplicito e vinco
    - Verifica lo stato del remoto prima/dopo l'operazione (`remote_verified`) per garantire coerenza anche a fronte di timeout di rete o errori parziali.
    - Nessun comando arbitrario o bypass shell è abilitato.
 
+## Automazione GUI Windows mediata da policy (J07, D04, AT10)
+
+L'interazione con l'interfaccia grafica Windows avviene tramite policy protetta:
+- `gui_status()`: verifica se la sessione Windows è interattiva (desktop non bloccato) e legge lo stato della finestra attiva.
+- `execute_gui_action(app_name, action)`:
+  - Consente l'avvio e l'ispezione solo di applicazioni grafiche innocue e non elevate (es. `notepad`, `calc`).
+  - Blocca categoricamente shell, interpreti o strumenti di sistema (`cmd.exe`, `powershell.exe`, `regedit.exe`, ecc.) prevenendo bypass delle policy o esecuzioni come amministratore permanente.
+  - Verifica la disponibilità della sessione grafica interattiva (`check_desktop_interactive`): se il desktop è bloccato, disconnesso o non disponibile (criterio AT10), dichiara esplicitamente `DESKTOP_UNAVAILABLE` senza simulare successi fittizi.
+  - Acquisisce un lock esclusivo (`gui_job.lock`), consentendo un solo job GUI contemporaneo (`CONCURRENT_GUI_JOB`).
+  - Cattura screenshot prima e dopo l'operazione (`before_*.png`, `after_*.png`), salvandoli localmente in `$XDG_STATE_HOME/jarvis-hermes/screenshots/` con permessi ristretti (0700).
+
+
 
 

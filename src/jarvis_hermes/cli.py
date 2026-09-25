@@ -45,6 +45,7 @@ def main() -> int:
     sub.add_parser("serve", help="Run the local read-only MCP server over stdio")
     sub.add_parser("approval-demo", help="Run an isolated simulated approval, without Telegram or external effects")
     push_demo = sub.add_parser("push-demo", help="Run a push approval demo against an isolated local bare repository")
+    gui_demo = sub.add_parser("gui-demo", help="Run an isolated GUI demo (or status check if locked/non-interactive)")
     args = parser.parse_args()
     if args.command == "approval-demo":
         from .approval import ApprovalError, ApprovalStore
@@ -117,6 +118,41 @@ def main() -> int:
                 "branch": res["branch"],
                 "remote": res["remote"]
             }))
+        return 0
+    if args.command == "gui-demo":
+        from .gui import GuiAutomationManager, GuiError
+        with tempfile.TemporaryDirectory(prefix="jarvis-gui-demo-") as directory:
+            manager = GuiAutomationManager(
+                screenshots_dir=Path(directory) / "screenshots",
+                lock_path=Path(directory) / "gui.lock",
+            )
+            status = manager.get_gui_status()
+            if status["session_state"] != "interactive":
+                print(json.dumps({
+                    "scope": "isolated_gui_demo",
+                    "status": "unavailable",
+                    "detail": status["detail"],
+                    "action_executed": False,
+                }))
+                return 0
+            try:
+                res = manager.execute_gui_action(app_name="notepad", action="open_and_inspect")
+                print(json.dumps({
+                    "scope": "isolated_gui_demo",
+                    "status": "success",
+                    "app_name": res["app_name"],
+                    "action": res["action"],
+                    "has_before_screenshot": bool(res["screenshots"]["before"]),
+                    "has_after_screenshot": bool(res["screenshots"]["after"]),
+                    "observed_state": res["interaction"]["observed_state"],
+                }))
+            except GuiError as exc:
+                print(json.dumps({
+                    "scope": "isolated_gui_demo",
+                    "status": "error",
+                    "code": exc.code,
+                    "message": exc.message,
+                }))
         return 0
     if args.command == "serve":
         from .server import main as serve

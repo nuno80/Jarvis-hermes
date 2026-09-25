@@ -12,6 +12,7 @@ from pydantic import BaseModel
 from .approval import ApprovalError, ApprovalStore
 from .checkpoint import CheckpointError, CheckpointManager
 from .cli import diagnose
+from .gui import GuiAutomationManager, GuiError
 from .jobs import JobError, JobStore
 from .projects import ProjectError, ProjectRegistry
 from .vault import Vault, VaultError
@@ -76,6 +77,7 @@ def build_server() -> FastMCP:
     approval_store = _approval_store()
     project_registry = ProjectRegistry(projects_config, current_device=device, current_environment=current_env, approval_store=approval_store)
     checkpoint_manager = CheckpointManager()
+    gui_manager = GuiAutomationManager()
     readonly = ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=False)
     destructive = ToolAnnotations(readOnlyHint=False, destructiveHint=True, idempotentHint=False, openWorldHint=False)
 
@@ -95,6 +97,9 @@ def build_server() -> FastMCP:
             return {**result, 'ok': False, 'data': None,
                     'error': {'code': exc.code, 'message': exc.message, 'retryable': False}}
         except CheckpointError as exc:
+            return {**result, 'ok': False, 'data': None,
+                    'error': {'code': exc.code, 'message': exc.message, 'retryable': False}}
+        except GuiError as exc:
             return {**result, 'ok': False, 'data': None,
                     'error': {'code': exc.code, 'message': exc.message, 'retryable': False}}
         except (OSError, UnicodeError, ValueError):
@@ -126,6 +131,17 @@ def build_server() -> FastMCP:
                           offset: int = 0, limit: int = 8000, request_id: str | None = None) -> dict[str, Any]:
         """Read a file or log from a registered project and device with pagination and secret redaction."""
         return respond(lambda: project_registry.read_project_file(project_id, relative_path, device_id=device_id, offset=offset, limit=limit), request_id)
+
+    @server.tool(annotations=readonly)
+    def gui_status(request_id: str | None = None) -> dict[str, Any]:
+        """Check whether Windows GUI desktop session is interactive and get active window info."""
+        return respond(lambda: gui_manager.get_gui_status(), request_id)
+
+    @server.tool(annotations=destructive)
+    def execute_gui_action(app_name: str, action: str = "open_and_inspect",
+                           request_id: str | None = None) -> dict[str, Any]:
+        """Perform a benign observable GUI action with before/after screenshots and concurrency guard."""
+        return respond(lambda: gui_manager.execute_gui_action(app_name=app_name, action=action), request_id)
 
     @server.tool(annotations=readonly)
     def search_notes(query: str, limit: int = 10, request_id: str | None = None) -> dict[str, Any]:

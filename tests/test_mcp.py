@@ -142,7 +142,7 @@ class MCPTests(unittest.IsolatedAsyncioTestCase):
             names = {t.name for t in catalog.tools}
             self.assertIn('simulate_with_approval', names)
             self.assertTrue(all(t.annotations.readOnlyHint for t in catalog.tools
-                                if t.name not in ('simulate_with_approval', 'git_push', 'job_cancel', 'create_checkpoint', 'write_project_file', 'restore_checkpoint', 'commit_project_changes')))
+                                if t.name not in ('simulate_with_approval', 'git_push', 'job_cancel', 'create_checkpoint', 'write_project_file', 'restore_checkpoint', 'commit_project_changes', 'execute_gui_action')))
 
     async def test_simulated_approval_records_once_and_counts_only_this_decision(self):
         from pathlib import Path
@@ -546,5 +546,23 @@ class MCPTests(unittest.IsolatedAsyncioTestCase):
                 # Remote still at commit 1
                 rev = subprocess.run(["git", "rev-parse", "refs/heads/main"], cwd=remote_dir, capture_output=True, text=True, check=True).stdout.strip()
                 self.assertEqual(rev, commit_hash)
+
+    async def test_gui_tools_via_mcp(self):
+        async with connected() as client:
+            catalog = await client.list_tools()
+            names = {t.name for t in catalog.tools}
+            self.assertIn('gui_status', names)
+            self.assertIn('execute_gui_action', names)
+
+            # gui_status check
+            status_res = (await client.call_tool('gui_status', {})).structuredContent
+            self.assertTrue(status_res['ok'])
+            self.assertIn('session_state', status_res['data'])
+
+            # execute_gui_action with unauthorized app rejected
+            bad_res = (await client.call_tool('execute_gui_action', {'app_name': 'cmd.exe'})).structuredContent
+            self.assertFalse(bad_res['ok'])
+            self.assertEqual(bad_res['error']['code'], 'PERMISSION_DENIED')
+
 
 
