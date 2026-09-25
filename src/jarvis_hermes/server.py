@@ -173,6 +173,28 @@ def build_server() -> FastMCP:
         """Restore a project file from a checkpoint without resetting unrelated files."""
         return respond(lambda: checkpoint_manager.restore_checkpoint(checkpoint_id, expected_job_id), request_id)
 
+    @server.tool(annotations=readonly)
+    def run_project_workflow(project_id: str, workflow_name: str,
+                             device_id: str | None = None, timeout_seconds: int = 120,
+                             request_id: str | None = None) -> dict[str, Any]:
+        """Run an allowed project workflow checking script and git hook integrity."""
+        return respond(lambda: project_registry.run_project_workflow(
+            project_id=project_id, workflow_name=workflow_name,
+            device_id=device_id, timeout_seconds=timeout_seconds
+        ), request_id)
+
+    @server.tool(annotations=destructive)
+    def commit_project_changes(project_id: str, files: list[str],
+                               commit_message: str, verification: dict[str, Any],
+                               device_id: str | None = None,
+                               request_id: str | None = None) -> dict[str, Any]:
+        """Commit only relevant files changed by the job after successful verification."""
+        return respond(lambda: project_registry.commit_project_changes(
+            project_id=project_id, files=files,
+            commit_message=commit_message, verification=verification,
+            device_id=device_id
+        ), request_id)
+
     @server.tool()
     async def simulate_with_approval(target: str, arguments: dict[str, Any],
                                      ctx: Context,
