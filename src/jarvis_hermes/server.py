@@ -73,7 +73,8 @@ def build_server() -> FastMCP:
     job_store.reconcile_on_startup()
     current_env = 'wsl' if os.path.exists('/proc/version') and 'microsoft' in open('/proc/version').read().lower() else ('windows' if os.name == 'nt' else 'linux')
     projects_config = os.environ.get('JARVIS_PROJECTS_CONFIG')
-    project_registry = ProjectRegistry(projects_config, current_device=device, current_environment=current_env)
+    approval_store = _approval_store()
+    project_registry = ProjectRegistry(projects_config, current_device=device, current_environment=current_env, approval_store=approval_store)
     checkpoint_manager = CheckpointManager()
     readonly = ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=False)
     destructive = ToolAnnotations(readOnlyHint=False, destructiveHint=True, idempotentHint=False, openWorldHint=False)
@@ -194,6 +195,65 @@ def build_server() -> FastMCP:
             commit_message=commit_message, verification=verification,
             device_id=device_id
         ), request_id)
+
+    @server.tool(annotations=destructive)
+    async def git_push(project_id: str, remote: str, branch: str, commit_hash: str,
+                       ctx: Context, device_id: str | None = None,
+                       request_id: str | None = None) -> dict[str, Any]:
+        """Push a specific commit to remote after verified owner confirmation via elicitation."""
+        observed = {'schema_version': '1.0', 'device_id': device, 'request_id': request_id,
+                    'observed_at': datetime.now(timezone.utc).isoformat(),
+                    'provenance': {'source': 'local_process', 'scope': 'git_remote_push'}}
+        try:
+            actor_id = _configured_approver()
+            store = _approval_store()
+            target = f'git_push:{project_id}'
+            arguments = {'remote': remote, 'branch': branch, 'commit_hash': commit_hash}
+
+            pending = store.request(actor_id=actor_id, target=target, arguments=arguments)
+            prompt = (
+                f"Jarvis: autorizzi il push del commit {commit_hash[:7]}?\n"
+                f"Repository: {project_id}\n"
+                f"Remoto: {remote}\n"
+                f"Branch: {branch}\n"
+                f"Commit hash: {commit_hash}\n"
+                f"SHA-256 digest: {pending['digest']}"
+            )
+            try:
+                choice = await asyncio.wait_for(ctx.elicit(prompt, _ApprovalResponse), timeout=305)
+            except Exception:
+                choice = None
+
+            decision = getattr(choice, 'action', None)
+            if decision != 'accept':
+                # Mark cancelled
+                store.decide(token=pending['token'], actor_id=actor_id,
+                             target=target, arguments=arguments, approve=False)
+                return {**observed, 'ok': False, 'data': None,
+                        'error': {'code': 'APPROVAL_DECLINED',
+                                  'message': 'Push was declined by owner or elicitation timed out.',
+                                  'retryable': False}}
+
+            # Push with token
+            res = project_registry.push_project_commit(
+                project_id=project_id,
+                remote=remote,
+                branch=branch,
+                commit_hash=commit_hash,
+                approval_token=pending['token'],
+                actor_id=actor_id,
+                device_id=device_id
+            )
+            return {**observed, 'ok': True, 'data': res, 'error': None}
+        except ApprovalError as exc:
+            return {**observed, 'ok': False, 'data': None,
+                    'error': {'code': exc.code, 'message': f'Approval error: {exc.code}', 'retryable': False}}
+        except ProjectError as exc:
+            return {**observed, 'ok': False, 'data': None,
+                    'error': {'code': exc.code, 'message': exc.message, 'retryable': False}}
+        except Exception as exc:
+            return {**observed, 'ok': False, 'data': None,
+                    'error': {'code': 'PUSH_FAILED', 'message': f'Unexpected push error: {exc}', 'retryable': False}}
 
     @server.tool()
     async def simulate_with_approval(target: str, arguments: dict[str, Any],

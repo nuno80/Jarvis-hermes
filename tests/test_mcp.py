@@ -32,7 +32,7 @@ async def connected(vault=None, *, approver_id=None, approval_action='accept', s
             kwargs = {}
             if elicit:
                 async def callback(context, request):
-                    if 'Simulated effect' not in request.message:
+                    if 'Simulated effect' not in request.message and 'autorizzi il push' not in request.message:
                         raise AssertionError('approval prompt must include action summary')
                     return ElicitResult(action=approval_action,
                                         content={} if approval_action == 'accept' else None)
@@ -142,7 +142,7 @@ class MCPTests(unittest.IsolatedAsyncioTestCase):
             names = {t.name for t in catalog.tools}
             self.assertIn('simulate_with_approval', names)
             self.assertTrue(all(t.annotations.readOnlyHint for t in catalog.tools
-                                if t.name not in ('simulate_with_approval', 'job_cancel', 'create_checkpoint', 'write_project_file', 'restore_checkpoint', 'commit_project_changes')))
+                                if t.name not in ('simulate_with_approval', 'git_push', 'job_cancel', 'create_checkpoint', 'write_project_file', 'restore_checkpoint', 'commit_project_changes')))
 
     async def test_simulated_approval_records_once_and_counts_only_this_decision(self):
         from pathlib import Path
@@ -467,4 +467,84 @@ class MCPTests(unittest.IsolatedAsyncioTestCase):
                 self.assertTrue(commit_res['data']['committed'])
                 self.assertTrue(commit_res['data']['commit_hash'])
                 self.assertEqual(commit_res['data']['files'], ['calc.py'])
+
+    async def test_git_push_via_mcp_with_approval(self):
+        import subprocess
+        from pathlib import Path
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            state_dir = base / "state"
+            remote_dir = base / "remote.git"
+            subprocess.run(["git", "init", "--bare", str(remote_dir)], check=True, capture_output=True)
+
+            proj_dir = base / "repo"
+            proj_dir.mkdir(parents=True)
+            subprocess.run(["git", "init", "-b", "main"], cwd=proj_dir, check=True, capture_output=True)
+            subprocess.run(["git", "config", "user.name", "Tester"], cwd=proj_dir, check=True)
+            subprocess.run(["git", "config", "user.email", "tester@example.com"], cwd=proj_dir, check=True)
+            subprocess.run(["git", "remote", "add", "origin", str(remote_dir)], cwd=proj_dir, check=True)
+
+            file1 = proj_dir / "app.py"
+            file1.write_text("print('hello')\n", encoding="utf-8")
+            subprocess.run(["git", "add", "."], cwd=proj_dir, check=True)
+            subprocess.run(["git", "commit", "-m", "first commit"], cwd=proj_dir, check=True)
+            commit_hash = subprocess.run(["git", "rev-parse", "HEAD"], cwd=proj_dir, capture_output=True, text=True, check=True).stdout.strip()
+
+            cfg_file = base / "projects.json"
+            cfg_file.write_text(f'''{{
+                "devices": {{"test-node": {{"environment": "wsl"}}}},
+                "projects": {{
+                    "my-app": {{
+                        "paths": {{"test-node": "{proj_dir.as_posix()}"}},
+                        "allowed_remotes": ["origin"],
+                        "allowed_branches": ["main"]
+                    }}
+                }}
+            }}''', encoding="utf-8")
+
+            # 1. Successful push with approval
+            async with connected(approver_id=123456, approval_action='accept',
+                                 projects_config=cfg_file, state_home=state_dir) as client:
+                catalog = await client.list_tools()
+                self.assertIn('git_push', [t.name for t in catalog.tools])
+
+                res = (await client.call_tool('git_push', {
+                    'project_id': 'my-app',
+                    'remote': 'origin',
+                    'branch': 'main',
+                    'commit_hash': commit_hash,
+                    'device_id': 'test-node'
+                })).structuredContent
+
+                self.assertTrue(res['ok'])
+                self.assertTrue(res['data']['pushed'])
+                self.assertTrue(res['data']['remote_verified'])
+                self.assertEqual(res['data']['commit_hash'], commit_hash)
+
+                # Verify bare remote has commit
+                rev = subprocess.run(["git", "rev-parse", "refs/heads/main"], cwd=remote_dir, capture_output=True, text=True, check=True).stdout.strip()
+                self.assertEqual(rev, commit_hash)
+
+            # 2. Denied push does not push new commit
+            file1.write_text("print('hello world 2')\n", encoding="utf-8")
+            subprocess.run(["git", "commit", "-am", "second commit"], cwd=proj_dir, check=True)
+            commit_hash2 = subprocess.run(["git", "rev-parse", "HEAD"], cwd=proj_dir, capture_output=True, text=True, check=True).stdout.strip()
+
+            async with connected(approver_id=123456, approval_action='decline',
+                                 projects_config=cfg_file, state_home=state_dir) as client:
+                res_deny = (await client.call_tool('git_push', {
+                    'project_id': 'my-app',
+                    'remote': 'origin',
+                    'branch': 'main',
+                    'commit_hash': commit_hash2,
+                    'device_id': 'test-node'
+                })).structuredContent
+
+                self.assertFalse(res_deny['ok'])
+                self.assertEqual(res_deny['error']['code'], 'APPROVAL_DECLINED')
+
+                # Remote still at commit 1
+                rev = subprocess.run(["git", "rev-parse", "refs/heads/main"], cwd=remote_dir, capture_output=True, text=True, check=True).stdout.strip()
+                self.assertEqual(rev, commit_hash)
+
 

@@ -44,6 +44,7 @@ def main() -> int:
     doctor.add_argument("--disk-path", type=Path, default=Path.cwd())
     sub.add_parser("serve", help="Run the local read-only MCP server over stdio")
     sub.add_parser("approval-demo", help="Run an isolated simulated approval, without Telegram or external effects")
+    push_demo = sub.add_parser("push-demo", help="Run a push approval demo against an isolated local bare repository")
     args = parser.parse_args()
     if args.command == "approval-demo":
         from .approval import ApprovalError, ApprovalStore
@@ -60,6 +61,62 @@ def main() -> int:
                               "first": accepted["status"], "effects_recorded": accepted["effects_recorded"],
                               "replay": replay, "ledger_total": len(store.effects()),
                               "telegram": "not_connected"}))
+        return 0
+    if args.command == "push-demo":
+        import subprocess
+        from .approval import ApprovalStore
+        from .projects import ProjectRegistry
+        with tempfile.TemporaryDirectory(prefix="jarvis-push-demo-") as directory:
+            base = Path(directory)
+            remote_bare = base / "remote.git"
+            subprocess.run(["git", "init", "--bare", str(remote_bare)], check=True, capture_output=True)
+            local_repo = base / "local_repo"
+            local_repo.mkdir()
+            subprocess.run(["git", "init", "-b", "main", str(local_repo)], check=True, capture_output=True)
+            subprocess.run(["git", "config", "user.name", "Tester"], cwd=local_repo, check=True)
+            subprocess.run(["git", "config", "user.email", "tester@example.com"], cwd=local_repo, check=True)
+            subprocess.run(["git", "remote", "add", "origin", str(remote_bare)], cwd=local_repo, check=True)
+            (local_repo / "README.md").write_text("# Demo\n", encoding="utf-8")
+            subprocess.run(["git", "add", "."], cwd=local_repo, check=True, capture_output=True)
+            subprocess.run(["git", "commit", "-m", "demo commit"], cwd=local_repo, check=True, capture_output=True)
+            commit_hash = subprocess.run(["git", "rev-parse", "HEAD"], cwd=local_repo, capture_output=True, text=True, check=True).stdout.strip()
+
+            cfg_file = base / "projects.json"
+            cfg_file.write_text(json.dumps({
+                "devices": {"local": {"environment": "wsl"}},
+                "projects": {
+                    "demo-project": {
+                        "paths": {"local": str(local_repo)},
+                        "allowed_remotes": ["origin"],
+                        "allowed_branches": ["main"]
+                    }
+                }
+            }), encoding="utf-8")
+
+            store = ApprovalStore(base / "approvals.sqlite3")
+            actor_id = 123456
+            req = store.request(
+                actor_id=actor_id,
+                target="git_push:demo-project",
+                arguments={"remote": "origin", "branch": "main", "commit_hash": commit_hash}
+            )
+            registry = ProjectRegistry(cfg_file, current_device="local", current_environment="wsl", approval_store=store)
+            res = registry.push_project_commit(
+                project_id="demo-project",
+                remote="origin",
+                branch="main",
+                commit_hash=commit_hash,
+                approval_token=req["token"],
+                actor_id=actor_id
+            )
+            print(json.dumps({
+                "scope": "isolated_push_demo",
+                "pushed": res["pushed"],
+                "remote_verified": res["remote_verified"],
+                "commit_hash": res["commit_hash"],
+                "branch": res["branch"],
+                "remote": res["remote"]
+            }))
         return 0
     if args.command == "serve":
         from .server import main as serve

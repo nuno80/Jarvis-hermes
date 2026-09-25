@@ -9,6 +9,8 @@ import subprocess
 import time
 from typing import Any
 
+from jarvis_hermes.approval import ApprovalStore, ApprovalError
+
 MAX_PROJECT_FILE_BYTES = 524288  # 512 KiB
 DEFAULT_PAGE_SIZE = 8000
 
@@ -43,10 +45,12 @@ class ProjectError(Exception):
 
 
 class ProjectRegistry:
-    def __init__(self, config_path: str | Path | None = None, current_device: str = "local", current_environment: str = "wsl"):
+    def __init__(self, config_path: str | Path | None = None, current_device: str = "local",
+                 current_environment: str = "wsl", approval_store: ApprovalStore | None = None):
         self.config_path = Path(config_path) if config_path else None
         self.current_device = current_device
         self.current_environment = current_environment
+        self.approval_store = approval_store
         self._config: dict[str, Any] | None = None
 
     def _load_config(self) -> dict[str, Any]:
@@ -315,3 +319,100 @@ class ProjectRegistry:
         except subprocess.CalledProcessError as exc:
             stderr = exc.stderr.decode('utf-8', errors='replace') if isinstance(exc.stderr, bytes) else str(exc.stderr)
             raise ProjectError('GIT_ERROR', f'Git operation failed: {stderr}')
+
+    def verify_remote_commit(self, project_id: str, remote: str, branch: str,
+                             commit_hash: str, device_id: str | None = None) -> bool:
+        """Check whether commit_hash is already present at the remote branch."""
+        root, _, _ = self.resolve_project_root(project_id, device_id)
+        try:
+            res = subprocess.run(
+                ['git', 'ls-remote', remote, f'refs/heads/{branch}'],
+                cwd=root, capture_output=True, text=True, check=True
+            )
+            for line in res.stdout.splitlines():
+                parts = line.strip().split()
+                if len(parts) >= 2 and parts[0] == commit_hash and parts[1] == f'refs/heads/{branch}':
+                    return True
+            return False
+        except subprocess.CalledProcessError:
+            return False
+
+    def push_project_commit(self, project_id: str, remote: str, branch: str,
+                            commit_hash: str, approval_token: str | None,
+                            actor_id: int, device_id: str | None = None) -> dict[str, Any]:
+        """Push an authorized commit to remote after validating single-use approval."""
+        if not approval_token:
+            raise ProjectError('APPROVAL_REQUIRED', 'Push requires an explicit approval token.')
+
+        root, resolved_device, _ = self.resolve_project_root(project_id, device_id)
+        if not (root / '.git').exists():
+            raise ProjectError('NOT_A_GIT_REPO', f'Project root {root} is not a git repository.')
+
+        cfg = self._load_config()
+        proj = cfg.get('projects', {}).get(project_id, {})
+        allowed_remotes = proj.get('allowed_remotes', [])
+        allowed_branches = proj.get('allowed_branches', [])
+
+        if allowed_remotes and remote not in allowed_remotes:
+            raise ProjectError('REMOTE_NOT_ALLOWED', f'Remote {remote!r} is not allowed for project {project_id!r}.')
+        if allowed_branches and branch not in allowed_branches:
+            raise ProjectError('BRANCH_NOT_ALLOWED', f'Branch {branch!r} is not allowed for project {project_id!r}.')
+
+        # Check commit hash format
+        if not re.fullmatch(r'[0-9a-fA-F]{40}', commit_hash):
+            raise ProjectError('INVALID_ARGUMENT', 'Invalid commit hash format.')
+
+        # Verify commit exists locally
+        rev_proc = subprocess.run(
+            ['git', 'cat-file', '-t', commit_hash],
+            cwd=root, capture_output=True, text=True
+        )
+        if rev_proc.returncode != 0 or rev_proc.stdout.strip() != 'commit':
+            raise ProjectError('COMMIT_NOT_FOUND', f'Commit {commit_hash!r} does not exist in local repository.')
+
+        # Validate single-use approval bound to exact parameters
+        if not self.approval_store:
+            raise ProjectError('APPROVAL_UNAVAILABLE', 'Approval store not configured.')
+
+        target = f'git_push:{project_id}'
+        arguments = {'remote': remote, 'branch': branch, 'commit_hash': commit_hash}
+
+        try:
+            decision = self.approval_store.decide(
+                token=approval_token,
+                actor_id=actor_id,
+                target=target,
+                arguments=arguments,
+                approve=True
+            )
+        except ApprovalError as exc:
+            raise ProjectError(exc.code, f'Approval failed: {exc.code}')
+
+        if decision.get('status') != 'executed':
+            raise ProjectError('APPROVAL_DENIED', 'Push approval was not executed.')
+
+        # Perform git push
+        try:
+            push_proc = subprocess.run(
+                ['git', 'push', remote, f'{commit_hash}:refs/heads/{branch}'],
+                cwd=root, capture_output=True, text=True, check=True
+            )
+        except subprocess.CalledProcessError as exc:
+            # Check if commit made it despite error
+            remote_verified = self.verify_remote_commit(project_id, remote, branch, commit_hash, device_id)
+            stderr = exc.stderr.decode('utf-8', errors='replace') if isinstance(exc.stderr, bytes) else str(exc.stderr)
+            raise ProjectError('GIT_PUSH_FAILED', f'Git push failed (remote_verified={remote_verified}): {stderr}')
+
+        # Verify on remote
+        remote_verified = self.verify_remote_commit(project_id, remote, branch, commit_hash, device_id)
+
+        return {
+            'pushed': True,
+            'remote_verified': remote_verified,
+            'project_id': project_id,
+            'remote': remote,
+            'branch': branch,
+            'commit_hash': commit_hash,
+            'device_id': resolved_device
+        }
+

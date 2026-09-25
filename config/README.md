@@ -83,4 +83,16 @@ L'esecuzione di verifiche e la creazione di commit avvengono in modo controllato
    - Preserva intatte le modifiche concorrenti o non correlate presenti nel working tree (non fa commit globale né reset).
    - Restituisce hash del commit, file inclusi e metadati della verifica svolta.
 
+## Push protetto da autorizzazione esplicita (`git_push`, J06, D06, AT03, AT04)
+
+L'invio sul remoto di modifiche (`git_push`) richiede consenso esplicito e vincolato:
+1. `git_push(project_id, remote, branch, commit_hash, device_id)`:
+   - Richiede approvazione Telegram tramite MCP elicitation (o token monouso tramite store interno).
+   - Il consenso è strettamente vincolato a `target` (`git_push:<project_id>`) e parametri esatti: `remote`, `branch` e `commit_hash`.
+   - Se uno qualsiasi dei parametri cambia, o se il consenso scade o viene rifiutato, l'operazione fallisce (`APPROVAL_DENIED`, `APPROVAL_EXPIRED`, `APPROVAL_DECLINED`) e il remoto non viene toccato.
+   - Solo i remoti e branch configurati in `allowed_remotes` e `allowed_branches` sono consentiti.
+   - Verifica lo stato del remoto prima/dopo l'operazione (`remote_verified`) per garantire coerenza anche a fronte di timeout di rete o errori parziali.
+   - Nessun comando arbitrario o bypass shell è abilitato.
+
+
 
