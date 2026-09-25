@@ -105,6 +105,19 @@ L'interazione con l'interfaccia grafica Windows avviene tramite policy protetta:
   - Acquisisce un lock esclusivo (`gui_job.lock`), consentendo un solo job GUI contemporaneo (`CONCURRENT_GUI_JOB`).
   - Cattura screenshot prima e dopo l'operazione (`before_*.png`, `after_*.png`), salvandoli localmente in `$XDG_STATE_HOME/jarvis-hermes/screenshots/` con permessi ristretti (0700).
 
+## Comandi amministrativi e terminale con policy sugli effetti (`run_command`, J04–J06 estesi, D04, D07, C3)
+
+L'esecuzione di comandi amministrativi e da terminale non è vincolata a una whitelist rigida, ma valuta deterministamente la tipologia di effetti:
+- `run_command(command, timeout_seconds, cwd, job_id)`:
+  - **Letture ed esplorazione (`READONLY`)**: comandi non mutativi (es. `ls`, `df`, `uptime`, `git status`, `systemctl status`, `docker ps`) vengono eseguiti automaticamente senza consenso manuale.
+  - **Modifiche a file con recupero (`WRITE_RECOVERABLE`)**: scritture o redirection verso file (es. `echo "val" > file.txt`) creano automaticamente uno snapshot checkpoint con `CheckpointManager` prima dell'esecuzione per consentire il ripristino.
+  - **Privilegi, manutenzione e mutazione servizi (`PRIVILEGED_MAINTENANCE`)**: comandi di sistema o riavvio servizi (es. `systemctl restart service`, `docker restart`, modifiche di pacchetti o permessi) richiedono approvazione del proprietario (MCP elicitation Telegram o token approvato).
+  - **Distruzioni ed effetti esterni (`DESTRUCTIVE`, `EXTERNAL_EFFECT`)**: comandi distruttivi (`rm`, `dropdb`, ecc.) o che contattano l'esterno (`curl`, `ssh`) richiedono conferma esplicita vincolata al digest esatto.
+  - **Composizioni non analizzabili (`UNPARSEABLE_COMPLEX`)**: catene shell non banali con pipe, subshell, `eval`, o chaining presentano il comando esatto per conferma prima di qualunque esecuzione.
+  - **Nessuna concessione da parte di classificazioni LLM**: la classificazione è deterministica lato server; prompt injection o asserzioni del modello non possono concedere permessi né scavalcare la policy.
+  - **Target protetti immutabili**: file di policy, file di configurazione (`config.yaml`, `projects.json`), secret store (`.env`, credentials, chiavi SSH, `shadow`, database di stato) non sono mai accessibili o sovrascrivibili tramite `run_command` (`PROTECTED_TARGET_DENIED`).
+
+
 
 
 

@@ -12,6 +12,7 @@ from pydantic import BaseModel
 from .approval import ApprovalError, ApprovalStore
 from .checkpoint import CheckpointError, CheckpointManager
 from .cli import diagnose
+from .command_policy import CommandPolicyError, CommandPolicyManager
 from .gui import GuiAutomationManager, GuiError
 from .jobs import JobError, JobStore
 from .projects import ProjectError, ProjectRegistry
@@ -78,6 +79,10 @@ def build_server() -> FastMCP:
     project_registry = ProjectRegistry(projects_config, current_device=device, current_environment=current_env, approval_store=approval_store)
     checkpoint_manager = CheckpointManager()
     gui_manager = GuiAutomationManager()
+    command_policy_manager = CommandPolicyManager(
+        approval_store=approval_store,
+        checkpoint_manager=checkpoint_manager,
+    )
     readonly = ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=False)
     destructive = ToolAnnotations(readOnlyHint=False, destructiveHint=True, idempotentHint=False, openWorldHint=False)
 
@@ -100,6 +105,9 @@ def build_server() -> FastMCP:
             return {**result, 'ok': False, 'data': None,
                     'error': {'code': exc.code, 'message': exc.message, 'retryable': False}}
         except GuiError as exc:
+            return {**result, 'ok': False, 'data': None,
+                    'error': {'code': exc.code, 'message': exc.message, 'retryable': False}}
+        except CommandPolicyError as exc:
             return {**result, 'ok': False, 'data': None,
                     'error': {'code': exc.code, 'message': exc.message, 'retryable': False}}
         except (OSError, UnicodeError, ValueError):
@@ -142,6 +150,90 @@ def build_server() -> FastMCP:
                            request_id: str | None = None) -> dict[str, Any]:
         """Perform a benign observable GUI action with before/after screenshots and concurrency guard."""
         return respond(lambda: gui_manager.execute_gui_action(app_name=app_name, action=action), request_id)
+
+    @server.tool(annotations=destructive)
+    async def run_command(
+        command: str,
+        ctx: Context,
+        timeout_seconds: int = 60,
+        cwd: str | None = None,
+        job_id: str | None = None,
+        request_id: str | None = None
+    ) -> dict[str, Any]:
+        """Execute a terminal/administrative command evaluated by policy on the configured device."""
+        observed = {'schema_version': '1.0', 'device_id': device, 'request_id': request_id,
+                    'observed_at': datetime.now(timezone.utc).isoformat(),
+                    'provenance': {'source': 'local_process', 'scope': 'terminal_command'}}
+        try:
+            # Deterministic classification server-side
+            classification = command_policy_manager.classify_command(command)
+
+            if not classification.requires_approval:
+                # Automatic execution (e.g. READONLY or WRITE_RECOVERABLE with checkpoint)
+                res = command_policy_manager.run_command(
+                    command=command,
+                    job_id=job_id,
+                    timeout_seconds=timeout_seconds,
+                    cwd=cwd,
+                )
+                return {**observed, 'ok': True, 'data': res, 'error': None}
+
+            # Requires approval: elicit from owner
+            actor_id = _configured_approver()
+            target = f"run_command:{classification.category}"
+            arguments = {'command': command, 'digest': classification.command_digest}
+
+            pending = approval_store.request(actor_id=actor_id, target=target, arguments=arguments)
+
+            if classification.is_unparseable_or_complex:
+                prompt_desc = f"Comando shell complesso o non analizzabile:\n`{command}`"
+            else:
+                prompt_desc = f"Azione protetta ({classification.category}):\n`{command}`\nMotivo: {classification.reason}"
+
+            prompt = (
+                f"Jarvis: autorizzi l'esecuzione del comando?\n"
+                f"{prompt_desc}\n"
+                f"SHA-256 digest: {pending['digest']}"
+            )
+
+            try:
+                choice = await asyncio.wait_for(ctx.elicit(prompt, _ApprovalResponse), timeout=305)
+            except Exception:
+                choice = None
+
+            decision = getattr(choice, 'action', None)
+            if decision != 'accept':
+                approval_store.decide(
+                    token=pending['token'],
+                    actor_id=actor_id,
+                    target=target,
+                    arguments=arguments,
+                    approve=False
+                )
+                return {**observed, 'ok': False, 'data': None,
+                        'error': {'code': 'APPROVAL_DECLINED',
+                                  'message': 'Command execution declined by owner or elicitation timed out.',
+                                  'retryable': False}}
+
+            # Run with confirmed token
+            res = command_policy_manager.run_command(
+                command=command,
+                approval_token=pending['token'],
+                actor_id=actor_id,
+                job_id=job_id,
+                timeout_seconds=timeout_seconds,
+                cwd=cwd,
+            )
+            return {**observed, 'ok': True, 'data': res, 'error': None}
+        except CommandPolicyError as exc:
+            return {**observed, 'ok': False, 'data': None,
+                    'error': {'code': exc.code, 'message': exc.message, 'retryable': False}}
+        except ApprovalError as exc:
+            return {**observed, 'ok': False, 'data': None,
+                    'error': {'code': exc.code, 'message': f'Approval error: {exc.code}', 'retryable': False}}
+        except Exception as exc:
+            return {**observed, 'ok': False, 'data': None,
+                    'error': {'code': 'EXECUTION_FAILED', 'message': f'Command execution failed: {exc}', 'retryable': False}}
 
     @server.tool(annotations=readonly)
     def search_notes(query: str, limit: int = 10, request_id: str | None = None) -> dict[str, Any]:

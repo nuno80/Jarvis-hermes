@@ -46,6 +46,7 @@ def main() -> int:
     sub.add_parser("approval-demo", help="Run an isolated simulated approval, without Telegram or external effects")
     push_demo = sub.add_parser("push-demo", help="Run a push approval demo against an isolated local bare repository")
     gui_demo = sub.add_parser("gui-demo", help="Run an isolated GUI demo (or status check if locked/non-interactive)")
+    cmd_demo = sub.add_parser("command-demo", help="Run an isolated administrative command demo showing policy enforcement")
     args = parser.parse_args()
     if args.command == "approval-demo":
         from .approval import ApprovalError, ApprovalStore
@@ -153,6 +154,66 @@ def main() -> int:
                     "code": exc.code,
                     "message": exc.message,
                 }))
+        return 0
+    if args.command == "command-demo":
+        import hashlib
+        from .approval import ApprovalStore
+        from .checkpoint import CheckpointManager
+        from .command_policy import CommandPolicyError, CommandPolicyManager
+        with tempfile.TemporaryDirectory(prefix="jarvis-command-demo-") as directory:
+            base = Path(directory)
+            state_dir = base / "state"
+            state_dir.mkdir(parents=True, exist_ok=True)
+            approval_store = ApprovalStore(state_dir / "approvals.sqlite3")
+            checkpoint_mgr = CheckpointManager(state_dir / "checkpoints")
+            manager = CommandPolicyManager(
+                approval_store=approval_store,
+                checkpoint_manager=checkpoint_mgr,
+                state_dir=state_dir,
+            )
+
+            # 1. Readonly command execution
+            ro_res = manager.run_command("echo 'benign inspection'")
+
+            # 2. Protected target denial
+            protected_denied = False
+            try:
+                manager.run_command("cat /etc/shadow")
+            except CommandPolicyError as exc:
+                if exc.code == "PROTECTED_TARGET_DENIED":
+                    protected_denied = True
+
+            # 3. Privileged maintenance with approval
+            maint_cmd = "echo 'simulated restart test-service'"
+            # Test approval cycle
+            classification = manager.classify_command("systemctl restart test-service")
+            actor_id = 9999
+            pending = approval_store.request(
+                actor_id=actor_id,
+                target=f"run_command:{classification.category}",
+                arguments={"command": maint_cmd, "digest": hashlib.sha256(maint_cmd.encode()).hexdigest()}
+            )
+            # Approve and run simulated maintenance
+            approved_res = manager.run_command(
+                maint_cmd,
+                approval_token=pending["token"],
+                actor_id=actor_id,
+            )
+
+            print(json.dumps({
+                "scope": "isolated_command_demo",
+                "readonly_execution": {
+                    "category": ro_res["category"],
+                    "output": ro_res["output"].strip(),
+                    "requires_approval": ro_res["requires_approval"],
+                },
+                "protected_target_blocked": protected_denied,
+                "approved_maintenance": {
+                    "category": classification.category,
+                    "requires_approval": classification.requires_approval,
+                    "executed": approved_res["exit_code"] == 0,
+                }
+            }))
         return 0
     if args.command == "serve":
         from .server import main as serve

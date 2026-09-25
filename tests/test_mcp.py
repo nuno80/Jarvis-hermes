@@ -32,7 +32,7 @@ async def connected(vault=None, *, approver_id=None, approval_action='accept', s
             kwargs = {}
             if elicit:
                 async def callback(context, request):
-                    if 'Simulated effect' not in request.message and 'autorizzi il push' not in request.message:
+                    if 'Simulated effect' not in request.message and 'autorizzi il push' not in request.message and 'autorizzi l\'esecuzione del comando' not in request.message:
                         raise AssertionError('approval prompt must include action summary')
                     return ElicitResult(action=approval_action,
                                         content={} if approval_action == 'accept' else None)
@@ -142,7 +142,7 @@ class MCPTests(unittest.IsolatedAsyncioTestCase):
             names = {t.name for t in catalog.tools}
             self.assertIn('simulate_with_approval', names)
             self.assertTrue(all(t.annotations.readOnlyHint for t in catalog.tools
-                                if t.name not in ('simulate_with_approval', 'git_push', 'job_cancel', 'create_checkpoint', 'write_project_file', 'restore_checkpoint', 'commit_project_changes', 'execute_gui_action')))
+                                if t.name not in ('simulate_with_approval', 'git_push', 'job_cancel', 'create_checkpoint', 'write_project_file', 'restore_checkpoint', 'commit_project_changes', 'execute_gui_action', 'run_command')))
 
     async def test_simulated_approval_records_once_and_counts_only_this_decision(self):
         from pathlib import Path
@@ -563,6 +563,36 @@ class MCPTests(unittest.IsolatedAsyncioTestCase):
             bad_res = (await client.call_tool('execute_gui_action', {'app_name': 'cmd.exe'})).structuredContent
             self.assertFalse(bad_res['ok'])
             self.assertEqual(bad_res['error']['code'], 'PERMISSION_DENIED')
+
+    async def test_run_command_via_mcp(self):
+        from pathlib import Path
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            state_dir = base / "state"
+            async with connected(approver_id=424242, state_home=state_dir) as client:
+                catalog = await client.list_tools()
+                names = {t.name for t in catalog.tools}
+                self.assertIn('run_command', names)
+
+                # 1. Read-only command executes automatically
+                res_ro = (await client.call_tool('run_command', {'command': 'echo hello-jarvis'})).structuredContent
+                self.assertTrue(res_ro['ok'])
+                self.assertEqual(res_ro['data']['category'], 'READONLY')
+                self.assertFalse(res_ro['data']['requires_approval'])
+                self.assertIn('hello-jarvis', res_ro['data']['output'])
+
+                # 2. Protected target (e.g. credentials, secret) is rejected unconditionally
+                res_sec = (await client.call_tool('run_command', {'command': 'cat /etc/shadow'})).structuredContent
+                self.assertFalse(res_sec['ok'])
+                self.assertEqual(res_sec['error']['code'], 'PROTECTED_TARGET_DENIED')
+
+                # 3. Privileged maintenance or unparseable composition triggers elicitation
+                # Mock elicitation accept
+                client.elicit_response = 'accept'
+                res_maint = (await client.call_tool('run_command', {'command': 'echo restart > /dev/null; echo test'})).structuredContent
+                self.assertTrue(res_maint['ok'])
+                self.assertEqual(res_maint['data']['category'], 'UNPARSEABLE_COMPLEX')
+                self.assertTrue(res_maint['data']['requires_approval'])
 
 
 
