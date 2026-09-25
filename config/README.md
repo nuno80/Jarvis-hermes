@@ -69,4 +69,18 @@ La modifica sicura di file di progetto avviene tramite tre strumenti MCP con sup
    - Fornisce il diff unificato tra la versione modificata dal job e la versione ripristinata.
    - È limitato al solo file del checkpoint e al solo job associato (nessun reset globale del repository).
 
+## Workflow di progetto e commit atomico (J06, D05, C3)
+
+L'esecuzione di verifiche e la creazione di commit avvengono in modo controllato tramite due strumenti:
+1. `run_project_workflow(project_id, workflow_name, device_id, timeout_seconds)`:
+   - Esegue solo comandi pre-registrati per il progetto nella configurazione (whitelist di workflow, es. `test`, `build`).
+   - Verifica l'integrità dei git hooks in `.git/hooks`: se un hook viene aggiunto o modificato rispetto agli hash ammessi, il workflow fallisce con `HOOK_MODIFIED`.
+   - Verifica l'integrità di script specificati in `expected_hashes`: fallisce con `SCRIPT_MODIFIED` in caso di discrepanze.
+   - Restituisce esito booleano `ok`, exit code e output (con redazione automatica dei segreti). Non maschera i fallimenti dei test come successi.
+2. `commit_project_changes(project_id, files, commit_message, verification, device_id)`:
+   - Richiede una verifica passata con successo (`verification.passed == True`).
+   - Esegue lo staging e il commit mirato solo dei file indicati in `files`.
+   - Preserva intatte le modifiche concorrenti o non correlate presenti nel working tree (non fa commit globale né reset).
+   - Restituisce hash del commit, file inclusi e metadati della verifica svolta.
+
 

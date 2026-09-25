@@ -142,7 +142,7 @@ class MCPTests(unittest.IsolatedAsyncioTestCase):
             names = {t.name for t in catalog.tools}
             self.assertIn('simulate_with_approval', names)
             self.assertTrue(all(t.annotations.readOnlyHint for t in catalog.tools
-                                if t.name not in ('simulate_with_approval', 'job_cancel', 'create_checkpoint', 'write_project_file', 'restore_checkpoint')))
+                                if t.name not in ('simulate_with_approval', 'job_cancel', 'create_checkpoint', 'write_project_file', 'restore_checkpoint', 'commit_project_changes')))
 
     async def test_simulated_approval_records_once_and_counts_only_this_decision(self):
         from pathlib import Path
@@ -406,4 +406,65 @@ class MCPTests(unittest.IsolatedAsyncioTestCase):
                 self.assertFalse(conflict_res['ok'])
                 self.assertEqual(conflict_res['error']['code'], 'CONFLICT')
                 self.assertEqual(source_file.read_text(encoding="utf-8"), "def add(a, b): return manual_edit(a, b)\n")
+
+    async def test_workflow_and_commit_via_mcp(self):
+        import subprocess
+        from pathlib import Path
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            state_dir = base / "state"
+            proj_dir = base / "repo"
+            proj_dir.mkdir(parents=True)
+            subprocess.run(["git", "init"], cwd=proj_dir, check=True, capture_output=True)
+            subprocess.run(["git", "config", "user.name", "Tester"], cwd=proj_dir, check=True)
+            subprocess.run(["git", "config", "user.email", "tester@example.com"], cwd=proj_dir, check=True)
+
+            code_file = proj_dir / "calc.py"
+            code_file.write_text("def add(a, b): return a + b\n", encoding="utf-8")
+            test_file = proj_dir / "test_calc.py"
+            test_file.write_text("import unittest\nfrom calc import add\nclass T(unittest.TestCase):\n    def test_add(self): self.assertEqual(add(1, 2), 3)\n", encoding="utf-8")
+            subprocess.run(["git", "add", "."], cwd=proj_dir, check=True)
+            subprocess.run(["git", "commit", "-m", "init"], cwd=proj_dir, check=True)
+
+            cfg_file = base / "projects.json"
+            cfg_file.write_text(f'''{{
+                "devices": {{"test-node": {{"environment": "wsl"}}}},
+                "projects": {{
+                    "my-calc": {{
+                        "paths": {{"test-node": "{proj_dir.as_posix()}"}},
+                        "workflows": {{
+                            "test": {{
+                                "command": ["python3", "-m", "unittest", "discover", "-s", "."]
+                            }}
+                        }}
+                    }}
+                }}
+            }}''', encoding="utf-8")
+
+            async with connected(projects_config=cfg_file, state_home=state_dir) as client:
+                # 1. Run workflow -> success
+                wf_res = (await client.call_tool('run_project_workflow', {
+                    'project_id': 'my-calc',
+                    'workflow_name': 'test',
+                    'device_id': 'test-node'
+                })).structuredContent
+                self.assertTrue(wf_res['ok'])
+                self.assertTrue(wf_res['data']['ok'])
+                self.assertEqual(wf_res['data']['exit_code'], 0)
+
+                # 2. Modify calc.py
+                code_file.write_text("def add(a, b): return a + b  # updated\n", encoding="utf-8")
+
+                # 3. Commit changes via commit_project_changes tool
+                commit_res = (await client.call_tool('commit_project_changes', {
+                    'project_id': 'my-calc',
+                    'files': ['calc.py'],
+                    'commit_message': 'Add comment in calc.py',
+                    'verification': {'workflow': 'test', 'passed': True},
+                    'device_id': 'test-node'
+                })).structuredContent
+                self.assertTrue(commit_res['ok'])
+                self.assertTrue(commit_res['data']['committed'])
+                self.assertTrue(commit_res['data']['commit_hash'])
+                self.assertEqual(commit_res['data']['files'], ['calc.py'])
 
