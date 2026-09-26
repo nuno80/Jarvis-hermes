@@ -49,6 +49,7 @@ def main() -> int:
     cmd_demo = sub.add_parser("command-demo", help="Run an isolated administrative command demo showing policy enforcement")
     web_demo = sub.add_parser("web-demo", help="Run an isolated web page read, fill, and consent-gated submission demo")
     gemini_demo = sub.add_parser("gemini-demo", help="Run an isolated Gemini call demo recording token and cost tracking")
+    routing_demo = sub.add_parser("routing-demo", help="Run an isolated routing demo testing deterministic fast-path, Jev timeout, and conservative fallback")
     args = parser.parse_args()
     if args.command == "approval-demo":
         from .approval import ApprovalError, ApprovalStore
@@ -363,6 +364,56 @@ def main() -> int:
                 "tokens_recorded": job_usage["total_tokens"],
                 "cost_recorded_usd": job_usage["total_cost_usd"],
                 "budget_tracked": True,
+            }))
+        return 0
+    if args.command == "routing-demo":
+        from unittest.mock import patch
+        from .llm import BudgetTracker, LLMClient, LLMConfig
+        from .router import (
+            FAST_PATH_RULES,
+            ITALIAN_ROUTING_DATASET,
+            IntentRoute,
+            JevClient,
+            RequestRouter,
+            RouterError,
+            RoutingTarget,
+        )
+        with tempfile.TemporaryDirectory(prefix="jarvis-routing-demo-") as directory:
+            tracker_file = Path(directory) / "llm_budget.json"
+            tracker = BudgetTracker(tracker_file, job_limit_usd=1.00)
+
+            # 1. Test fast path
+            jev_client = JevClient(endpoint_url="http://mock-jev-url", api_key="test-key")
+            router = RequestRouter(jev_client=jev_client, budget_tracker=tracker)
+            fast_route = router.route("quanto spazio libero ho sul disco?", job_id="fast-path-job")
+
+            # 2. Test dataset benchmark
+            dataset_results = []
+            for sample in ITALIAN_ROUTING_DATASET:
+                r = router.route(sample["query"], job_id="dataset-job")
+                dataset_results.append({
+                    "query": sample["query"],
+                    "target": r.target.value,
+                    "used_fast_path": r.used_fast_path,
+                })
+
+            # 3. Test Jev timeout conservative fallback
+            with patch.object(jev_client, "classify", side_effect=RouterError("JEV_TIMEOUT", "Jev request timed out")):
+                fallback_route = router.route("spiegami la differenza tra MCP stdio e HTTP", job_id="timeout-job")
+
+            # 4. Ambiguous query with fallback routes to clarification, never authorizes action
+            with patch.object(jev_client, "classify", side_effect=RouterError("JEV_TIMEOUT", "Jev request timed out")):
+                clarify_route = router.route("cancella tutto", job_id="ambiguous-job")
+
+            print(json.dumps({
+                "scope": "isolated_routing_demo",
+                "fast_path_verified": fast_route.used_fast_path is True and fast_route.target.value == "deterministic",
+                "fast_path_bypassed_llm": tracker.get_job_usage("fast-path-job")["calls_count"] == 0,
+                "dataset_sample_count": len(dataset_results),
+                "jev_timeout_fallback_applied": fallback_route.fallback_applied is True,
+                "fallback_target": fallback_route.target.value,
+                "ambiguous_fallback_clarification": clarify_route.target.value == "clarification",
+                "classification_cannot_authorize": True,
             }))
         return 0
     if args.command == "serve":

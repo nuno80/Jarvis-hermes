@@ -149,6 +149,25 @@ class GeminiProviderTests(unittest.TestCase):
         self.assertEqual(data["tokens_recorded"], 210)
         self.assertTrue(data["budget_tracked"])
 
+    def test_cli_routing_demo(self):
+        """CLI routing-demo executes cleanly and verifies fast path, Jev timeout, and conservative fallback."""
+        import subprocess
+        proc = subprocess.run(
+            ["uv", "run", "jarvis", "routing-demo"],
+            capture_output=True,
+            text=True,
+            check=True
+        )
+        data = json.loads(proc.stdout)
+        self.assertEqual(data["scope"], "isolated_routing_demo")
+        self.assertTrue(data["fast_path_verified"])
+        self.assertTrue(data["fast_path_bypassed_llm"])
+        self.assertEqual(data["dataset_sample_count"], 9)
+        self.assertTrue(data["jev_timeout_fallback_applied"])
+        self.assertEqual(data["fallback_target"], "reasoning_llm")
+        self.assertTrue(data["ambiguous_fallback_clarification"])
+        self.assertTrue(data["classification_cannot_authorize"])
+
     def test_job_budget_limit_enforced(self):
         """Exceeding job budget limit prevents new paid calls and raises BUDGET_EXCEEDED."""
         # job_limit_usd set to 0.0001 (very low)

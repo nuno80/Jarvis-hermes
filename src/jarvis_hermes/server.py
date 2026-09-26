@@ -17,6 +17,7 @@ from .gui import GuiAutomationManager, GuiError
 from .jobs import JobError, JobStore
 from .llm import BudgetTracker, LLMClient, LLMConfig, LLMError
 from .projects import ProjectError, ProjectRegistry
+from .router import JevClient, RequestRouter, RouterError
 from .vault import Vault, VaultError
 from .web import WebError, WebManager
 
@@ -137,6 +138,9 @@ def build_server() -> FastMCP:
             return {**result, 'ok': False, 'data': None,
                     'error': {'code': exc.code, 'message': exc.message, 'retryable': False}}
         except LLMError as exc:
+            return {**result, 'ok': False, 'data': None,
+                    'error': {'code': exc.code, 'message': exc.message, 'retryable': False}}
+        except RouterError as exc:
             return {**result, 'ok': False, 'data': None,
                     'error': {'code': exc.code, 'message': exc.message, 'retryable': False}}
         except (OSError, UnicodeError, ValueError):
@@ -431,6 +435,27 @@ def build_server() -> FastMCP:
         config = LLMConfig(provider="gemini", model_id=model_id)
         client = LLMClient(config=config, budget_tracker=budget_tracker)
         return respond(lambda: client.generate(prompt=prompt, job_id=job_id), request_id)
+
+    @server.tool(annotations=readonly)
+    def route_request(query: str, job_id: str = "interactive", request_id: str | None = None) -> dict[str, Any]:
+        """Route user query with deterministic fast-path, Jev classifier, or conservative fallback."""
+        jev_client = JevClient() if os.environ.get("JEV_ENDPOINT_URL") else None
+        llm_config = LLMConfig(provider="gemini", model_id="gemini-2.5-flash")
+        llm_client = LLMClient(config=llm_config, budget_tracker=budget_tracker)
+        router = RequestRouter(jev_client=jev_client, llm_client=llm_client, budget_tracker=budget_tracker)
+        def _do_route():
+            route = router.route(query, job_id=job_id)
+            return {
+                "intent": route.intent,
+                "target": route.target.value,
+                "confidence": route.confidence,
+                "handler": route.handler,
+                "used_fast_path": route.used_fast_path,
+                "classifier": route.classifier,
+                "fallback_applied": route.fallback_applied,
+                "details": route.details,
+            }
+        return respond(_do_route, request_id)
 
     @server.tool(annotations=readonly)
     def get_job_budget_usage(job_id: str, request_id: str | None = None) -> dict[str, Any]:

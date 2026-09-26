@@ -427,6 +427,34 @@ class MCPTests(unittest.IsolatedAsyncioTestCase):
             self.assertFalse(bad_model_res.structuredContent["ok"])
             self.assertEqual(bad_model_res.structuredContent["error"]["code"], "INVALID_MODEL")
 
+    async def test_route_request_via_mcp(self):
+        async with connected() as client:
+            tools = await client.list_tools()
+            names = [t.name for t in tools.tools]
+            self.assertIn("route_request", names)
+
+            # Test fast-path routing
+            res_fast = await client.call_tool("route_request", {
+                "query": "quanto spazio libero ho sul disco?",
+                "job_id": "route-job-1"
+            })
+            self.assertTrue(res_fast.structuredContent["ok"])
+            data_fast = res_fast.structuredContent["data"]
+            self.assertTrue(data_fast["used_fast_path"])
+            self.assertEqual(data_fast["target"], "deterministic")
+            self.assertEqual(data_fast["intent"], "disk_usage")
+
+            # Test fallback routing for reasoning query
+            res_fallback = await client.call_tool("route_request", {
+                "query": "spiegami la differenza tra modelli SLM e LLM",
+                "job_id": "route-job-2"
+            })
+            self.assertTrue(res_fallback.structuredContent["ok"])
+            data_fallback = res_fallback.structuredContent["data"]
+            self.assertFalse(data_fallback["used_fast_path"])
+            self.assertEqual(data_fallback["target"], "reasoning_llm")
+            self.assertTrue(data_fallback["fallback_applied"])
+
     async def test_workflow_and_commit_via_mcp(self):
         import subprocess
         from pathlib import Path
