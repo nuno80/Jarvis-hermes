@@ -9,6 +9,7 @@ description = "MCP-first personal assistant foundations for Hermes"
 requires-python = ">=3.12"
 dependencies = [
     "mcp>=1.28,<2",
+    "pyyaml>=6.0.3",
 ]
 
 [project.scripts]

@@ -5,6 +5,7 @@ import tempfile
 import unittest
 from contextlib import asynccontextmanager, closing
 from datetime import timedelta
+from pathlib import Path
 
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
@@ -142,7 +143,7 @@ class MCPTests(unittest.IsolatedAsyncioTestCase):
             names = {t.name for t in catalog.tools}
             self.assertIn('simulate_with_approval', names)
             self.assertTrue(all(t.annotations.readOnlyHint for t in catalog.tools
-                                if t.name not in ('simulate_with_approval', 'git_push', 'job_cancel', 'create_checkpoint', 'write_project_file', 'restore_checkpoint', 'commit_project_changes', 'execute_gui_action', 'run_command', 'submit_web_form')))
+                                if t.name not in ('simulate_with_approval', 'git_push', 'job_cancel', 'create_checkpoint', 'write_project_file', 'restore_checkpoint', 'commit_project_changes', 'execute_gui_action', 'run_command', 'submit_web_form', 'update_preference')))
 
     async def test_simulated_approval_records_once_and_counts_only_this_decision(self):
         from pathlib import Path
@@ -675,6 +676,62 @@ class MCPTests(unittest.IsolatedAsyncioTestCase):
 
         server.shutdown()
         server.server_close()
+
+    async def test_preferences_and_profile_mcp_tools(self):
+        with tempfile.TemporaryDirectory() as directory:
+            vault_dir = Path(directory)
+            pref_file = vault_dir / "preferences.yaml"
+            pref_file.write_text("travel:\n  max_budget: 800\n", encoding="utf-8")
+
+            async with connected(vault=vault_dir) as client:
+                catalog = await client.list_tools()
+                names = {t.name for t in catalog.tools}
+                self.assertIn('get_profile', names)
+                self.assertIn('update_preference', names)
+
+                # 1. Read profile
+                p1 = (await client.call_tool('get_profile', {})).structuredContent
+                self.assertTrue(p1['ok'])
+                self.assertEqual(p1['data']['explicit_preferences']['travel']['max_budget'], 800)
+                v1 = p1['data']['preferences_version']
+
+                # 2. Modify preferences.yaml externally (e.g. user edits file during open session)
+                pref_file.write_text("travel:\n  max_budget: 950\n", encoding="utf-8")
+
+                # Fresh get_profile immediately reflects the update
+                p2 = (await client.call_tool('get_profile', {})).structuredContent
+                self.assertTrue(p2['ok'])
+                self.assertEqual(p2['data']['explicit_preferences']['travel']['max_budget'], 950)
+                v2 = p2['data']['preferences_version']
+                self.assertNotEqual(v1, v2)
+
+                # 3. Update preference via MCP tool with expected_version conflict check
+                # Using outdated version v1 must fail
+                conflict = (await client.call_tool('update_preference', {
+                    'key_path': 'travel.max_budget',
+                    'value': 1000,
+                    'expected_version': v1
+                })).structuredContent
+                self.assertFalse(conflict['ok'])
+                self.assertEqual(conflict['error']['code'], 'CONFLICT')
+
+                # Using current version v2 succeeds
+                upd = (await client.call_tool('update_preference', {
+                    'key_path': 'travel.max_budget',
+                    'value': 1000,
+                    'expected_version': v2
+                })).structuredContent
+                self.assertTrue(upd['ok'])
+                self.assertEqual(upd['data']['value'], 1000)
+
+                # 4. Attempting to set permissions/security fails closed
+                sec = (await client.call_tool('update_preference', {
+                    'key_path': 'permissions.allow_all',
+                    'value': True
+                })).structuredContent
+                self.assertFalse(sec['ok'])
+                self.assertEqual(sec['error']['code'], 'PERMISSION_DENIED')
+
 
 
 

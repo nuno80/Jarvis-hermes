@@ -140,6 +140,17 @@ def build_server() -> FastMCP:
         return respond(lambda: vault.read(note_id, offset, limit), request_id)
 
     @server.tool(annotations=readonly)
+    def get_profile(request_id: str | None = None) -> dict[str, Any]:
+        """Read current typed explicit preferences and frontmatter memory profile fresh from the vault."""
+        return respond(lambda: vault.get_profile(), request_id)
+
+    @server.tool(annotations=destructive)
+    def update_preference(key_path: str, value: Any, expected_version: str | None = None,
+                          request_id: str | None = None) -> dict[str, Any]:
+        """Update typed explicit preference in preferences.yaml with conflict detection and security guardrails."""
+        return respond(lambda: vault.update_preference(key_path, value, expected_version=expected_version), request_id)
+
+    @server.tool(annotations=readonly)
     def read_project_file(project_id: str, relative_path: str, device_id: str | None = None,
                           offset: int = 0, limit: int = 8000, request_id: str | None = None) -> dict[str, Any]:
         """Read a file or log from a registered project and device with pagination and secret redaction."""

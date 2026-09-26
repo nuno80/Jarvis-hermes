@@ -3,10 +3,14 @@ import os
 import stat
 from hashlib import sha256
 from pathlib import Path, PurePosixPath
+import yaml
 
 MAX_NOTE_BYTES = 262144
 MAX_ENTRIES = 5000
 MAX_SEARCH_NOTES = 500
+MAX_PREFERENCE_BYTES = 65536
+FORBIDDEN_PREFERENCE_KEYS = frozenset({'permissions', 'security', 'approval', 'policy', 'approver', 'system_auth'})
+
 
 
 class VaultError(Exception):
@@ -120,3 +124,136 @@ class Vault:
                     truncated = True
         return {'matches': matches, 'truncated': truncated, 'scanned_notes': scanned,
                 'skipped_entries': skipped, 'untrusted_content': True}
+
+    def load_preferences(self) -> tuple[dict, str]:
+        """Load typed explicit preferences from preferences.yaml in the vault root."""
+        root = self.root()
+        pref_path = root / 'preferences.yaml'
+        if not pref_path.is_file():
+            return {}, 'empty'
+        info = pref_path.stat()
+        if info.st_size > MAX_PREFERENCE_BYTES:
+            raise VaultError('PREFERENCE_TOO_LARGE', 'preferences.yaml exceeds maximum size.')
+        raw = pref_path.read_bytes()
+        digest = sha256(raw).hexdigest()
+        try:
+            parsed = yaml.safe_load(raw.decode('utf-8')) or {}
+        except Exception as exc:
+            raise VaultError('INVALID_PREFERENCES', f'Failed to parse preferences.yaml: {exc}')
+        if not isinstance(parsed, dict):
+            raise VaultError('INVALID_PREFERENCES', 'preferences.yaml must be a key-value mapping.')
+
+        # Strip any permission or security overrides (preferences cannot grant execution permissions)
+        safe_prefs = {k: v for k, v in parsed.items() if k.lower() not in FORBIDDEN_PREFERENCE_KEYS}
+        return safe_prefs, digest
+
+    def update_preference(self, key_path: str, value: any, expected_version: str | None = None) -> dict:
+        """Update a typed explicit preference in preferences.yaml with optimistic concurrency check."""
+        root = self.root()
+        pref_path = root / 'preferences.yaml'
+        current_prefs, current_version = self.load_preferences()
+
+        if expected_version is not None and expected_version != current_version:
+            raise VaultError('CONFLICT', f'Preferences have changed concurrently (expected {expected_version}, current {current_version}).')
+
+        # Check key path safety
+        parts = key_path.strip().split('.')
+        if not parts or any(not p for p in parts):
+            raise VaultError('INVALID_ARGUMENT', 'Invalid preference key path.')
+        if parts[0].lower() in FORBIDDEN_PREFERENCE_KEYS:
+            raise VaultError('PERMISSION_DENIED', f'Preferences cannot define permissions or security policies: {parts[0]}')
+
+        # Navigate and update dict
+        cur = current_prefs
+        for p in parts[:-1]:
+            if p not in cur or not isinstance(cur[p], dict):
+                cur[p] = {}
+            cur = cur[p]
+        cur[parts[-1]] = value
+
+        # Atomic write to preferences.yaml
+        new_content = yaml.safe_dump(current_prefs, sort_keys=False)
+        temp_file = root / f'.preferences.yaml.tmp.{os.getpid()}'
+        try:
+            temp_file.write_text(new_content, encoding='utf-8')
+            temp_file.replace(pref_path)
+        except Exception as exc:
+            if temp_file.exists():
+                temp_file.unlink()
+            raise VaultError('WRITE_FAILED', f'Failed to write preferences.yaml: {exc}')
+
+        new_prefs, new_version = self.load_preferences()
+        return {'key_path': key_path, 'value': value, 'version': new_version, 'preferences': new_prefs}
+
+    def get_profile(self) -> dict:
+        """Return the compiled user profile combining explicit preferences and scanned markdown frontmatter."""
+        explicit, pref_version = self.load_preferences()
+        root = self.root()
+
+        # Scan vault notes for frontmatter preferences and notes (e.g. 00-System/Preferences.md or other notes)
+        frontmatter_notes = []
+        ambiguities = []
+
+        try:
+            for item in root.glob('**/*.md'):
+                if item.name.startswith('.') or item.is_symlink():
+                    continue
+                try:
+                    rel_id = item.relative_to(root).as_posix()
+                    text, version = self.load(rel_id)
+                except Exception:
+                    continue
+
+                if text.startswith('---\n'):
+                    end_idx = text.find('\n---\n', 4)
+                    if end_idx != -1:
+                        raw_fm = text[4:end_idx]
+                        try:
+                            fm = yaml.safe_load(raw_fm)
+                            if isinstance(fm, dict):
+                                fm_type = fm.get('type')
+                                domain = fm.get('domain')
+                                source = fm.get('source', 'inferred')
+                                if fm_type == 'preference' or domain:
+                                    note_entry = {
+                                        'note_id': rel_id,
+                                        'type': fm_type,
+                                        'domain': domain,
+                                        'source': source,
+                                        'confidence': fm.get('confidence', 1.0),
+                                        'updated_at': fm.get('updated_at'),
+                                        'version': version
+                                    }
+                                    frontmatter_notes.append(note_entry)
+
+                                    # Check for contradictions / ambiguity with explicit preferences
+                                    # Markdown frontmatter can define soft or inferred preferences or candidate preferences.
+                                    # If frontmatter provides a preference key that conflicts with explicit preferences or has low confidence,
+                                    # or contradicts an explicit preference, we surface an ambiguity.
+                                    fm_prefs = fm.get('preferences')
+                                    if isinstance(fm_prefs, dict):
+                                        for pref_k, pref_v in fm_prefs.items():
+                                            domain_prefs = explicit.get(domain, {}) if isinstance(explicit.get(domain), dict) else {}
+                                            if pref_k in domain_prefs and domain_prefs[pref_k] != pref_v:
+                                                ambiguities.append({
+                                                    'domain': domain,
+                                                    'key': pref_k,
+                                                    'explicit_value': domain_prefs[pref_k],
+                                                    'note_value': pref_v,
+                                                    'note_id': rel_id,
+                                                    'source': source,
+                                                    'reason': f"Explicit preference '{domain}.{pref_k}={domain_prefs[pref_k]}' contradicts note '{rel_id}' value '{pref_v}'"
+                                                })
+                        except Exception:
+                            pass
+        except Exception:
+            pass
+
+        return {
+            'explicit_preferences': explicit,
+            'preferences_version': pref_version,
+            'frontmatter_notes': frontmatter_notes,
+            'ambiguities': ambiguities,
+            'untrusted_content': True
+        }
+
