@@ -13,7 +13,7 @@ from mcp.types import ElicitResult
 
 
 @asynccontextmanager
-async def connected(vault=None, *, approver_id=None, approval_action='accept', state_home=None, elicit=True, projects_config=None):
+async def connected(vault=None, *, approver_id=None, approval_action='accept', state_home=None, elicit=True, projects_config=None, extra_env=None):
     env = dict(os.environ)
     env.pop('JARVIS_VAULT_PATH', None)
     env.pop('JARVIS_APPROVER_ID', None)
@@ -27,6 +27,8 @@ async def connected(vault=None, *, approver_id=None, approval_action='accept', s
         env['JARVIS_APPROVER_ID'] = str(approver_id)
     if state_home is not None:
         env['XDG_STATE_HOME'] = str(state_home)
+    if extra_env:
+        env.update(extra_env)
     params = StdioServerParameters(command=sys.executable, args=['-m', 'jarvis_hermes', 'serve'], env=env)
     with tempfile.TemporaryFile(mode='w+') as errors:
         async with stdio_client(params, errlog=errors) as (read, write):
@@ -407,6 +409,23 @@ class MCPTests(unittest.IsolatedAsyncioTestCase):
                 self.assertFalse(conflict_res['ok'])
                 self.assertEqual(conflict_res['error']['code'], 'CONFLICT')
                 self.assertEqual(source_file.read_text(encoding="utf-8"), "def add(a, b): return manual_edit(a, b)\n")
+
+    async def test_gemini_tools_via_mcp(self):
+        from unittest.mock import patch
+        async with connected(extra_env={"GEMINI_API_KEY": "test-key-mock"}) as client:
+            tools = await client.list_tools()
+            names = [t.name for t in tools.tools]
+            self.assertIn("ask_gemini", names)
+            self.assertIn("get_job_budget_usage", names)
+
+            # Test invalid model rejected
+            bad_model_res = await client.call_tool("ask_gemini", {
+                "prompt": "Valuta opzioni",
+                "model_id": "unsupported-model-x",
+                "job_id": "mcp-test-job"
+            })
+            self.assertFalse(bad_model_res.structuredContent["ok"])
+            self.assertEqual(bad_model_res.structuredContent["error"]["code"], "INVALID_MODEL")
 
     async def test_workflow_and_commit_via_mcp(self):
         import subprocess

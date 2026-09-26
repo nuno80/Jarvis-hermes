@@ -15,6 +15,7 @@ from .cli import diagnose
 from .command_policy import CommandPolicyError, CommandPolicyManager
 from .gui import GuiAutomationManager, GuiError
 from .jobs import JobError, JobStore
+from .llm import BudgetTracker, LLMClient, LLMConfig, LLMError
 from .projects import ProjectError, ProjectRegistry
 from .vault import Vault, VaultError
 from .web import WebError, WebManager
@@ -68,6 +69,25 @@ def _job_store() -> JobStore:
     return store
 
 
+def _budget_tracker() -> BudgetTracker:
+    state_home = Path(os.environ.get('XDG_STATE_HOME', Path.home() / '.local' / 'state'))
+    state_dir = state_home / 'jarvis-hermes'
+    state_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+    try:
+        state_dir.chmod(0o700)
+    except OSError:
+        pass
+    storage_path = state_dir / 'llm_budget.json'
+    job_limit = float(os.environ.get('JARVIS_JOB_BUDGET_USD', '0.50'))
+    daily_limit = float(os.environ.get('JARVIS_DAILY_BUDGET_USD', '5.00'))
+    tracker = BudgetTracker(storage_path, job_limit_usd=job_limit, daily_limit_usd=daily_limit)
+    try:
+        storage_path.chmod(0o600)
+    except OSError:
+        pass
+    return tracker
+
+
 def build_server() -> FastMCP:
     server = FastMCP('Jarvis', log_level='WARNING')
     device = os.environ.get('JARVIS_DEVICE_ID', 'local')
@@ -81,6 +101,7 @@ def build_server() -> FastMCP:
     checkpoint_manager = CheckpointManager()
     gui_manager = GuiAutomationManager()
     web_manager = WebManager(approval_store=approval_store)
+    budget_tracker = _budget_tracker()
     command_policy_manager = CommandPolicyManager(
         approval_store=approval_store,
         checkpoint_manager=checkpoint_manager,
@@ -113,6 +134,9 @@ def build_server() -> FastMCP:
             return {**result, 'ok': False, 'data': None,
                     'error': {'code': exc.code, 'message': exc.message, 'retryable': False}}
         except WebError as exc:
+            return {**result, 'ok': False, 'data': None,
+                    'error': {'code': exc.code, 'message': exc.message, 'retryable': False}}
+        except LLMError as exc:
             return {**result, 'ok': False, 'data': None,
                     'error': {'code': exc.code, 'message': exc.message, 'retryable': False}}
         except (OSError, UnicodeError, ValueError):
@@ -399,6 +423,19 @@ def build_server() -> FastMCP:
         except Exception as exc:
             return {**observed, 'ok': False, 'data': None,
                     'error': {'code': 'PUSH_FAILED', 'message': f'Unexpected push error: {exc}', 'retryable': False}}
+
+    @server.tool(annotations=readonly)
+    def ask_gemini(prompt: str, model_id: str = "gemini-2.5-flash", job_id: str = "interactive",
+                   request_id: str | None = None) -> dict[str, Any]:
+        """Query configured Gemini model with tracked usage, cost per job, and strict budget enforcement."""
+        config = LLMConfig(provider="gemini", model_id=model_id)
+        client = LLMClient(config=config, budget_tracker=budget_tracker)
+        return respond(lambda: client.generate(prompt=prompt, job_id=job_id), request_id)
+
+    @server.tool(annotations=readonly)
+    def get_job_budget_usage(job_id: str, request_id: str | None = None) -> dict[str, Any]:
+        """Inspect token usage and total cost accumulated for a given job."""
+        return respond(lambda: budget_tracker.get_job_usage(job_id), request_id)
 
     @server.tool(annotations=readonly)
     def read_web_page(url: str, timeout_seconds: int = 15, request_id: str | None = None) -> dict[str, Any]:

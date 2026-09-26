@@ -48,6 +48,7 @@ def main() -> int:
     gui_demo = sub.add_parser("gui-demo", help="Run an isolated GUI demo (or status check if locked/non-interactive)")
     cmd_demo = sub.add_parser("command-demo", help="Run an isolated administrative command demo showing policy enforcement")
     web_demo = sub.add_parser("web-demo", help="Run an isolated web page read, fill, and consent-gated submission demo")
+    gemini_demo = sub.add_parser("gemini-demo", help="Run an isolated Gemini call demo recording token and cost tracking")
     args = parser.parse_args()
     if args.command == "approval-demo":
         from .approval import ApprovalError, ApprovalStore
@@ -318,6 +319,50 @@ def main() -> int:
                 "status_code": res["status_code"],
                 "received_count": len(received_posts),
                 "digest": draft["digest"]
+            }))
+        return 0
+    if args.command == "gemini-demo":
+        from .llm import BudgetTracker, LLMClient, LLMConfig, LLMError
+        with tempfile.TemporaryDirectory(prefix="jarvis-gemini-demo-") as directory:
+            tracker_file = Path(directory) / "llm_budget.json"
+            tracker = BudgetTracker(tracker_file, job_limit_usd=0.01)
+
+            # 1. Demonstrate missing credentials clear error
+            client_no_key = LLMClient(LLMConfig(provider="gemini", model_id="gemini-2.5-flash", api_key=None), budget_tracker=tracker)
+            missing_cred_error = None
+            try:
+                client_no_key.generate("Test prompt", job_id="demo-job-1")
+            except LLMError as exc:
+                missing_cred_error = exc.code
+
+            # 2. Demonstrate invalid model error without fallback
+            client_bad_model = LLMClient(LLMConfig(provider="gemini", model_id="invalid-gemini-v99", api_key="dummy"), budget_tracker=tracker)
+            invalid_model_error = None
+            try:
+                client_bad_model.generate("Test prompt", job_id="demo-job-1")
+            except LLMError as exc:
+                invalid_model_error = exc.code
+
+            # 3. Simulate successful tracked call
+            tracker.record_usage(
+                job_id="demo-job-1",
+                provider="gemini",
+                model_id="gemini-2.5-flash",
+                prompt_tokens=150,
+                completion_tokens=60,
+                cost_usd=0.000029,
+                is_estimated=False
+            )
+            job_usage = tracker.get_job_usage("demo-job-1")
+
+            print(json.dumps({
+                "scope": "isolated_gemini_demo",
+                "missing_credentials_handled": missing_cred_error == "CREDENTIALS_MISSING",
+                "invalid_model_no_fallback": invalid_model_error == "INVALID_MODEL",
+                "job_id": "demo-job-1",
+                "tokens_recorded": job_usage["total_tokens"],
+                "cost_recorded_usd": job_usage["total_cost_usd"],
+                "budget_tracked": True,
             }))
         return 0
     if args.command == "serve":
