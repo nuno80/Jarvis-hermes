@@ -150,6 +150,27 @@ def build_server() -> FastMCP:
         """Update typed explicit preference in preferences.yaml with conflict detection and security guardrails."""
         return respond(lambda: vault.update_preference(key_path, value, expected_version=expected_version), request_id)
 
+    @server.tool(annotations=destructive)
+    def propose_memory(domain: str, key: str, value: Any, evidence: str,
+                       confidence: float = 0.6, note_id: str | None = None,
+                       request_id: str | None = None) -> dict[str, Any]:
+        """Record an inferred candidate memory with soft state and evidence; never overrides explicit constraints."""
+        return respond(lambda: vault.propose_memory(domain=domain, key=key, value=value,
+                                                    evidence=evidence, confidence=confidence,
+                                                    note_id=note_id), request_id)
+
+    @server.tool(annotations=destructive)
+    def forget_memory(note_id: str, key: str | None = None, expected_version: str | None = None,
+                      request_id: str | None = None) -> dict[str, Any]:
+        """Remove or correct an inferred memory note or key, declaring retention backup and preserving other notes."""
+        return respond(lambda: vault.forget_memory(note_id=note_id, key=key, expected_version=expected_version), request_id)
+
+    @server.tool(annotations=destructive)
+    def write_note(note_id: str, content: str, expected_version: str | None = None,
+                   request_id: str | None = None) -> dict[str, Any]:
+        """Write or update a markdown note in the vault with concurrency conflict detection."""
+        return respond(lambda: vault.write_note(note_id=note_id, content=content, expected_version=expected_version), request_id)
+
     @server.tool(annotations=readonly)
     def read_project_file(project_id: str, relative_path: str, device_id: str | None = None,
                           offset: int = 0, limit: int = 8000, request_id: str | None = None) -> dict[str, Any]:

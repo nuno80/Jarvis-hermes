@@ -143,7 +143,7 @@ class MCPTests(unittest.IsolatedAsyncioTestCase):
             names = {t.name for t in catalog.tools}
             self.assertIn('simulate_with_approval', names)
             self.assertTrue(all(t.annotations.readOnlyHint for t in catalog.tools
-                                if t.name not in ('simulate_with_approval', 'git_push', 'job_cancel', 'create_checkpoint', 'write_project_file', 'restore_checkpoint', 'commit_project_changes', 'execute_gui_action', 'run_command', 'submit_web_form', 'update_preference')))
+                                if t.name not in ('simulate_with_approval', 'git_push', 'job_cancel', 'create_checkpoint', 'write_project_file', 'restore_checkpoint', 'commit_project_changes', 'execute_gui_action', 'run_command', 'submit_web_form', 'update_preference', 'propose_memory', 'forget_memory', 'write_note')))
 
     async def test_simulated_approval_records_once_and_counts_only_this_decision(self):
         from pathlib import Path
@@ -731,6 +731,51 @@ class MCPTests(unittest.IsolatedAsyncioTestCase):
                 })).structuredContent
                 self.assertFalse(sec['ok'])
                 self.assertEqual(sec['error']['code'], 'PERMISSION_DENIED')
+
+                # 5. Inferred candidate memory tools: propose_memory, forget_memory, write_note
+                self.assertIn('propose_memory', names)
+                self.assertIn('forget_memory', names)
+                self.assertIn('write_note', names)
+
+                # Propose candidate memory
+                prop = (await client.call_tool('propose_memory', {
+                    'domain': 'travel',
+                    'key': 'departure_city',
+                    'value': 'FCO',
+                    'evidence': 'User booked flight departing from FCO',
+                    'confidence': 0.75
+                })).structuredContent
+                self.assertTrue(prop['ok'])
+                self.assertEqual(prop['data']['status'], 'candidate')
+                self.assertEqual(prop['data']['value'], 'FCO')
+                note_id = prop['data']['note_id']
+
+                # Profile now includes candidate note
+                p3 = (await client.call_tool('get_profile', {})).structuredContent
+                self.assertTrue(p3['ok'])
+                cand_notes = [n for n in p3['data']['frontmatter_notes'] if n['note_id'] == note_id]
+                self.assertEqual(len(cand_notes), 1)
+                self.assertEqual(cand_notes[0]['status'], 'candidate')
+
+                # Concurrent write_note conflict check
+                note_v1 = prop['data']['version']
+                wn_conflict = (await client.call_tool('write_note', {
+                    'note_id': note_id,
+                    'content': '# Custom text',
+                    'expected_version': 'stale_version'
+                })).structuredContent
+                self.assertFalse(wn_conflict['ok'])
+                self.assertEqual(wn_conflict['error']['code'], 'CONFLICT')
+
+                # Forget memory removes note and creates backup
+                del_res = (await client.call_tool('forget_memory', {
+                    'note_id': note_id,
+                    'expected_version': note_v1
+                })).structuredContent
+                self.assertTrue(del_res['ok'])
+                self.assertEqual(del_res['data']['action'], 'deleted')
+                self.assertTrue((vault_dir / del_res['data']['backup_retained']).is_file())
+
 
 
 
