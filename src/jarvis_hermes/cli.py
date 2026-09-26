@@ -51,6 +51,9 @@ def main() -> int:
     web_demo = sub.add_parser("web-demo", help="Run an isolated web page read, fill, and consent-gated submission demo")
     gemini_demo = sub.add_parser("gemini-demo", help="Run an isolated Gemini call demo recording token and cost tracking")
     routing_demo = sub.add_parser("routing-demo", help="Run an isolated routing demo testing deterministic fast-path, Jev timeout, and conservative fallback")
+    routing_report = sub.add_parser("routing-report", help="Print routing decisions telemetry report (p50/p95 latency, escalation rate, path distribution)")
+    routing_report.add_argument("--json", action="store_true", dest="as_json", help="Output report in JSON format")
+    routing_report.add_argument("--cleanup", action="store_true", help="Run retention cleanup before generating report")
     args = parser.parse_args()
     if args.command == "approval-demo":
         from .approval import ApprovalError, ApprovalStore
@@ -397,6 +400,7 @@ def main() -> int:
     if args.command == "routing-demo":
         from unittest.mock import patch
         from .llm import BudgetTracker, LLMClient, LLMConfig
+        from .telemetry import RoutingDecisionStore
         from .router import (
             FAST_PATH_RULES,
             ITALIAN_ROUTING_DATASET,
@@ -409,10 +413,11 @@ def main() -> int:
         with tempfile.TemporaryDirectory(prefix="jarvis-routing-demo-") as directory:
             tracker_file = Path(directory) / "llm_budget.json"
             tracker = BudgetTracker(tracker_file, job_limit_usd=1.00)
+            telemetry_store = RoutingDecisionStore(Path(directory) / "routing_decisions.sqlite3")
 
             # 1. Test fast path
             jev_client = JevClient(endpoint_url="http://mock-jev-url", api_key="test-key")
-            router = RequestRouter(jev_client=jev_client, budget_tracker=tracker)
+            router = RequestRouter(jev_client=jev_client, budget_tracker=tracker, telemetry_store=telemetry_store)
             fast_route = router.route("quanto spazio libero ho sul disco?", job_id="fast-path-job")
 
             # 2. Test dataset benchmark
@@ -433,6 +438,9 @@ def main() -> int:
             with patch.object(jev_client, "classify", side_effect=RouterError("JEV_TIMEOUT", "Jev request timed out")):
                 clarify_route = router.route("cancella tutto", job_id="ambiguous-job")
 
+            # Verify telemetry recording and report generation
+            demo_report = telemetry_store.generate_report()
+
             print(json.dumps({
                 "scope": "isolated_routing_demo",
                 "fast_path_verified": fast_route.used_fast_path is True and fast_route.target.value == "deterministic",
@@ -442,7 +450,34 @@ def main() -> int:
                 "fallback_target": fallback_route.target.value,
                 "ambiguous_fallback_clarification": clarify_route.target.value == "clarification",
                 "classification_cannot_authorize": True,
+                "telemetry_recorded_count": demo_report["total_decisions"],
             }))
+        return 0
+    if args.command == "routing-report":
+        from .telemetry import RoutingDecisionStore
+        state_home = Path(os.environ.get('XDG_STATE_HOME', Path.home() / '.local' / 'state'))
+        state_dir = state_home / 'jarvis-hermes'
+        db_path = state_dir / 'routing_decisions.sqlite3'
+        retention = int(os.environ.get('JARVIS_ROUTING_RETENTION_DAYS', '30'))
+        store = RoutingDecisionStore(db_path, retention_days=retention)
+        if args.cleanup:
+            store.cleanup_old_records()
+        report = store.generate_report()
+        if args.as_json:
+            print(json.dumps(report, indent=2))
+        else:
+            print(f"=== Jarvis Routing Decisions & Telemetry Report ===")
+            print(f"Total decisions: {report['total_decisions']}")
+            print(f"Escalation rate: {report['escalation_rate'] * 100:.1f}%")
+            print(f"System 1 Latency (ms): p50={report['latency_system_1_p50_ms']}, p95={report['latency_system_1_p95_ms']}")
+            print(f"First Message Latency (ms): p50={report['latency_first_msg_p50_ms']}, p95={report['latency_first_msg_p95_ms']}")
+            print(f"Total tokens: {report['total_tokens']} | Total cost: ${report['total_cost_usd']:.6f}")
+            print("\nPath distribution:")
+            for path_name, stats in report['path_distribution'].items():
+                print(f"  • {path_name}: {stats['count']} ({stats['percentage']}%)")
+            print(f"\nUser corrections ({report['corrections_count']}):")
+            for c in report['corrections']:
+                print(f"  • [#{c['id']}] Path: {c['path_chosen']} | Request: {c['request']} | Correction: {c['correzione_utente']}")
         return 0
     if args.command == "serve":
         from .server import main as serve

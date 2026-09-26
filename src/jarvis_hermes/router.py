@@ -18,10 +18,13 @@ import urllib.request
 from typing import Any, Callable
 
 from .llm import BudgetTracker, LLMClient, LLMConfig, LLMError
+from .telemetry import RoutingDecisionStore
 
 
 class RoutingTarget(str, Enum):
     DETERMINISTIC = "deterministic"
+    SYSTEM_1 = "system_1"
+    SYSTEM_2 = "system_2"
     REASONING_LLM = "reasoning_llm"
     TOOL_WORKFLOW = "tool_workflow"
     CLARIFICATION = "clarification"
@@ -187,20 +190,44 @@ class RequestRouter:
         jev_client: JevClient | None = None,
         llm_client: LLMClient | None = None,
         budget_tracker: BudgetTracker | None = None,
+        telemetry_store: RoutingDecisionStore | None = None,
         confidence_threshold: float = 0.70,
     ):
         self.jev_client = jev_client
         self.llm_client = llm_client
         self.budget_tracker = budget_tracker
+        self.telemetry_store = telemetry_store
         self.confidence_threshold = confidence_threshold
 
     def route(self, text: str, job_id: str = "default-job") -> IntentRoute:
+        import time
+        start_time = time.perf_counter()
+
+        def _record(route_obj: IntentRoute, latency_s1: float = 0.0, latency_first_msg: float = 0.0, tokens: int = 0, cost: float = 0.0):
+            if self.telemetry_store:
+                try:
+                    self.telemetry_store.record_decision(
+                        request=text,
+                        domande=["intent", "target", "confidence", "handler"],
+                        valori={"intent": route_obj.intent, "target": route_obj.target.value, "handler": route_obj.handler},
+                        confidenze={"confidence": route_obj.confidence},
+                        percorso=route_obj.target.value,
+                        modello=route_obj.classifier,
+                        latenza_system_1_ms=latency_s1,
+                        latenza_first_msg_ms=latency_first_msg,
+                        tokens=tokens,
+                        costo=cost,
+                        esito="success",
+                    )
+                except Exception:
+                    pass
+
         # Step 1: Deterministic fast-path check
         clean_text = text.strip()
 
         for pattern, intent, handler in FAST_PATH_RULES:
             if pattern.search(clean_text):
-                return IntentRoute(
+                res = IntentRoute(
                     intent=intent,
                     target=RoutingTarget.DETERMINISTIC,
                     confidence=1.0,
@@ -209,10 +236,13 @@ class RequestRouter:
                     classifier="deterministic_rule",
                     fallback_applied=False,
                 )
+                elapsed_ms = (time.perf_counter() - start_time) * 1000.0
+                _record(res, latency_s1=0.0, latency_first_msg=elapsed_ms, tokens=0, cost=0.0)
+                return res
 
         # Record non-deterministic routing / System 1 call in budget tracker per job
+        prompt_tokens = max(1, len(clean_text) // 4)
         if self.budget_tracker:
-            prompt_tokens = max(1, len(clean_text) // 4)
             self.budget_tracker.record_usage(
                 job_id=job_id,
                 provider="routing_system_1",
@@ -222,16 +252,6 @@ class RequestRouter:
                 cost_usd=0.0,
                 is_estimated=True,
             )
-            if pattern.search(clean_text):
-                return IntentRoute(
-                    intent=intent,
-                    target=RoutingTarget.DETERMINISTIC,
-                    confidence=1.0,
-                    handler=handler,
-                    used_fast_path=True,
-                    classifier="deterministic_rule",
-                    fallback_applied=False,
-                )
 
         # Step 2: Try Jev if configured
         if self.jev_client and self.jev_client.endpoint_url:
@@ -241,10 +261,11 @@ class RequestRouter:
                 intent = jev_res.get("intent", "unknown")
                 target_str = jev_res.get("target", "reasoning_llm")
                 handler = jev_res.get("handler")
+                elapsed_ms = (time.perf_counter() - start_time) * 1000.0
 
                 # If confidence is below calibrated threshold, route to clarification
                 if confidence < self.confidence_threshold:
-                    return IntentRoute(
+                    res = IntentRoute(
                         intent=intent,
                         target=RoutingTarget.CLARIFICATION,
                         confidence=confidence,
@@ -254,13 +275,15 @@ class RequestRouter:
                         fallback_applied=False,
                         details={"reason": "confidence_below_threshold", "original_target": target_str},
                     )
+                    _record(res, latency_s1=elapsed_ms, latency_first_msg=elapsed_ms, tokens=prompt_tokens, cost=0.0)
+                    return res
 
                 try:
                     target = RoutingTarget(target_str)
                 except ValueError:
                     target = RoutingTarget.REASONING_LLM
 
-                return IntentRoute(
+                res = IntentRoute(
                     intent=intent,
                     target=target,
                     confidence=confidence,
@@ -270,12 +293,20 @@ class RequestRouter:
                     fallback_applied=False,
                     details=jev_res.get("details"),
                 )
+                _record(res, latency_s1=elapsed_ms, latency_first_msg=elapsed_ms, tokens=prompt_tokens, cost=0.0)
+                return res
             except RouterError as err:
                 # Jev failed or timed out: fall back conservatively
-                return self._conservative_fallback(clean_text, job_id=job_id, error_cause=str(err))
+                res = self._conservative_fallback(clean_text, job_id=job_id, error_cause=str(err))
+                elapsed_ms = (time.perf_counter() - start_time) * 1000.0
+                _record(res, latency_s1=elapsed_ms, latency_first_msg=elapsed_ms, tokens=prompt_tokens, cost=0.0)
+                return res
 
         # Step 3: Default conservative fallback (no Jev available)
-        return self._conservative_fallback(clean_text, job_id=job_id, error_cause="JEV_NOT_CONFIGURED")
+        res = self._conservative_fallback(clean_text, job_id=job_id, error_cause="JEV_NOT_CONFIGURED")
+        elapsed_ms = (time.perf_counter() - start_time) * 1000.0
+        _record(res, latency_s1=elapsed_ms, latency_first_msg=elapsed_ms, tokens=prompt_tokens, cost=0.0)
+        return res
 
     def _conservative_fallback(self, text: str, job_id: str, error_cause: str) -> IntentRoute:
         """Conservative fallback when Jev is unavailable or fails.

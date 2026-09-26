@@ -17,7 +17,7 @@ MAX_PROJECT_FILE_BYTES = 524288  # 512 KiB
 DEFAULT_PAGE_SIZE = 8000
 
 SECRET_PATTERNS = [
-    re.compile(r'(?i)(api[_-]?key|secret|password|token|bearer|auth|authorization|credential)[\s:=]+([\'"]?)([a-zA-Z0-9_\-\.\+/]{8,})\2'),
+    re.compile(r'(?i)[\'"]?(api[_-]?key|secret|password|token|bearer|auth|authorization|credential)[\'"]?[\s:=]+([\'"]?)([a-zA-Z0-9_\-\.\+/]{8,})\2'),
     re.compile(r'ghp_[a-zA-Z0-9]{36}'),
     re.compile(r'github_pat_[a-zA-Z0-9]{22}_[a-zA-Z0-9]{59}'),
     re.compile(r'xox[baprs]-[a-zA-Z0-9]{10,48}'),
@@ -32,7 +32,7 @@ def redact_secrets(text: str) -> str:
             if match.re.groups >= 3:
                 prefix = match.group(1)
                 quote = match.group(2)
-                return f"{prefix}={quote}[REDACTED]{quote}"
+                return f"{prefix}:{quote}[REDACTED]{quote}" if ":" in match.group(0) else f"{prefix}={quote}[REDACTED]{quote}"
             val = match.group(0)
             return val[:4] + "[REDACTED]" if len(val) > 8 else "[REDACTED]"
         redacted = pat.sub(repl, redacted)

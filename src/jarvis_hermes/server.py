@@ -16,6 +16,7 @@ from .command_policy import CommandPolicyError, CommandPolicyManager
 from .gui import GuiAutomationManager, GuiError
 from .jobs import JobError, JobStore
 from .llm import BudgetTracker, LLMClient, LLMConfig, LLMError
+from .telemetry import RoutingDecisionStore
 from .projects import ProjectError, ProjectRegistry
 from .router import JevClient, RequestRouter, RouterError
 from .vault import Vault, VaultError
@@ -100,6 +101,19 @@ def _budget_tracker() -> BudgetTracker:
     return tracker
 
 
+def _routing_store() -> RoutingDecisionStore:
+    state_home = Path(os.environ.get('XDG_STATE_HOME', Path.home() / '.local' / 'state'))
+    state_dir = state_home / 'jarvis-hermes'
+    state_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+    try:
+        state_dir.chmod(0o700)
+    except OSError:
+        pass
+    storage_path = state_dir / 'routing_decisions.sqlite3'
+    retention = int(os.environ.get('JARVIS_ROUTING_RETENTION_DAYS', '30'))
+    return RoutingDecisionStore(storage_path, retention_days=retention)
+
+
 def build_server() -> FastMCP:
     server = FastMCP('Jarvis', log_level='WARNING')
     device = os.environ.get('JARVIS_DEVICE_ID', 'local')
@@ -115,6 +129,7 @@ def build_server() -> FastMCP:
     gui_manager = GuiAutomationManager(job_store=job_store)
     web_manager = WebManager(approval_store=approval_store)
     budget_tracker = _budget_tracker()
+    telemetry_store = _routing_store()
     command_policy_manager = CommandPolicyManager(
         approval_store=approval_store,
         checkpoint_manager=checkpoint_manager,
@@ -470,7 +485,12 @@ def build_server() -> FastMCP:
         jev_client = JevClient() if os.environ.get("JEV_ENDPOINT_URL") else None
         llm_config = LLMConfig(provider="gemini", model_id="gemini-2.5-flash")
         llm_client = LLMClient(config=llm_config, budget_tracker=budget_tracker)
-        router = RequestRouter(jev_client=jev_client, llm_client=llm_client, budget_tracker=budget_tracker)
+        router = RequestRouter(
+            jev_client=jev_client,
+            llm_client=llm_client,
+            budget_tracker=budget_tracker,
+            telemetry_store=telemetry_store,
+        )
         def _do_route():
             route = router.route(query, job_id=job_id)
             return {
@@ -484,6 +504,16 @@ def build_server() -> FastMCP:
                 "details": route.details,
             }
         return respond(_do_route, request_id)
+
+    @server.tool(annotations=readonly)
+    def get_routing_report(request_id: str | None = None) -> dict[str, Any]:
+        """Generate summary report of routing telemetry decisions, p50/p95 latency, and escalation rates."""
+        return respond(lambda: telemetry_store.generate_report(), request_id)
+
+    @server.tool(annotations=readonly)
+    def record_routing_correction(decision_id: int, correction: str, request_id: str | None = None) -> dict[str, Any]:
+        """Record user correction on a prior routing decision for telemetry and calibration datasets."""
+        return respond(lambda: {"updated": telemetry_store.record_correction(decision_id, correction)}, request_id)
 
     @server.tool(annotations=readonly)
     def get_job_budget_usage(job_id: str, request_id: str | None = None) -> dict[str, Any]:
