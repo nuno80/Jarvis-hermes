@@ -39,6 +39,7 @@ Subito avviabili: #1 (diagnostica, parzialmente predisposta) e #20 (verifica pro
 | JARVIS-29 | [Ripristinare dati operativi e vault da backup](https://github.com/nuno80/Jarvis-hermes/issues/29) | [#4](https://github.com/nuno80/Jarvis-hermes/issues/4), [#14](https://github.com/nuno80/Jarvis-hermes/issues/14) |
 | JARVIS-30 | [Verificare il rilascio V1 completo](https://github.com/nuno80/Jarvis-hermes/issues/30) | [#8](https://github.com/nuno80/Jarvis-hermes/issues/8), [#11](https://github.com/nuno80/Jarvis-hermes/issues/11), [#14](https://github.com/nuno80/Jarvis-hermes/issues/14), [#16](https://github.com/nuno80/Jarvis-hermes/issues/16), [#17](https://github.com/nuno80/Jarvis-hermes/issues/17), [#18](https://github.com/nuno80/Jarvis-hermes/issues/18), [#19](https://github.com/nuno80/Jarvis-hermes/issues/19), [#22](https://github.com/nuno80/Jarvis-hermes/issues/22), [#24](https://github.com/nuno80/Jarvis-hermes/issues/24), [#26](https://github.com/nuno80/Jarvis-hermes/issues/26), [#27](https://github.com/nuno80/Jarvis-hermes/issues/27), [#28](https://github.com/nuno80/Jarvis-hermes/issues/28), [#29](https://github.com/nuno80/Jarvis-hermes/issues/29) |
 | JARVIS-31 | [Installare, configurare ed iniettare Jev in Hermes](https://github.com/nuno80/Jarvis-hermes/issues/31) | [#16](https://github.com/nuno80/Jarvis-hermes/issues/16), [#17](https://github.com/nuno80/Jarvis-hermes/issues/17) |
+| JARVIS-37 | [Punti di estensione Hermes e pre-turn injection](https://github.com/nuno80/Jarvis-hermes/issues/35) | Nessuno |
 
 ## Sequenza utile
 
