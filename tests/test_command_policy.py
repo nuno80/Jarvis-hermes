@@ -161,6 +161,11 @@ class CommandPolicyTests(unittest.TestCase):
         cp_mgr = CheckpointManager(storage_dir=self.state_dir / "checkpoints")
         self.manager.checkpoint_manager = cp_mgr
 
+        # Set up a mock project registry that registers workdir
+        mock_registry = MagicMock()
+        mock_registry.get_registered_roots.return_value = [workdir.resolve()]
+        self.manager.project_registry = mock_registry
+
         res = self.manager.run_command("echo 'new content' > sample.txt", cwd=workdir)
         self.assertEqual(res["exit_code"], 0)
         self.assertEqual(res["category"], "WRITE_RECOVERABLE")
@@ -172,6 +177,70 @@ class CommandPolicyTests(unittest.TestCase):
         # Now restore from checkpoint
         cp_mgr.restore_checkpoint(res["checkpoint_id"])
         self.assertEqual(target.read_text(encoding="utf-8"), "initial content")
+
+    def test_redirect_outside_registered_root_requires_confirmation(self):
+        """Redirect writing to a file outside any registered project root requires exact confirmation."""
+        workdir = Path(self.temp_dir) / "work"
+        workdir.mkdir(exist_ok=True)
+        # Mock registry has NO roots registered or only a different root
+        mock_registry = MagicMock()
+        mock_registry.get_registered_roots.return_value = [Path(self.temp_dir) / "other_root"]
+        self.manager.project_registry = mock_registry
+
+        # Attempting automatic write_recoverable outside registered root
+        res = self.manager.classify_command("echo 'bad' > /tmp/outside.txt", cwd=workdir)
+        self.assertTrue(res.requires_approval)
+        self.assertEqual(res.category, "UNPARSEABLE_COMPLEX")
+        self.assertIn("outside registered project root", res.reason)
+
+        with self.assertRaises(CommandPolicyError) as cm:
+            self.manager.run_command("echo 'bad' > /tmp/outside.txt", cwd=workdir)
+        self.assertEqual(cm.exception.code, "APPROVAL_REQUIRED")
+
+    def test_redirect_via_symlink_requires_confirmation(self):
+        """Redirect writing through a symlink requires exact command confirmation."""
+        root = Path(self.temp_dir) / "registered_root"
+        root.mkdir(exist_ok=True)
+        outside_target = Path(self.temp_dir) / "outside.txt"
+        outside_target.write_text("secret outside", encoding="utf-8")
+        symlink_path = root / "symlink_file.txt"
+        symlink_path.symlink_to(outside_target)
+
+        mock_registry = MagicMock()
+        mock_registry.get_registered_roots.return_value = [root.resolve()]
+        self.manager.project_registry = mock_registry
+
+        res = self.manager.classify_command("echo 'hack' > symlink_file.txt", cwd=root)
+        self.assertTrue(res.requires_approval)
+        self.assertEqual(res.category, "UNPARSEABLE_COMPLEX")
+        self.assertIn("symlink", res.reason)
+
+    def test_env_printenv_cat_output_redacts_secrets(self):
+        """Output of env/printenv/cat passes through secrets redaction."""
+        res = self.manager.run_command("echo 'MY_API_KEY=ghp_123456789012345678901234567890123456'")
+        self.assertEqual(res["exit_code"], 0)
+        self.assertNotIn("ghp_123456789012345678901234567890123456", res["output"])
+        self.assertIn("[REDACTED]", res["output"])
+
+    def test_timeout_terminates_child_process_group(self):
+        """Timeout terminates the entire child process group."""
+        # Run a bash process that spawns background sleep children
+        cmd = "sleep 10"
+        classification = self.manager.classify_command(cmd)
+        actor_id = 999
+        pending = self.approval_store.request(
+            actor_id=actor_id,
+            target=f"run_command:{classification.category}",
+            arguments={"command": cmd, "digest": classification.command_digest},
+        )
+        res = self.manager.run_command(
+            cmd,
+            approval_token=pending["token"],
+            actor_id=actor_id,
+            timeout_seconds=1,
+        )
+        self.assertEqual(res["exit_code"], -1)
+        self.assertIn("timed out", res["output"])
 
 
 if __name__ == "__main__":

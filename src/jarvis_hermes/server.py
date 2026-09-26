@@ -119,6 +119,7 @@ def build_server() -> FastMCP:
         approval_store=approval_store,
         checkpoint_manager=checkpoint_manager,
         job_store=job_store,
+        project_registry=project_registry,
     )
     readonly = ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=False)
     destructive = ToolAnnotations(readOnlyHint=False, destructiveHint=True, idempotentHint=False, openWorldHint=False)

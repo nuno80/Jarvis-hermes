@@ -105,6 +105,23 @@ class ProjectRegistry:
             raise ProjectError('NOT_CONFIGURED', f'Invalid project registry configuration: {exc}')
         return self._config
 
+    def get_registered_roots(self) -> list[Path]:
+        """Return list of all registered project root directories on the current device."""
+        roots: list[Path] = []
+        try:
+            cfg = self._load_config()
+        except Exception:
+            return roots
+        projects = cfg.get('projects', {})
+        for proj_info in projects.values():
+            paths = proj_info.get('paths', {})
+            p_str = paths.get(self.current_device)
+            if p_str:
+                p = Path(p_str).expanduser()
+                if p.is_absolute() and p.is_dir():
+                    roots.append(p.resolve())
+        return roots
+
     def resolve_project_root(self, project_id: str, device_id: str | None = None) -> tuple[Path, str, str]:
         cfg = self._load_config()
         projects = cfg.get('projects', {})

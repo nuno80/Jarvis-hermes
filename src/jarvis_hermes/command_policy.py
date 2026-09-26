@@ -51,6 +51,8 @@ class CommandClassification:
 IMMUTABLE_TARGET_PATTERNS = [
     re.compile(r'(?i)(\.env|credentials|secret|shadow|sudoers|\.ssh|id_rsa|id_ed25519)'),
     re.compile(r'(?i)(\.hermes/config\.yaml|projects\.json|approvals\.sqlite3|jobs\.sqlite3|checkpoints\.sqlite3|policy\.json)'),
+    re.compile(r'(?i)(/etc/passwd|/etc/master\.passwd|/etc/security|/etc/pam\.d)'),
+    re.compile(r'(?i)(\.aws/credentials|\.kube/config|\.gnupg)'),
 ]
 
 READONLY_COMMANDS = {
@@ -84,10 +86,12 @@ class CommandPolicyManager:
         checkpoint_manager: CheckpointManager | None = None,
         state_dir: Path | None = None,
         job_store: Any | None = None,
+        project_registry: Any | None = None,
     ):
         self.approval_store = approval_store
         self.checkpoint_manager = checkpoint_manager
         self.job_store = job_store
+        self.project_registry = project_registry
         if state_dir is None:
             state_home = Path(os.environ.get('XDG_STATE_HOME', Path.home() / '.local' / 'state'))
             self.state_dir = state_home / 'jarvis-hermes'
@@ -104,7 +108,36 @@ class CommandPolicyManager:
                     'Command references protected secret stores, policy configuration, or system credentials.'
                 )
 
-    def classify_command(self, command: str) -> CommandClassification:
+    def _is_within_registered_root(self, path: Path) -> bool:
+        """Check if a path is strictly inside one of the registered project roots (no symlinks escaping root)."""
+        if not self.project_registry or not hasattr(self.project_registry, 'get_registered_roots'):
+            return False
+        roots = self.project_registry.get_registered_roots()
+        if not roots:
+            return False
+        try:
+            # Check for symlink / junction along the path
+            resolved = path.resolve()
+            for r in roots:
+                resolved_root = r.resolve()
+                if resolved.is_relative_to(resolved_root):
+                    # Check each parent component to ensure no symlink / junction escapes
+                    curr = path
+                    has_symlink = False
+                    while True:
+                        if curr.is_symlink() or (hasattr(curr, 'is_junction') and curr.is_junction()):
+                            has_symlink = True
+                            break
+                        if curr == curr.parent or curr == resolved_root:
+                            break
+                        curr = curr.parent
+                    if not has_symlink:
+                        return True
+        except Exception:
+            return False
+        return False
+
+    def classify_command(self, command: str, cwd: str | Path | None = None) -> CommandClassification:
         if not command or not command.strip():
             raise CommandPolicyError('INVALID_ARGUMENT', 'Command cannot be empty.')
 
@@ -155,15 +188,39 @@ class CommandPolicyManager:
                 # If command before redirect is safe like echo/printf
                 prefix_cmd = tokens[0]
                 if prefix_cmd in {'echo', 'printf', 'cat'}:
-                    return CommandClassification(
-                        category='WRITE_RECOVERABLE',
-                        requires_approval=False,
-                        is_unparseable_or_complex=False,
-                        command_digest=command_digest,
-                        tokens=tokens,
-                        reason=f'File modification ({target_filename}) is recoverable with automatic checkpoint.',
-                        target_file=target_filename,
-                    )
+                    # Confinement check (D04, D14, C3):
+                    # Automatic WRITE_RECOVERABLE is ONLY allowed if cwd and target are inside a registered root,
+                    # without symlinks/junctions. Outside registered roots -> requires exact command confirmation.
+                    exec_cwd = Path(cwd).resolve() if cwd else Path.cwd().resolve()
+                    target_path = Path(target_filename)
+                    if not target_path.is_absolute():
+                        target_path = exec_cwd / target_path
+
+                    # Check if target is a symlink or has symlink in path
+                    is_symlink = target_path.is_symlink() or (hasattr(target_path, 'is_junction') and target_path.is_junction())
+                    inside_root = self._is_within_registered_root(target_path) and self._is_within_registered_root(exec_cwd)
+
+                    if inside_root and not is_symlink:
+                        return CommandClassification(
+                            category='WRITE_RECOVERABLE',
+                            requires_approval=False,
+                            is_unparseable_or_complex=False,
+                            command_digest=command_digest,
+                            tokens=tokens,
+                            reason=f'File modification ({target_filename}) is recoverable with automatic checkpoint inside registered project root.',
+                            target_file=target_filename,
+                        )
+                    else:
+                        # Outside registered root or symlink: requires exact command confirmation!
+                        return CommandClassification(
+                            category='UNPARSEABLE_COMPLEX',
+                            requires_approval=True,
+                            is_unparseable_or_complex=True,
+                            command_digest=command_digest,
+                            tokens=tokens,
+                            reason=f'File redirect ({target_filename}) outside registered project root or via symlink requires exact confirmation.',
+                            target_file=target_filename,
+                        )
 
         if has_complex_composition or is_subshell_wrapper:
             # Non-trivial shell composition: must present exact command for confirmation!
@@ -253,7 +310,7 @@ class CommandPolicyManager:
         cwd: str | Path | None = None,
     ) -> dict[str, Any]:
         """Execute command following policy rules."""
-        classification = self.classify_command(command)
+        classification = self.classify_command(command, cwd=cwd)
 
         if classification.requires_approval:
             if not approval_token or actor_id is None:
@@ -304,9 +361,26 @@ class CommandPolicyManager:
             checkpoint_id = cp_res['checkpoint_id']
 
         try:
-            # We execute with shell=True if unparseable/complex or if redirected, or run token list directly if simple
-            if classification.is_unparseable_or_complex or classification.category == 'WRITE_RECOVERABLE':
+            target_file_obj = None
+            if classification.category == 'WRITE_RECOVERABLE' and classification.target_file:
+                # Automatic recoverable write: NEVER shell=True.
+                # Managed in Python: open target file descriptor and pass as stdout/append.
+                redir_idx = classification.tokens.index('>') if '>' in classification.tokens else classification.tokens.index('>>')
+                file_mode = 'a' if classification.tokens[redir_idx] == '>>' else 'w'
+                target_path = (exec_cwd / classification.target_file).resolve()
+                target_file_obj = open(target_path, file_mode, encoding='utf-8')
+                cmd_tokens = classification.tokens[:redir_idx]
                 popen_args: dict[str, Any] = {
+                    'cwd': exec_cwd,
+                    'stdout': target_file_obj,
+                    'stderr': subprocess.PIPE,
+                    'text': True,
+                    'shell': False,
+                }
+                cmd_input = cmd_tokens
+            elif classification.is_unparseable_or_complex:
+                # Approved complex composition: executes with shell=True
+                popen_args = {
                     'cwd': exec_cwd,
                     'stdout': subprocess.PIPE,
                     'stderr': subprocess.PIPE,
@@ -333,17 +407,19 @@ class CommandPolicyManager:
             )
 
             # Register PID/PGID with job if job_id provided
+            pgid = None
+            if os.name != 'nt':
+                try:
+                    pgid = os.getpgid(proc.pid)
+                except OSError:
+                    pgid = proc.pid
             if job_id and self.job_store:
-                pgid = None
-                if os.name != 'nt':
-                    try:
-                        pgid = os.getpgid(proc.pid)
-                    except OSError:
-                        pgid = proc.pid
                 try:
                     self.job_store.register_process(job_id=job_id, pid=proc.pid, pgid=pgid)
                 except Exception:
                     # Job was already cancelled: terminate immediately
+                    if target_file_obj:
+                        target_file_obj.close()
                     proc.kill()
                     proc.wait()
                     raise
@@ -351,8 +427,23 @@ class CommandPolicyManager:
             try:
                 stdout_data, stderr_data = proc.communicate(timeout=timeout_seconds)
             except subprocess.TimeoutExpired:
+                # Terminate entire process group on timeout
+                if os.name == 'nt':
+                    try:
+                        subprocess.run(['taskkill', '/F', '/T', '/PID', str(proc.pid)], capture_output=True, timeout=5)
+                    except Exception:
+                        pass
+                else:
+                    if pgid and hasattr(os, 'killpg'):
+                        try:
+                            import signal
+                            os.killpg(pgid, signal.SIGKILL)
+                        except OSError:
+                            pass
                 proc.kill()
                 stdout_data, stderr_data = proc.communicate()
+                if target_file_obj:
+                    target_file_obj.close()
                 elapsed = round(time.time() - start_time, 3)
                 return {
                     'exit_code': -1,
@@ -364,6 +455,9 @@ class CommandPolicyManager:
                     'command': command,
                     'digest': classification.command_digest,
                 }
+            finally:
+                if target_file_obj:
+                    target_file_obj.close()
 
             elapsed = round(time.time() - start_time, 3)
             raw_output = (stdout_data or '') + (("\n" + stderr_data) if stderr_data else "")
