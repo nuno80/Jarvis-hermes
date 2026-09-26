@@ -70,6 +70,82 @@ class CheckpointTests(unittest.TestCase):
         # Ensure file content wasn't overwritten
         self.assertEqual(file_path.read_text(encoding="utf-8"), "manual edit by human\n")
 
+    def test_safe_write_file_negative_cases(self):
+        file_path = self.project_dir / "code.py"
+        file_path.write_text("initial code\n", encoding="utf-8")
+        other_file = self.project_dir / "other.py"
+        other_file.write_text("other code\n", encoding="utf-8")
+
+        cp = self.manager.create_checkpoint(
+            job_id="job-neg",
+            file_path=file_path,
+            project_id="test-proj",
+            relative_path="code.py"
+        )
+
+        # 1. Non-existent checkpoint ID -> CHECKPOINT_REQUIRED
+        with self.assertRaises(CheckpointError) as ctx:
+            self.manager.safe_write_file(
+                checkpoint_id="cp-nonexistent",
+                file_path=file_path,
+                expected_initial_hash=cp["initial_hash"],
+                new_content="content"
+            )
+        self.assertEqual(ctx.exception.code, "CHECKPOINT_REQUIRED")
+
+        # 2. Checkpoint for another file -> PERMISSION_DENIED
+        with self.assertRaises(CheckpointError) as ctx:
+            self.manager.safe_write_file(
+                checkpoint_id=cp["checkpoint_id"],
+                file_path=other_file,
+                expected_initial_hash=cp["initial_hash"],
+                new_content="content"
+            )
+        self.assertEqual(ctx.exception.code, "PERMISSION_DENIED")
+
+        # 3. Checkpoint for another job -> PERMISSION_DENIED
+        with self.assertRaises(CheckpointError) as ctx:
+            self.manager.safe_write_file(
+                checkpoint_id=cp["checkpoint_id"],
+                file_path=file_path,
+                expected_initial_hash=cp["initial_hash"],
+                new_content="content",
+                job_id="different-job"
+            )
+        self.assertEqual(ctx.exception.code, "PERMISSION_DENIED")
+
+        # 4. Checkpoint for another project -> PERMISSION_DENIED
+        with self.assertRaises(CheckpointError) as ctx:
+            self.manager.safe_write_file(
+                checkpoint_id=cp["checkpoint_id"],
+                file_path=file_path,
+                expected_initial_hash=cp["initial_hash"],
+                new_content="content",
+                project_id="different-proj"
+            )
+        self.assertEqual(ctx.exception.code, "PERMISSION_DENIED")
+
+        # 5. Initial hash does not match checkpoint initial hash -> CHECKPOINT_REQUIRED
+        with self.assertRaises(CheckpointError) as ctx:
+            self.manager.safe_write_file(
+                checkpoint_id=cp["checkpoint_id"],
+                file_path=file_path,
+                expected_initial_hash="wrong-initial-hash",
+                new_content="content"
+            )
+        self.assertEqual(ctx.exception.code, "CHECKPOINT_REQUIRED")
+
+        # 6. Already restored checkpoint -> CHECKPOINT_REQUIRED
+        self.manager.restore_checkpoint(checkpoint_id=cp["checkpoint_id"])
+        with self.assertRaises(CheckpointError) as ctx:
+            self.manager.safe_write_file(
+                checkpoint_id=cp["checkpoint_id"],
+                file_path=file_path,
+                expected_initial_hash=cp["initial_hash"],
+                new_content="content"
+            )
+        self.assertEqual(ctx.exception.code, "CHECKPOINT_REQUIRED")
+
     def test_restore_fails_if_modified_concurrently_without_force(self):
         file_path = self.project_dir / "code.py"
         file_path.write_text("initial code\n", encoding="utf-8")

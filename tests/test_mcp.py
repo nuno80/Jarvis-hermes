@@ -367,6 +367,7 @@ class MCPTests(unittest.IsolatedAsyncioTestCase):
                 write_res = (await client.call_tool('write_project_file', {
                     'checkpoint_id': cp_id,
                     'project_id': 'my-calc',
+                    'job_id': 'job-42',
                     'relative_path': 'calc.py',
                     'expected_initial_hash': init_hash,
                     'content': "def add(a, b): return a + b + 1\n",
@@ -401,6 +402,7 @@ class MCPTests(unittest.IsolatedAsyncioTestCase):
                 conflict_res = (await client.call_tool('write_project_file', {
                     'checkpoint_id': cp_id2,
                     'project_id': 'my-calc',
+                    'job_id': 'job-43',
                     'relative_path': 'calc.py',
                     'expected_initial_hash': init_hash2,
                     'content': "def add(a, b): return 0\n",
@@ -409,6 +411,19 @@ class MCPTests(unittest.IsolatedAsyncioTestCase):
                 self.assertFalse(conflict_res['ok'])
                 self.assertEqual(conflict_res['error']['code'], 'CONFLICT')
                 self.assertEqual(source_file.read_text(encoding="utf-8"), "def add(a, b): return manual_edit(a, b)\n")
+
+                # 5. MCP write with invalid checkpoint -> CHECKPOINT_REQUIRED
+                invalid_cp_res = (await client.call_tool('write_project_file', {
+                    'checkpoint_id': 'cp-fake',
+                    'project_id': 'my-calc',
+                    'job_id': 'job-43',
+                    'relative_path': 'calc.py',
+                    'expected_initial_hash': init_hash2,
+                    'content': "def add(a, b): return -1\n",
+                    'device_id': 'test-node'
+                })).structuredContent
+                self.assertFalse(invalid_cp_res['ok'])
+                self.assertEqual(invalid_cp_res['error']['code'], 'CHECKPOINT_REQUIRED')
 
     async def test_gemini_tools_via_mcp(self):
         from unittest.mock import patch

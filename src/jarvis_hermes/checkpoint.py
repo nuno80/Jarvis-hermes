@@ -6,6 +6,7 @@ from pathlib import Path
 import sqlite3
 import time
 from typing import Any
+import uuid
 
 
 class CheckpointError(Exception):
@@ -102,15 +103,40 @@ class CheckpointManager:
             'created_at': timestamp
         }
 
-    def safe_write_file(self, checkpoint_id: str, file_path: Path, expected_initial_hash: str, new_content: str) -> dict[str, Any]:
+    def safe_write_file(self, checkpoint_id: str, file_path: Path, expected_initial_hash: str,
+                        new_content: str, job_id: str | None = None, project_id: str | None = None) -> dict[str, Any]:
         target = file_path.resolve()
+
+        if not checkpoint_id:
+            raise CheckpointError('CHECKPOINT_REQUIRED', 'Writing a file requires an existing active checkpoint.')
+
+        with self._get_connection() as conn:
+            row = conn.execute('SELECT * FROM checkpoints WHERE checkpoint_id = ?', (checkpoint_id,)).fetchone()
+            if not row:
+                raise CheckpointError('CHECKPOINT_REQUIRED', f'Checkpoint {checkpoint_id!r} not found.')
+
+            if row['restored_at'] is not None:
+                raise CheckpointError('CHECKPOINT_REQUIRED', f'Checkpoint {checkpoint_id!r} has already been restored and cannot accept writes.')
+
+            if Path(row['target_path']).resolve() != target:
+                raise CheckpointError('PERMISSION_DENIED', 'Checkpoint target path does not match requested file path.')
+
+            if project_id is not None and row['project_id'] != project_id:
+                raise CheckpointError('PERMISSION_DENIED', 'Checkpoint project_id does not match requested project_id.')
+
+            if job_id is not None and row['job_id'] != job_id:
+                raise CheckpointError('PERMISSION_DENIED', 'Checkpoint job_id does not match requested job_id.')
+
+            if expected_initial_hash != row['initial_hash']:
+                raise CheckpointError('CHECKPOINT_REQUIRED', 'Initial hash does not match checkpoint initial hash.')
+
         current_hash = self.compute_hash(target)
 
         if current_hash != expected_initial_hash:
             raise CheckpointError('CONFLICT', f'File was modified externally (expected hash {expected_initial_hash}, got {current_hash}).')
 
-        # Atomically write
-        tmp_target = target.with_suffix(target.suffix + '.tmp')
+        # Atomically write with a unique temporary file name to avoid collisions
+        tmp_target = target.with_name(f".{target.name}.{uuid.uuid4().hex}.tmp")
         encoded = new_content.encode('utf-8')
         tmp_target.write_bytes(encoded)
         os.replace(tmp_target, target)

@@ -331,6 +331,7 @@ def build_server() -> FastMCP:
     @server.tool(annotations=destructive)
     def write_project_file(checkpoint_id: str, project_id: str, relative_path: str,
                            content: str, expected_initial_hash: str,
+                           job_id: str | None = None,
                            device_id: str | None = None, request_id: str | None = None) -> dict[str, Any]:
         """Safely write a project file under an active checkpoint, failing on conflict if file changed."""
         def op() -> dict:
@@ -338,7 +339,14 @@ def build_server() -> FastMCP:
             target = root / relative_path
             if not target.resolve().is_relative_to(root):
                 raise ProjectError('PERMISSION_DENIED', 'Path traverses outside the project directory.')
-            return checkpoint_manager.safe_write_file(checkpoint_id, target, expected_initial_hash, content)
+            return checkpoint_manager.safe_write_file(
+                checkpoint_id=checkpoint_id,
+                file_path=target,
+                expected_initial_hash=expected_initial_hash,
+                new_content=content,
+                job_id=job_id,
+                project_id=project_id
+            )
         return respond(op, request_id)
 
     @server.tool(annotations=destructive)
