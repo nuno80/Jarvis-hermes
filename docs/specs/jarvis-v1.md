@@ -436,8 +436,8 @@ Repository software scelto: `nuno80/Jarvis-hermes`; issue tracker: GitHub Issues
 
 **Stato al 26 settembre 2026 (revisione del codice su `main`):** il repository contiene un server MCP stdio (`src/jarvis_hermes/`) con circa 27 tool locali e una suite di test su Ubuntu e Windows; l’integrazione con Hermes è additiva (non un fork). Validazioni reali su PC/Telegram sono documentate solo per alcune issue (ad esempio #1, #2, #3). Gap che violano questa specifica e hanno precedenza su nuove capacità:
 
-- `CheckpointManager.safe_write_file` accetta `checkpoint_id` ma non lo verifica (D14, C1).
-- `commit_project_changes` accetta `verification={"passed": true}` dal chiamante e non verifica gli hook prima di `git commit` (D14, C3).
+- `CheckpointManager.safe_write_file` accetta `checkpoint_id` ma non lo verifica (D14, C1) - risolto (#32).
+- `commit_project_changes` accetta `verification={"passed": true}` dal chiamante e non verifica gli hook prima di `git commit` (D14, C3) - risolto (#33).
 - `job_cancel` restituisce `process_stopped=true` senza fermare alcun processo (C2).
 - Allowlist remote/branch vuote equivalgono a «tutto consentito»; push non verificato sul remoto è riportato come `pushed` (sezione 6, C2).
 - Redirect automatici di `run_command` con `shell=True` e `cwd` non confinato alle root registrate (C3).

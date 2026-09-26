@@ -160,21 +160,31 @@ class WorkflowAndCommitTests(unittest.TestCase):
         self.cfg_file.write_text(json.dumps({
             "devices": {"local": {"environment": "wsl"}},
             "projects": {
-                "sample": {"paths": {"local": str(self.proj_dir)}}
+                "sample": {
+                    "paths": {"local": str(self.proj_dir)},
+                    "workflows": {
+                        "check": {"command": ["python3", "-c", "print('ok')"]}
+                    }
+                }
             }
         }), encoding="utf-8")
 
-        registry = ProjectRegistry(self.cfg_file, current_device="local", current_environment="wsl")
+        state_dir = Path(self.tmp.name) / "state"
+        registry = ProjectRegistry(self.cfg_file, current_device="local", current_environment="wsl", state_dir=state_dir)
+        wf_res = registry.run_project_workflow("sample", "check")
+        self.assertTrue(wf_res["ok"])
+        vr_id = wf_res["verification_run_id"]
+
         res = registry.commit_project_changes(
             project_id="sample",
             files=["f1.py"],
             commit_message="Fix small issue in f1",
-            verification={"workflow": "test", "passed": True}
+            verification_run_id=vr_id
         )
         self.assertTrue(res["committed"])
         self.assertTrue(res["commit_hash"])
         self.assertEqual(res["files"], ["f1.py"])
-        self.assertEqual(res["verification"]["passed"], True)
+        self.assertEqual(res["verification_run_id"], vr_id)
 
         # Verify git status in repo: f2.py is still modified in working tree! f3.txt still untracked!
         status_proc = subprocess.run(["git", "status", "--porcelain"], cwd=self.proj_dir, capture_output=True, text=True, check=True)
@@ -187,3 +197,146 @@ class WorkflowAndCommitTests(unittest.TestCase):
         self.assertIn("f1.py", diff_proc.stdout)
         self.assertNotIn("f2.py", diff_proc.stdout)
         self.assertNotIn("f3.txt", diff_proc.stdout)
+
+    def test_commit_rejects_dictionary_verification(self):
+        """Dict verification (untrusted model claim) is rejected with VERIFICATION_REQUIRED."""
+        self.cfg_file.write_text(json.dumps({
+            "devices": {"local": {"environment": "wsl"}},
+            "projects": {"sample": {"paths": {"local": str(self.proj_dir)}}}
+        }), encoding="utf-8")
+        registry = ProjectRegistry(self.cfg_file, current_device="local", current_environment="wsl")
+        with self.assertRaises(ProjectError) as ctx:
+            registry.commit_project_changes(
+                project_id="sample",
+                files=["f1.py"],
+                commit_message="dummy",
+                verification_run_id={"passed": True}  # type: ignore
+            )
+        self.assertEqual(ctx.exception.code, "VERIFICATION_REQUIRED")
+
+    def test_commit_rejects_missing_failed_or_wrong_project_run(self):
+        """Missing run, failed run, or run belonging to another project is rejected."""
+        test_file = self.proj_dir / "test_sample.py"
+        test_file.write_text("import unittest\nclass T(unittest.TestCase):\n    def test_fail(self): self.fail('err')\n", encoding="utf-8")
+        subprocess.run(["git", "add", "."], cwd=self.proj_dir, check=True)
+        subprocess.run(["git", "commit", "-m", "init"], cwd=self.proj_dir, check=True)
+
+        self.cfg_file.write_text(json.dumps({
+            "devices": {"local": {"environment": "wsl"}},
+            "projects": {
+                "sample": {
+                    "paths": {"local": str(self.proj_dir)},
+                    "workflows": {"test": {"command": ["python3", "-m", "unittest", "discover", "-s", "."]}}
+                },
+                "other": {
+                    "paths": {"local": str(self.proj_dir)},
+                    "workflows": {"test": {"command": ["python3", "-c", "print('ok')"]}}
+                }
+            }
+        }), encoding="utf-8")
+        state_dir = Path(self.tmp.name) / "state"
+        registry = ProjectRegistry(self.cfg_file, current_device="local", current_environment="wsl", state_dir=state_dir)
+
+        # 1. Non-existent verification run
+        with self.assertRaises(ProjectError) as ctx:
+            registry.commit_project_changes("sample", ["test_sample.py"], "msg", "vr-nonexistent")
+        self.assertEqual(ctx.exception.code, "VERIFICATION_REQUIRED")
+
+        # 2. Failed verification run
+        failed_res = registry.run_project_workflow("sample", "test")
+        self.assertFalse(failed_res["ok"])
+        with self.assertRaises(ProjectError) as ctx:
+            registry.commit_project_changes("sample", ["test_sample.py"], "msg", failed_res["verification_run_id"])
+        self.assertEqual(ctx.exception.code, "VERIFICATION_REQUIRED")
+
+        # 3. Wrong project verification run
+        other_res = registry.run_project_workflow("other", "test")
+        self.assertTrue(other_res["ok"])
+        with self.assertRaises(ProjectError) as ctx:
+            registry.commit_project_changes("sample", ["test_sample.py"], "msg", other_res["verification_run_id"])
+        self.assertEqual(ctx.exception.code, "VERIFICATION_REQUIRED")
+
+    def test_commit_rejects_file_modified_after_verification(self):
+        """Files changed after verification run are rejected."""
+        f = self.proj_dir / "app.py"
+        f.write_text("v1\n", encoding="utf-8")
+        subprocess.run(["git", "add", "."], cwd=self.proj_dir, check=True)
+        subprocess.run(["git", "commit", "-m", "init"], cwd=self.proj_dir, check=True)
+
+        self.cfg_file.write_text(json.dumps({
+            "devices": {"local": {"environment": "wsl"}},
+            "projects": {
+                "sample": {
+                    "paths": {"local": str(self.proj_dir)},
+                    "workflows": {"test": {"command": ["python3", "-c", "print('ok')"]}}
+                }
+            }
+        }), encoding="utf-8")
+        state_dir = Path(self.tmp.name) / "state"
+        registry = ProjectRegistry(self.cfg_file, current_device="local", current_environment="wsl", state_dir=state_dir)
+
+        wf_res = registry.run_project_workflow("sample", "test")
+        self.assertTrue(wf_res["ok"])
+        vr_id = wf_res["verification_run_id"]
+
+        # Now tamper with app.py AFTER verification
+        f.write_text("v2 altered\n", encoding="utf-8")
+
+        with self.assertRaises(ProjectError) as ctx:
+            registry.commit_project_changes("sample", ["app.py"], "tampered msg", vr_id)
+        self.assertEqual(ctx.exception.code, "VERIFICATION_REQUIRED")
+
+    def test_commit_rejects_untrusted_git_hook_or_allows_configured_no_verify(self):
+        """Commit executes _verify_git_hooks and rejects altered hooks; allows --no-verify only if configured."""
+        f = self.proj_dir / "app.py"
+        f.write_text("v1\n", encoding="utf-8")
+        subprocess.run(["git", "add", "."], cwd=self.proj_dir, check=True)
+        subprocess.run(["git", "commit", "-m", "init"], cwd=self.proj_dir, check=True)
+
+        self.cfg_file.write_text(json.dumps({
+            "devices": {"local": {"environment": "wsl"}},
+            "projects": {
+                "sample": {
+                    "paths": {"local": str(self.proj_dir)},
+                    "workflows": {"test": {"command": ["python3", "-c", "print('ok')"]}},
+                    "allow_no_verify": False
+                }
+            }
+        }), encoding="utf-8")
+        state_dir = Path(self.tmp.name) / "state"
+        registry = ProjectRegistry(self.cfg_file, current_device="local", current_environment="wsl", state_dir=state_dir)
+
+        f.write_text("v2\n", encoding="utf-8")
+        wf_res = registry.run_project_workflow("sample", "test")
+        self.assertTrue(wf_res["ok"])
+        vr_id = wf_res["verification_run_id"]
+
+        # Alter git hook before commit
+        hook = self.proj_dir / ".git" / "hooks" / "pre-commit"
+        hook.write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
+        hook.chmod(0o755)
+
+        # 1. Commit with untrusted hook fails HOOK_MODIFIED
+        with self.assertRaises(ProjectError) as ctx:
+            registry.commit_project_changes("sample", ["app.py"], "commit with hook", vr_id)
+        self.assertEqual(ctx.exception.code, "HOOK_MODIFIED")
+
+        # 2. Attempting --no-verify when allow_no_verify is False fails PERMISSION_DENIED
+        with self.assertRaises(ProjectError) as ctx:
+            registry.commit_project_changes("sample", ["app.py"], "commit no verify", vr_id, no_verify=True)
+        self.assertEqual(ctx.exception.code, "PERMISSION_DENIED")
+
+        # 3. If allow_no_verify is True in config, commit with no_verify succeeds
+        self.cfg_file.write_text(json.dumps({
+            "devices": {"local": {"environment": "wsl"}},
+            "projects": {
+                "sample": {
+                    "paths": {"local": str(self.proj_dir)},
+                    "workflows": {"test": {"command": ["python3", "-c", "print('ok')"]}},
+                    "allow_no_verify": True
+                }
+            }
+        }), encoding="utf-8")
+        registry_allowed = ProjectRegistry(self.cfg_file, current_device="local", current_environment="wsl", state_dir=state_dir)
+        res = registry_allowed.commit_project_changes("sample", ["app.py"], "commit no verify", vr_id, no_verify=True)
+        self.assertTrue(res["committed"])

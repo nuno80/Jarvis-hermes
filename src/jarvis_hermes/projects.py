@@ -5,9 +5,11 @@ import re
 import stat
 from hashlib import sha256
 from pathlib import Path, PurePosixPath
+import sqlite3
 import subprocess
 import time
 from typing import Any
+import uuid
 
 from jarvis_hermes.approval import ApprovalStore, ApprovalError
 
@@ -46,12 +48,49 @@ class ProjectError(Exception):
 
 class ProjectRegistry:
     def __init__(self, config_path: str | Path | None = None, current_device: str = "local",
-                 current_environment: str = "wsl", approval_store: ApprovalStore | None = None):
+                 current_environment: str = "wsl", approval_store: ApprovalStore | None = None,
+                 state_dir: str | Path | None = None):
         self.config_path = Path(config_path) if config_path else None
         self.current_device = current_device
         self.current_environment = current_environment
         self.approval_store = approval_store
         self._config: dict[str, Any] | None = None
+
+        if state_dir is None:
+            state_home = Path(os.environ.get('XDG_STATE_HOME', Path.home() / '.local' / 'state'))
+            self.state_dir = state_home / 'jarvis-hermes'
+        else:
+            self.state_dir = Path(state_dir)
+        self.state_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            self.state_dir.chmod(0o700)
+        except OSError:
+            pass
+
+        self.db_path = self.state_dir / 'verifications.sqlite3'
+        self._init_db()
+
+    def _get_connection(self) -> sqlite3.Connection:
+        conn = sqlite3.connect(self.db_path, timeout=10.0)
+        conn.row_factory = sqlite3.Row
+        return conn
+
+    def _init_db(self) -> None:
+        with self._get_connection() as conn:
+            conn.execute('''
+                CREATE TABLE IF NOT EXISTS verification_runs (
+                    verification_run_id TEXT PRIMARY KEY,
+                    job_id TEXT,
+                    project_id TEXT NOT NULL,
+                    workflow_name TEXT NOT NULL,
+                    file_hashes TEXT NOT NULL,
+                    passed INTEGER NOT NULL,
+                    exit_code INTEGER NOT NULL,
+                    output TEXT NOT NULL,
+                    created_at REAL NOT NULL
+                )
+            ''')
+            conn.commit()
 
     def _load_config(self) -> dict[str, Any]:
         if self._config is not None:
@@ -197,8 +236,39 @@ class ProjectRegistry:
             if hook_file.name not in allowed_hook_hashes or allowed_hook_hashes[hook_file.name] != h:
                 raise ProjectError('HOOK_MODIFIED', f'Git hook {hook_file.name!r} has unexpected or untrusted hash.')
 
+    def _snapshot_file_hashes(self, root: Path, file_list: list[str] | None = None) -> dict[str, str]:
+        """Compute sha256 of tracked files or specific file list in root."""
+        hashes: dict[str, str] = {}
+        if file_list is not None:
+            for rel in file_list:
+                p = (root / rel).resolve()
+                if p.is_relative_to(root) and p.is_file():
+                    hashes[rel.replace('\\', '/')] = sha256(p.read_bytes()).hexdigest()
+            return hashes
+
+        # If file_list is None, snapshot all files changed or tracked via git
+        try:
+            res = subprocess.run(['git', 'ls-files'], cwd=root, capture_output=True, text=True, check=True)
+            for line in res.stdout.splitlines():
+                rel = line.strip()
+                if not rel:
+                    continue
+                p = (root / rel).resolve()
+                if p.is_relative_to(root) and p.is_file():
+                    hashes[rel.replace('\\', '/')] = sha256(p.read_bytes()).hexdigest()
+        except Exception:
+            # Fallback if git fails: walk root excluding .git
+            for p in root.rglob('*'):
+                if '.git' in p.parts:
+                    continue
+                if p.is_file():
+                    rel = p.relative_to(root).as_posix()
+                    hashes[rel] = sha256(p.read_bytes()).hexdigest()
+        return hashes
+
     def run_project_workflow(self, project_id: str, workflow_name: str,
-                             device_id: str | None = None, timeout_seconds: int = 120) -> dict[str, Any]:
+                             device_id: str | None = None, timeout_seconds: int = 120,
+                             job_id: str | None = None, files: list[str] | None = None) -> dict[str, Any]:
         """Run an allowed project workflow (e.g. test, build) checking script and hook integrity."""
         root, resolved_device, resolved_env = self.resolve_project_root(project_id, device_id)
         cfg = self._load_config()
@@ -239,49 +309,116 @@ class ProjectRegistry:
             elapsed = time.time() - start_time
             raw_output = (proc.stdout or '') + (proc.stderr or '')
             redacted_out = redact_secrets(raw_output)
-            return {
-                'ok': proc.returncode == 0,
-                'exit_code': proc.returncode,
-                'output': redacted_out,
-                'elapsed_seconds': round(elapsed, 3),
-                'workflow': workflow_name,
-                'project_id': project_id,
-                'device_id': resolved_device
-            }
-        except subprocess.TimeoutExpired as exc:
+            passed = (proc.returncode == 0)
+            exit_code = proc.returncode
+        except subprocess.TimeoutExpired:
             elapsed = time.time() - start_time
-            return {
-                'ok': False,
-                'exit_code': -1,
-                'output': 'Workflow execution timed out.',
-                'elapsed_seconds': round(elapsed, 3),
-                'workflow': workflow_name,
-                'project_id': project_id,
-                'device_id': resolved_device
-            }
+            passed = False
+            exit_code = -1
+            redacted_out = 'Workflow execution timed out.'
         except Exception as exc:
             raise ProjectError('EXECUTION_FAILED', f'Failed to run workflow: {exc}')
 
+        # Snapshot file hashes involved in verification
+        file_hashes = self._snapshot_file_hashes(root, files)
+        run_id = f"vr-{uuid.uuid4().hex[:16]}"
+        now = time.time()
+
+        with self._get_connection() as conn:
+            conn.execute('''
+                INSERT INTO verification_runs (
+                    verification_run_id, job_id, project_id, workflow_name,
+                    file_hashes, passed, exit_code, output, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ''', (
+                run_id, job_id, project_id, workflow_name,
+                json.dumps(file_hashes), 1 if passed else 0, exit_code, redacted_out, now
+            ))
+            conn.commit()
+
+        return {
+            'ok': passed,
+            'exit_code': exit_code,
+            'output': redacted_out,
+            'elapsed_seconds': round(elapsed, 3),
+            'workflow': workflow_name,
+            'project_id': project_id,
+            'device_id': resolved_device,
+            'verification_run_id': run_id
+        }
+
     def commit_project_changes(self, project_id: str, files: list[str],
-                               commit_message: str, verification: dict[str, Any],
-                               device_id: str | None = None) -> dict[str, Any]:
-        """Commit only relevant files changed by the job, preserving unrelated worktree changes."""
+                               commit_message: str, verification_run_id: str,
+                               device_id: str | None = None,
+                               max_age_seconds: int = 3600,
+                               no_verify: bool = False) -> dict[str, Any]:
+        """Commit only relevant files changed by the job after verifying verification_run_id."""
+        if isinstance(verification_run_id, dict):
+            raise ProjectError('VERIFICATION_REQUIRED', 'verification_run_id must be a string ID referencing a recorded verification run, not a dictionary.')
+        if not verification_run_id or not isinstance(verification_run_id, str):
+            raise ProjectError('VERIFICATION_REQUIRED', 'A valid verification_run_id is required.')
+
         if not files:
             raise ProjectError('INVALID_ARGUMENT', 'No files specified to commit.')
         if not commit_message or not commit_message.strip():
             raise ProjectError('INVALID_ARGUMENT', 'Commit message cannot be empty.')
-        if not verification or not verification.get('passed'):
-            raise ProjectError('VERIFICATION_FAILED', 'Cannot commit changes without a passing verification.')
 
         root, resolved_device, _ = self.resolve_project_root(project_id, device_id)
         if not (root / '.git').exists():
             raise ProjectError('NOT_A_GIT_REPO', f'Project root {root} is not a git repository.')
+
+        # Validate verification run from SQLite storage
+        with self._get_connection() as conn:
+            row = conn.execute('SELECT * FROM verification_runs WHERE verification_run_id = ?',
+                               (verification_run_id,)).fetchone()
+            if not row:
+                raise ProjectError('VERIFICATION_REQUIRED', f'Verification run {verification_run_id!r} not found.')
+
+            if row['project_id'] != project_id:
+                raise ProjectError('VERIFICATION_REQUIRED', f'Verification run {verification_run_id!r} belongs to project {row["project_id"]!r}, not {project_id!r}.')
+
+            if not row['passed']:
+                raise ProjectError('VERIFICATION_REQUIRED', f'Verification run {verification_run_id!r} failed.')
+
+            if max_age_seconds > 0 and (time.time() - row['created_at']) > max_age_seconds:
+                raise ProjectError('VERIFICATION_REQUIRED', f'Verification run {verification_run_id!r} has expired.')
+
+            run_hashes = json.loads(row['file_hashes'])
 
         # Validate that all files are inside the repo and exist
         for rel_file in files:
             target = (root / rel_file).resolve()
             if not target.is_relative_to(root):
                 raise ProjectError('PERMISSION_DENIED', f'File path {rel_file!r} traverses outside repository.')
+            if not target.is_file():
+                raise ProjectError('FILE_NOT_FOUND', f'File {rel_file!r} does not exist.')
+
+            norm_rel = rel_file.replace('\\', '/')
+            current_h = sha256(target.read_bytes()).hexdigest()
+            # If the verification run recorded hashes for these files, they must match!
+            if norm_rel in run_hashes and run_hashes[norm_rel] != current_h:
+                raise ProjectError('VERIFICATION_REQUIRED', f'File {rel_file!r} was modified after verification run.')
+            elif norm_rel not in run_hashes:
+                # If specific files were tracked in verification and this file wasn't verified
+                raise ProjectError('VERIFICATION_REQUIRED', f'File {rel_file!r} was not verified in verification run {verification_run_id!r}.')
+
+        # Check git hooks before git commit
+        cfg = self._load_config()
+        proj = cfg.get('projects', {}).get(project_id, {})
+        allowed_hook_hashes = proj.get('allowed_hook_hashes', {})
+        # If any workflow defines allowed_hook_hashes, combine them
+        for wf in proj.get('workflows', {}).values():
+            if 'allowed_hook_hashes' in wf:
+                allowed_hook_hashes.update(wf['allowed_hook_hashes'])
+
+        commit_flags = []
+        if no_verify:
+            # no_verify must be explicitly allowed by project configuration
+            if not proj.get('allow_no_verify', False):
+                raise ProjectError('PERMISSION_DENIED', 'Commit with --no-verify is not permitted by project configuration.')
+            commit_flags.append('--no-verify')
+        else:
+            self._verify_git_hooks(root, allowed_hook_hashes)
 
         try:
             # Stage only the specified files
@@ -295,8 +432,9 @@ class ProjectRegistry:
                 raise ProjectError('NOTHING_TO_COMMIT', 'None of the specified files have changes to commit.')
 
             # Commit staged changes
+            commit_cmd = ['git', 'commit', '-m', commit_message] + commit_flags
             commit_proc = subprocess.run(
-                ['git', 'commit', '-m', commit_message],
+                commit_cmd,
                 cwd=root, capture_output=True, text=True, check=True
             )
 
@@ -312,7 +450,7 @@ class ProjectRegistry:
                 'commit_hash': commit_hash,
                 'files': staged_files,
                 'message': commit_message,
-                'verification': verification,
+                'verification_run_id': verification_run_id,
                 'project_id': project_id,
                 'device_id': resolved_device
             }

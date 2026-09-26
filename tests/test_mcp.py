@@ -505,7 +505,10 @@ class MCPTests(unittest.IsolatedAsyncioTestCase):
             }}''', encoding="utf-8")
 
             async with connected(projects_config=cfg_file, state_home=state_dir) as client:
-                # 1. Run workflow -> success
+                # 1. Modify calc.py
+                code_file.write_text("def add(a, b): return a + b  # updated\n", encoding="utf-8")
+
+                # 2. Run workflow -> success, returns verification_run_id
                 wf_res = (await client.call_tool('run_project_workflow', {
                     'project_id': 'my-calc',
                     'workflow_name': 'test',
@@ -514,22 +517,22 @@ class MCPTests(unittest.IsolatedAsyncioTestCase):
                 self.assertTrue(wf_res['ok'])
                 self.assertTrue(wf_res['data']['ok'])
                 self.assertEqual(wf_res['data']['exit_code'], 0)
+                verification_run_id = wf_res['data']['verification_run_id']
+                self.assertTrue(verification_run_id)
 
-                # 2. Modify calc.py
-                code_file.write_text("def add(a, b): return a + b  # updated\n", encoding="utf-8")
-
-                # 3. Commit changes via commit_project_changes tool
+                # 3. Commit changes via commit_project_changes tool referencing verification_run_id
                 commit_res = (await client.call_tool('commit_project_changes', {
                     'project_id': 'my-calc',
                     'files': ['calc.py'],
                     'commit_message': 'Add comment in calc.py',
-                    'verification': {'workflow': 'test', 'passed': True},
+                    'verification_run_id': verification_run_id,
                     'device_id': 'test-node'
                 })).structuredContent
                 self.assertTrue(commit_res['ok'])
                 self.assertTrue(commit_res['data']['committed'])
                 self.assertTrue(commit_res['data']['commit_hash'])
                 self.assertEqual(commit_res['data']['files'], ['calc.py'])
+                self.assertEqual(commit_res['data']['verification_run_id'], verification_run_id)
 
     async def test_git_push_via_mcp_with_approval(self):
         import subprocess

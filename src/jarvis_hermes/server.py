@@ -70,6 +70,17 @@ def _job_store() -> JobStore:
     return store
 
 
+def _verifications_dir() -> Path:
+    state_home = Path(os.environ.get('XDG_STATE_HOME', Path.home() / '.local' / 'state'))
+    state_dir = state_home / 'jarvis-hermes'
+    state_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+    try:
+        state_dir.chmod(0o700)
+    except OSError:
+        pass
+    return state_dir
+
+
 def _budget_tracker() -> BudgetTracker:
     state_home = Path(os.environ.get('XDG_STATE_HOME', Path.home() / '.local' / 'state'))
     state_dir = state_home / 'jarvis-hermes'
@@ -98,7 +109,8 @@ def build_server() -> FastMCP:
     current_env = 'wsl' if os.path.exists('/proc/version') and 'microsoft' in open('/proc/version').read().lower() else ('windows' if os.name == 'nt' else 'linux')
     projects_config = os.environ.get('JARVIS_PROJECTS_CONFIG')
     approval_store = _approval_store()
-    project_registry = ProjectRegistry(projects_config, current_device=device, current_environment=current_env, approval_store=approval_store)
+    verifications_dir = _verifications_dir()
+    project_registry = ProjectRegistry(projects_config, current_device=device, current_environment=current_env, approval_store=approval_store, state_dir=verifications_dir)
     checkpoint_manager = CheckpointManager()
     gui_manager = GuiAutomationManager()
     web_manager = WebManager(approval_store=approval_store)
@@ -358,23 +370,26 @@ def build_server() -> FastMCP:
     @server.tool(annotations=readonly)
     def run_project_workflow(project_id: str, workflow_name: str,
                              device_id: str | None = None, timeout_seconds: int = 120,
+                             job_id: str | None = None, files: list[str] | None = None,
                              request_id: str | None = None) -> dict[str, Any]:
-        """Run an allowed project workflow checking script and git hook integrity."""
+        """Run an allowed project workflow checking script and git hook integrity, recording verification run."""
         return respond(lambda: project_registry.run_project_workflow(
             project_id=project_id, workflow_name=workflow_name,
-            device_id=device_id, timeout_seconds=timeout_seconds
+            device_id=device_id, timeout_seconds=timeout_seconds,
+            job_id=job_id, files=files
         ), request_id)
 
     @server.tool(annotations=destructive)
     def commit_project_changes(project_id: str, files: list[str],
-                               commit_message: str, verification: dict[str, Any],
+                               commit_message: str, verification_run_id: str,
                                device_id: str | None = None,
+                               no_verify: bool = False,
                                request_id: str | None = None) -> dict[str, Any]:
-        """Commit only relevant files changed by the job after successful verification."""
+        """Commit only relevant files changed by the job after verifying verification_run_id."""
         return respond(lambda: project_registry.commit_project_changes(
             project_id=project_id, files=files,
-            commit_message=commit_message, verification=verification,
-            device_id=device_id
+            commit_message=commit_message, verification_run_id=verification_run_id,
+            device_id=device_id, no_verify=no_verify
         ), request_id)
 
     @server.tool(annotations=destructive)
