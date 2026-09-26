@@ -197,7 +197,31 @@ class RequestRouter:
     def route(self, text: str, job_id: str = "default-job") -> IntentRoute:
         # Step 1: Deterministic fast-path check
         clean_text = text.strip()
+
         for pattern, intent, handler in FAST_PATH_RULES:
+            if pattern.search(clean_text):
+                return IntentRoute(
+                    intent=intent,
+                    target=RoutingTarget.DETERMINISTIC,
+                    confidence=1.0,
+                    handler=handler,
+                    used_fast_path=True,
+                    classifier="deterministic_rule",
+                    fallback_applied=False,
+                )
+
+        # Record non-deterministic routing / System 1 call in budget tracker per job
+        if self.budget_tracker:
+            prompt_tokens = max(1, len(clean_text) // 4)
+            self.budget_tracker.record_usage(
+                job_id=job_id,
+                provider="routing_system_1",
+                model_id="system_1_classifier",
+                prompt_tokens=prompt_tokens,
+                completion_tokens=0,
+                cost_usd=0.0,
+                is_estimated=True,
+            )
             if pattern.search(clean_text):
                 return IntentRoute(
                     intent=intent,

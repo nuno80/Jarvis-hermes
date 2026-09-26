@@ -191,6 +191,31 @@ class GeminiProviderTests(unittest.TestCase):
         self.assertEqual(ctx.exception.code, "BUDGET_EXCEEDED")
         self.assertIn("Job budget limit", ctx.exception.message)
 
+    def test_concurrent_budget_calls_without_loss(self):
+        """20 concurrent calls to BudgetTracker update total usage without loss or corruption."""
+        import concurrent.futures
+
+        def record_worker(worker_id: int):
+            self.tracker.record_usage(
+                job_id="job-concurrent-20",
+                provider="gemini",
+                model_id="gemini-2.5-flash",
+                prompt_tokens=10,
+                completion_tokens=5,
+                cost_usd=0.001,
+                is_estimated=False,
+            )
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
+            futures = [executor.submit(record_worker, i) for i in range(20)]
+            for f in concurrent.futures.as_completed(futures):
+                f.result()
+
+        usage = self.tracker.get_job_usage("job-concurrent-20")
+        self.assertEqual(usage["calls_count"], 20)
+        self.assertEqual(usage["total_tokens"], 20 * 15)
+        self.assertAlmostEqual(usage["total_cost_usd"], 20 * 0.001, places=5)
+
 
 if __name__ == "__main__":
     unittest.main()

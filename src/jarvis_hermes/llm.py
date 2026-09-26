@@ -10,6 +10,7 @@ import json
 import os
 from pathlib import Path
 import re
+import sqlite3
 import urllib.error
 import urllib.request
 from typing import Any
@@ -49,35 +50,76 @@ class BudgetTracker:
         self.job_limit_usd = float(job_limit_usd)
         self.daily_limit_usd = float(daily_limit_usd)
         self.storage_path.parent.mkdir(parents=True, exist_ok=True)
-        if not self.storage_path.exists():
-            self._save_data({"records": [], "job_totals": {}, "daily_totals": {}})
+        # Use SQLite database for concurrency and transactional atomicity
+        if self.storage_path.suffix == ".json":
+            self.db_path = self.storage_path.with_suffix(".sqlite3")
+        else:
+            self.db_path = self.storage_path
+        self._init_db()
+        self._sync_legacy_json()
 
-    def _load_data(self) -> dict[str, Any]:
-        try:
-            return json.loads(self.storage_path.read_text(encoding="utf-8"))
-        except Exception:
-            return {"records": [], "job_totals": {}, "daily_totals": {}}
+    def _sync_legacy_json(self) -> None:
+        """Keep optional JSON mirror or empty JSON file for backward compatibility if configured as .json."""
+        if self.storage_path.suffix == ".json":
+            try:
+                with self._get_connection() as conn:
+                    rows = conn.execute("SELECT * FROM budget_records").fetchall()
+                    records = [dict(r) for r in rows]
+                self.storage_path.write_text(json.dumps({"records": records}, indent=2), encoding="utf-8")
+            except Exception:
+                pass
 
-    def _save_data(self, data: dict[str, Any]) -> None:
-        self.storage_path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+    def _get_connection(self) -> sqlite3.Connection:
+        conn = sqlite3.connect(str(self.db_path), timeout=30.0, isolation_level=None)
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA journal_mode=WAL")
+        return conn
+
+    def _init_db(self) -> None:
+        with self._get_connection() as conn:
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS budget_records (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    job_id TEXT NOT NULL,
+                    provider TEXT NOT NULL,
+                    model_id TEXT NOT NULL,
+                    prompt_tokens INTEGER NOT NULL,
+                    completion_tokens INTEGER NOT NULL,
+                    total_tokens INTEGER NOT NULL,
+                    cost_usd REAL NOT NULL,
+                    is_estimated INTEGER NOT NULL,
+                    day_utc TEXT NOT NULL,
+                    timestamp TEXT NOT NULL
+                )
+            """)
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_records_job_id ON budget_records(job_id)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_records_day ON budget_records(day_utc)")
 
     def check_budget_available(self, job_id: str | None = None) -> None:
-        data = self._load_data()
         today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-        daily_used = data.get("daily_totals", {}).get(today, 0.0)
-        if daily_used >= self.daily_limit_usd:
-            raise LLMError(
-                "DAILY_BUDGET_EXCEEDED",
-                f"Daily LLM budget limit reached (${daily_used:.4f} >= ${self.daily_limit_usd:.4f})."
-            )
-
-        if job_id:
-            job_used = data.get("job_totals", {}).get(job_id, {}).get("total_cost_usd", 0.0)
-            if job_used >= self.job_limit_usd:
+        with self._get_connection() as conn:
+            row_daily = conn.execute(
+                "SELECT COALESCE(SUM(cost_usd), 0.0) as total FROM budget_records WHERE day_utc = ?",
+                (today,)
+            ).fetchone()
+            daily_used = float(row_daily["total"]) if row_daily else 0.0
+            if daily_used >= self.daily_limit_usd:
                 raise LLMError(
-                    "BUDGET_EXCEEDED",
-                    f"Job budget limit reached for {job_id} (${job_used:.4f} >= ${self.job_limit_usd:.4f})."
+                    "DAILY_BUDGET_EXCEEDED",
+                    f"Daily LLM budget limit reached (${daily_used:.4f} >= ${self.daily_limit_usd:.4f})."
                 )
+
+            if job_id:
+                row_job = conn.execute(
+                    "SELECT COALESCE(SUM(cost_usd), 0.0) as total FROM budget_records WHERE job_id = ?",
+                    (job_id,)
+                ).fetchone()
+                job_used = float(row_job["total"]) if row_job else 0.0
+                if job_used >= self.job_limit_usd:
+                    raise LLMError(
+                        "BUDGET_EXCEEDED",
+                        f"Job budget limit reached for {job_id} (${job_used:.4f} >= ${self.job_limit_usd:.4f})."
+                    )
 
     def record_usage(
         self,
@@ -92,57 +134,117 @@ class BudgetTracker:
         now_iso = datetime.now(timezone.utc).isoformat()
         today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
         total_tokens = prompt_tokens + completion_tokens
+        rounded_cost = round(cost_usd, 6)
 
-        record = UsageRecord(
+        conn = self._get_connection()
+        try:
+            # Atomically check limits and record usage under BEGIN IMMEDIATE
+            conn.execute("BEGIN IMMEDIATE")
+            row_daily = conn.execute(
+                "SELECT COALESCE(SUM(cost_usd), 0.0) as total FROM budget_records WHERE day_utc = ?",
+                (today,)
+            ).fetchone()
+            daily_used = float(row_daily["total"]) if row_daily else 0.0
+            if daily_used >= self.daily_limit_usd:
+                conn.execute("ROLLBACK")
+                raise LLMError(
+                    "DAILY_BUDGET_EXCEEDED",
+                    f"Daily LLM budget limit reached (${daily_used:.4f} >= ${self.daily_limit_usd:.4f})."
+                )
+
+            if job_id:
+                row_job = conn.execute(
+                    "SELECT COALESCE(SUM(cost_usd), 0.0) as total FROM budget_records WHERE job_id = ?",
+                    (job_id,)
+                ).fetchone()
+                job_used = float(row_job["total"]) if row_job else 0.0
+                if job_used >= self.job_limit_usd:
+                    conn.execute("ROLLBACK")
+                    raise LLMError(
+                        "BUDGET_EXCEEDED",
+                        f"Job budget limit reached for {job_id} (${job_used:.4f} >= ${self.job_limit_usd:.4f})."
+                    )
+
+            conn.execute(
+                """
+                INSERT INTO budget_records (
+                    job_id, provider, model_id, prompt_tokens, completion_tokens,
+                    total_tokens, cost_usd, is_estimated, day_utc, timestamp
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    job_id, provider, model_id, prompt_tokens, completion_tokens,
+                    total_tokens, rounded_cost, 1 if is_estimated else 0, today, now_iso
+                )
+            )
+            conn.execute("COMMIT")
+        except Exception:
+            try:
+                conn.execute("ROLLBACK")
+            except Exception:
+                pass
+            raise
+        finally:
+            conn.close()
+
+        self._sync_legacy_json()
+
+        return UsageRecord(
             job_id=job_id,
             provider=provider,
             model_id=model_id,
             prompt_tokens=prompt_tokens,
             completion_tokens=completion_tokens,
             total_tokens=total_tokens,
-            cost_usd=round(cost_usd, 6),
+            cost_usd=rounded_cost,
             is_estimated=is_estimated,
             timestamp=now_iso,
         )
 
-        data = self._load_data()
-        records = data.setdefault("records", [])
-        records.append({
-            "job_id": record.job_id,
-            "provider": record.provider,
-            "model_id": record.model_id,
-            "prompt_tokens": record.prompt_tokens,
-            "completion_tokens": record.completion_tokens,
-            "total_tokens": record.total_tokens,
-            "cost_usd": record.cost_usd,
-            "is_estimated": record.is_estimated,
-            "timestamp": record.timestamp,
-        })
-
-        daily_totals = data.setdefault("daily_totals", {})
-        daily_totals[today] = round(daily_totals.get(today, 0.0) + cost_usd, 6)
-
-        job_totals = data.setdefault("job_totals", {})
-        current_job = job_totals.get(job_id, {
-            "total_tokens": 0,
-            "total_cost_usd": 0.0,
-            "calls_count": 0,
-        })
-        current_job["total_tokens"] += total_tokens
-        current_job["total_cost_usd"] = round(current_job["total_cost_usd"] + cost_usd, 6)
-        current_job["calls_count"] += 1
-        job_totals[job_id] = current_job
-
-        self._save_data(data)
-        return record
-
     def get_job_usage(self, job_id: str) -> dict[str, Any]:
-        data = self._load_data()
-        return data.get("job_totals", {}).get(job_id, {
-            "total_tokens": 0,
-            "total_cost_usd": 0.0,
-            "calls_count": 0,
-        })
+        with self._get_connection() as conn:
+            row = conn.execute(
+                """
+                SELECT
+                    COALESCE(SUM(total_tokens), 0) as total_tokens,
+                    COALESCE(SUM(cost_usd), 0.0) as total_cost_usd,
+                    COUNT(*) as calls_count
+                FROM budget_records
+                WHERE job_id = ?
+                """,
+                (job_id,)
+            ).fetchone()
+            if not row:
+                return {"total_tokens": 0, "total_cost_usd": 0.0, "calls_count": 0}
+            return {
+                "total_tokens": int(row["total_tokens"]),
+                "total_cost_usd": round(float(row["total_cost_usd"]), 6),
+                "calls_count": int(row["calls_count"]),
+            }
+
+
+class STTClient:
+    """STT (Speech-to-Text) adapter recording per-job budget usage."""
+    def __init__(self, budget_tracker: BudgetTracker, model_id: str = "whisper-1"):
+        self.budget_tracker = budget_tracker
+        self.model_id = model_id
+
+    def transcribe(self, audio_bytes: bytes, job_id: str = "default-job") -> str:
+        duration_seconds = max(1, len(audio_bytes) // 32000)
+        cost_usd = duration_seconds * (0.006 / 60.0)
+        prompt_tokens = duration_seconds * 4
+
+        self.budget_tracker.check_budget_available(job_id=job_id)
+        self.budget_tracker.record_usage(
+            job_id=job_id,
+            provider="stt",
+            model_id=self.model_id,
+            prompt_tokens=prompt_tokens,
+            completion_tokens=0,
+            cost_usd=cost_usd,
+            is_estimated=True,
+        )
+        return ""
 
 
 @dataclass
@@ -193,8 +295,8 @@ class LLMClient:
         # 4. Check budget availability
         self.budget_tracker.check_budget_available(job_id)
 
-        # 5. Execute request
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/{self.config.model_id}:generateContent?key={api_key}"
+        # 5. Execute request - API key transmitted via x-goog-api-key header, not in URL
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{self.config.model_id}:generateContent"
         payload = {
             "contents": [
                 {
@@ -206,7 +308,10 @@ class LLMClient:
         req = urllib.request.Request(
             url,
             data=data_bytes,
-            headers={"Content-Type": "application/json"},
+            headers={
+                "Content-Type": "application/json",
+                "x-goog-api-key": api_key,
+            },
             method="POST",
         )
 
@@ -215,21 +320,18 @@ class LLMClient:
                 raw_response = resp.read().decode("utf-8")
                 resp_json = json.loads(raw_response)
         except urllib.error.HTTPError as exc:
-            # Mask API key from error
-            clean_reason = re.sub(r"key=[a-zA-Z0-9_\-]+", "key=[REDACTED]", str(exc))
+            # Clean error without sensitive details
             if exc.code == 429:
-                raise LLMError("QUOTA_EXHAUSTED", f"Gemini quota exhausted / rate limit reached: {clean_reason}") from None
+                raise LLMError("QUOTA_EXHAUSTED", "Gemini quota exhausted / rate limit reached.") from None
             if exc.code in (401, 403):
-                raise LLMError("AUTHENTICATION_FAILED", f"Gemini authentication failed: {clean_reason}") from None
-            raise LLMError("API_ERROR", f"Gemini API returned HTTP {exc.code}: {clean_reason}") from None
+                raise LLMError("AUTHENTICATION_FAILED", "Gemini authentication failed.") from None
+            raise LLMError("API_ERROR", f"Gemini API returned HTTP {exc.code}.") from None
         except (TimeoutError, urllib.error.URLError) as exc:
-            clean_str = re.sub(r"key=[a-zA-Z0-9_\-]+", "key=[REDACTED]", str(exc))
             if isinstance(exc, TimeoutError) or "timed out" in str(exc).lower():
-                raise LLMError("TIMEOUT", f"Gemini request timed out: {clean_str}") from None
-            raise LLMError("NETWORK_ERROR", f"Network connection error to Gemini: {clean_str}") from None
-        except Exception as exc:
-            clean_str = re.sub(r"key=[a-zA-Z0-9_\-]+", "key=[REDACTED]", str(exc))
-            raise LLMError("UNEXPECTED_ERROR", f"Unexpected error during Gemini call: {clean_str}") from None
+                raise LLMError("TIMEOUT", "Gemini request timed out.") from None
+            raise LLMError("NETWORK_ERROR", "Network connection error to Gemini.") from None
+        except Exception:
+            raise LLMError("UNEXPECTED_ERROR", "Unexpected error during Gemini call.") from None
 
         # 6. Parse response & extract text and token metrics
         candidates = resp_json.get("candidates", [])

@@ -543,9 +543,9 @@ class ProjectRegistry:
         allowed_remotes = proj.get('allowed_remotes', [])
         allowed_branches = proj.get('allowed_branches', [])
 
-        if allowed_remotes and remote not in allowed_remotes:
+        if not allowed_remotes or remote not in allowed_remotes:
             raise ProjectError('REMOTE_NOT_ALLOWED', f'Remote {remote!r} is not allowed for project {project_id!r}.')
-        if allowed_branches and branch not in allowed_branches:
+        if not allowed_branches or branch not in allowed_branches:
             raise ProjectError('BRANCH_NOT_ALLOWED', f'Branch {branch!r} is not allowed for project {project_id!r}.')
 
         # Check commit hash format
@@ -596,9 +596,23 @@ class ProjectRegistry:
         # Verify on remote
         remote_verified = self.verify_remote_commit(project_id, remote, branch, commit_hash, device_id)
 
+        if not remote_verified:
+            return {
+                'pushed': False,
+                'status': 'OUTCOME_UNKNOWN',
+                'remote_verified': False,
+                'project_id': project_id,
+                'remote': remote,
+                'branch': branch,
+                'commit_hash': commit_hash,
+                'device_id': resolved_device,
+                'warning': 'Push command returned 0 but commit ref could not be verified on remote.',
+            }
+
         return {
             'pushed': True,
-            'remote_verified': remote_verified,
+            'status': 'SUCCEEDED',
+            'remote_verified': True,
             'project_id': project_id,
             'remote': remote,
             'branch': branch,

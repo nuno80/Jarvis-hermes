@@ -212,6 +212,67 @@ class GitPushApprovalTests(unittest.TestCase):
         exists_now = self.registry.verify_remote_commit("sample", "origin", "main", self.initial_commit)
         self.assertTrue(exists_now)
 
+    def test_empty_or_missing_allowlist_rejects(self):
+        """Empty or missing allowed_remotes / allowed_branches rejects instead of allowing all."""
+        empty_cfg = self.base / "empty_allowlist.json"
+        empty_cfg.write_text(json.dumps({
+            "devices": {"local": {"environment": "wsl"}},
+            "projects": {
+                "sample": {
+                    "paths": {"local": str(self.local_dir)},
+                    "allowed_remotes": [],
+                    "allowed_branches": []
+                }
+            }
+        }), encoding="utf-8")
+        empty_registry = ProjectRegistry(
+            empty_cfg,
+            current_device="local",
+            current_environment="wsl",
+            approval_store=self.store
+        )
+        with self.assertRaises(ProjectError) as ctx:
+            empty_registry.push_project_commit(
+                project_id="sample",
+                remote="origin",
+                branch="main",
+                commit_hash=self.initial_commit,
+                approval_token="dummy-token",
+                actor_id=self.actor_id
+            )
+        self.assertEqual(ctx.exception.code, "REMOTE_NOT_ALLOWED")
+
+    def test_unverified_push_outcome_unknown(self):
+        """When push succeeds but remote_verified=False, state must be OUTCOME_UNKNOWN, not pushed: true."""
+        req = self.store.request(
+            actor_id=self.actor_id,
+            target="git_push:sample",
+            arguments={"remote": "origin", "branch": "main", "commit_hash": self.initial_commit}
+        )
+        token = req["token"]
+
+        real_run = subprocess.run
+        def selective_run(cmd, *args, **kwargs):
+            if cmd[:2] == ["git", "push"]:
+                # Simulate push succeeded exit 0
+                return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+            return real_run(cmd, *args, **kwargs)
+
+        from unittest.mock import patch
+        with patch.object(self.registry, "verify_remote_commit", return_value=False):
+            with patch("subprocess.run", side_effect=selective_run):
+                res = self.registry.push_project_commit(
+                    project_id="sample",
+                    remote="origin",
+                    branch="main",
+                    commit_hash=self.initial_commit,
+                    approval_token=token,
+                    actor_id=self.actor_id
+                )
+                self.assertFalse(res["pushed"])
+                self.assertEqual(res["status"], "OUTCOME_UNKNOWN")
+                self.assertFalse(res["remote_verified"])
+
 
 if __name__ == "__main__":
     unittest.main()
