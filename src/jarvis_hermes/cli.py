@@ -47,6 +47,7 @@ def main() -> int:
     push_demo = sub.add_parser("push-demo", help="Run a push approval demo against an isolated local bare repository")
     gui_demo = sub.add_parser("gui-demo", help="Run an isolated GUI demo (or status check if locked/non-interactive)")
     cmd_demo = sub.add_parser("command-demo", help="Run an isolated administrative command demo showing policy enforcement")
+    cancel_demo = sub.add_parser("cancel-demo", help="Run an isolated job cancellation demo with a real subprocess (sleep)")
     web_demo = sub.add_parser("web-demo", help="Run an isolated web page read, fill, and consent-gated submission demo")
     gemini_demo = sub.add_parser("gemini-demo", help="Run an isolated Gemini call demo recording token and cost tracking")
     routing_demo = sub.add_parser("routing-demo", help="Run an isolated routing demo testing deterministic fast-path, Jev timeout, and conservative fallback")
@@ -216,6 +217,33 @@ def main() -> int:
                     "requires_approval": classification.requires_approval,
                     "executed": approved_res["exit_code"] == 0,
                 }
+            }))
+        return 0
+    if args.command == "cancel-demo":
+        from .jobs import JobStore
+        import subprocess
+        with tempfile.TemporaryDirectory(prefix="jarvis-cancel-demo-") as directory:
+            db_path = Path(directory) / "jobs.sqlite3"
+            store = JobStore(db_path)
+            # Create a long-running process
+            proc = subprocess.Popen(["sleep", "60"], start_new_session=True)
+            job = store.create_job(actor_id=12345, target="long_running_task", description="Demo sleep process")
+            jid = job["job_id"]
+            pgid = os.getpgid(proc.pid) if hasattr(os, "getpgid") else proc.pid
+            store.register_process(job_id=jid, pid=proc.pid, pgid=pgid)
+
+            cancel_res = store.cancel_job(jid, timeout_seconds=3.0)
+            proc.poll()
+            is_alive = store._is_process_alive(proc.pid)
+
+            print(json.dumps({
+                "scope": "isolated_cancel_demo",
+                "job_id": jid,
+                "status": cancel_res["status"],
+                "process_stopped": cancel_res["process_stopped"],
+                "process_alive_after_cancel": is_alive,
+                "note": cancel_res["note"],
+                "verified": cancel_res["process_stopped"] is True and not is_alive,
             }))
         return 0
     if args.command == "web-demo":

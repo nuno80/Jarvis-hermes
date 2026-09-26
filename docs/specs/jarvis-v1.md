@@ -438,7 +438,7 @@ Repository software scelto: `nuno80/Jarvis-hermes`; issue tracker: GitHub Issues
 
 - `CheckpointManager.safe_write_file` accetta `checkpoint_id` ma non lo verifica (D14, C1) - risolto (#32).
 - `commit_project_changes` accetta `verification={"passed": true}` dal chiamante e non verifica gli hook prima di `git commit` (D14, C3) - risolto (#33).
-- `job_cancel` restituisce `process_stopped=true` senza fermare alcun processo (C2).
+- `job_cancel` restituisce `process_stopped=true` senza fermare alcun processo (C2) - risolto (#34).
 - Allowlist remote/branch vuote equivalgono a «tutto consentito»; push non verificato sul remoto è riportato come `pushed` (sezione 6, C2).
 - Redirect automatici di `run_command` con `shell=True` e `cwd` non confinato alle root registrate (C3).
 - Budget su JSON non atomico, chiavi Gemini nell’URL, chiamate di routing non conteggiate (E3).

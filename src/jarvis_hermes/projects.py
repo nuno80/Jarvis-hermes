@@ -49,11 +49,12 @@ class ProjectError(Exception):
 class ProjectRegistry:
     def __init__(self, config_path: str | Path | None = None, current_device: str = "local",
                  current_environment: str = "wsl", approval_store: ApprovalStore | None = None,
-                 state_dir: str | Path | None = None):
+                 state_dir: str | Path | None = None, job_store: Any | None = None):
         self.config_path = Path(config_path) if config_path else None
         self.current_device = current_device
         self.current_environment = current_environment
         self.approval_store = approval_store
+        self.job_store = job_store
         self._config: dict[str, Any] | None = None
 
         if state_dir is None:
@@ -297,26 +298,57 @@ class ProjectRegistry:
             if current_h != expected_h:
                 raise ProjectError('SCRIPT_MODIFIED', f'Script {rel_script!r} has been altered (hash mismatch).')
 
+        if job_id and self.job_store:
+            self.job_store.check_not_cancelled(job_id)
+
         start_time = time.time()
         try:
-            proc = subprocess.run(
+            popen_args: dict[str, Any] = {
+                'cwd': root,
+                'stdout': subprocess.PIPE,
+                'stderr': subprocess.PIPE,
+                'text': True,
+            }
+            if os.name != 'nt':
+                popen_args['start_new_session'] = True
+
+            proc = subprocess.Popen(
                 command,
-                cwd=root,
-                capture_output=True,
-                text=True,
-                timeout=timeout_seconds
+                **popen_args
             )
-            elapsed = time.time() - start_time
-            raw_output = (proc.stdout or '') + (proc.stderr or '')
-            redacted_out = redact_secrets(raw_output)
-            passed = (proc.returncode == 0)
-            exit_code = proc.returncode
-        except subprocess.TimeoutExpired:
-            elapsed = time.time() - start_time
-            passed = False
-            exit_code = -1
-            redacted_out = 'Workflow execution timed out.'
+
+            if job_id and self.job_store:
+                pgid = None
+                if os.name != 'nt':
+                    try:
+                        pgid = os.getpgid(proc.pid)
+                    except OSError:
+                        pgid = proc.pid
+                try:
+                    self.job_store.register_process(job_id=job_id, pid=proc.pid, pgid=pgid)
+                except Exception:
+                    proc.kill()
+                    proc.wait()
+                    raise
+
+            try:
+                stdout_data, stderr_data = proc.communicate(timeout=timeout_seconds)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                stdout_data, stderr_data = proc.communicate()
+                elapsed = time.time() - start_time
+                passed = False
+                exit_code = -1
+                redacted_out = 'Workflow execution timed out.'
+            else:
+                elapsed = time.time() - start_time
+                raw_output = (stdout_data or '') + (stderr_data or '')
+                redacted_out = redact_secrets(raw_output)
+                passed = (proc.returncode == 0)
+                exit_code = proc.returncode
         except Exception as exc:
+            if isinstance(exc, ProjectError):
+                raise
             raise ProjectError('EXECUTION_FAILED', f'Failed to run workflow: {exc}')
 
         # Snapshot file hashes involved in verification
@@ -351,8 +383,11 @@ class ProjectRegistry:
                                commit_message: str, verification_run_id: str,
                                device_id: str | None = None,
                                max_age_seconds: int = 3600,
-                               no_verify: bool = False) -> dict[str, Any]:
+                               no_verify: bool = False,
+                               job_id: str | None = None) -> dict[str, Any]:
         """Commit only relevant files changed by the job after verifying verification_run_id."""
+        if job_id and self.job_store:
+            self.job_store.check_not_cancelled(job_id)
         if isinstance(verification_run_id, dict):
             raise ProjectError('VERIFICATION_REQUIRED', 'verification_run_id must be a string ID referencing a recorded verification run, not a dictionary.')
         if not verification_run_id or not isinstance(verification_run_id, str):

@@ -1,3 +1,4 @@
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -52,17 +53,42 @@ class JobStoreTests(unittest.TestCase):
         # Job ran step 1 and recorded an effect
         self.store.update_status(job_id, "running", step="step 1: created temp directory", effects_count=1)
 
-        # Cancel requested
+        # Cancel requested without process handle
         cancel_res = self.store.cancel_job(job_id)
         self.assertEqual(cancel_res["status"], "cancelled")
         self.assertEqual(cancel_res["last_completed_step"], "step 1: created temp directory")
         self.assertEqual(cancel_res["unreverted_effects_count"], 1)
-        self.assertTrue(cancel_res["process_stopped"])
+        self.assertIsNone(cancel_res["process_stopped"])
+        self.assertIn("null", cancel_res["note"])
 
         # Cannot cancel already cancelled or finished job
         with self.assertRaises(JobError) as ctx:
             self.store.cancel_job(job_id)
         self.assertEqual(ctx.exception.code, "INVALID_STATE")
+
+    def test_job_cancel_terminates_real_process_and_verifies(self):
+        import subprocess
+        # Start a real long-running sleep process in its own process group
+        proc = subprocess.Popen(['sleep', '60'], start_new_session=True)
+        job = self.store.create_job(actor_id=1, target="long_task", description="sleep command")
+        job_id = job["job_id"]
+        pgid = os.getpgid(proc.pid) if hasattr(os, 'getpgid') else proc.pid
+        self.store.register_process(job_id=job_id, pid=proc.pid, pgid=pgid)
+
+        # Cancel the job
+        cancel_res = self.store.cancel_job(job_id, timeout_seconds=2.0)
+        self.assertEqual(cancel_res["status"], "cancelled")
+        self.assertTrue(cancel_res["process_stopped"])
+        self.assertIn("verified terminated", cancel_res["note"])
+
+        # Process should be dead
+        proc.poll()
+        self.assertFalse(self.store._is_process_alive(proc.pid))
+
+        # Check subsequent check_not_cancelled raises
+        with self.assertRaises(JobError) as ctx:
+            self.store.check_not_cancelled(job_id)
+        self.assertEqual(ctx.exception.code, "JOB_CANCELLED")
 
     def test_reconcile_on_restart_marks_interrupted_as_outcome_unknown(self):
         # Simulate a job that was 'running' when server abruptly restarted

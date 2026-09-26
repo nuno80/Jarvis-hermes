@@ -57,7 +57,9 @@ class GuiAutomationManager:
         self,
         screenshots_dir: Path | None = None,
         lock_path: Path | None = None,
+        job_store: Any | None = None,
     ):
+        self.job_store = job_store
         state_home = Path(os.environ.get("XDG_STATE_HOME", Path.home() / ".local" / "state"))
         base_dir = state_home / "jarvis-hermes"
         self.screenshots_dir = screenshots_dir or (base_dir / "screenshots")
@@ -259,8 +261,12 @@ Write-Output "$($p.Id)|||$($p.MainWindowTitle)"
         self,
         app_name: str,
         action: str = "open_and_inspect",
+        job_id: str | None = None,
     ) -> dict[str, Any]:
         """Execute a benign GUI action with before/after screenshots and concurrency lock."""
+        if job_id and self.job_store:
+            self.job_store.check_not_cancelled(job_id)
+
         # 1. Reject banned or non-whitelisted apps
         norm_app = app_name.lower().strip()
         if norm_app in BANNED_APPS or any(norm_app.endswith(b) for b in BANNED_APPS):
@@ -288,6 +294,16 @@ Write-Output "$($p.Id)|||$($p.MainWindowTitle)"
 
             # 5. Launch & interact
             interaction = self._launch_and_interact(app_cfg, action)
+            pid = interaction.get("process_id")
+            if pid and job_id and self.job_store:
+                try:
+                    self.job_store.register_process(job_id=job_id, pid=pid, pgid=pid)
+                except Exception:
+                    # Cancelled in the meantime: close process immediately
+                    ps = self._get_powershell_cmd()
+                    if ps:
+                        subprocess.run([*ps, "-Command", f"Stop-Process -Id {pid} -Force -ErrorAction SilentlyContinue"])
+                    raise
 
             # Short wait for UI stabilization
             time.sleep(0.5)

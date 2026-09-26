@@ -101,8 +101,12 @@ class CommandPolicyTests(unittest.TestCase):
         )
 
         # Mock the actual execution so we don't try to run real systemctl on the test runner
-        with patch("subprocess.run") as mock_run:
-            mock_run.return_value = MagicMock(returncode=0, stdout="Restarted test-service\n", stderr="")
+        with patch("subprocess.Popen") as mock_popen:
+            mock_proc = MagicMock()
+            mock_proc.pid = 99999
+            mock_proc.returncode = 0
+            mock_proc.communicate.return_value = ("Restarted test-service\n", "")
+            mock_popen.return_value = mock_proc
             res = self.manager.run_command(
                 cmd,
                 approval_token=pending["token"],

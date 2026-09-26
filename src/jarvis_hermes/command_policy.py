@@ -83,9 +83,11 @@ class CommandPolicyManager:
         approval_store: ApprovalStore | None = None,
         checkpoint_manager: CheckpointManager | None = None,
         state_dir: Path | None = None,
+        job_store: Any | None = None,
     ):
         self.approval_store = approval_store
         self.checkpoint_manager = checkpoint_manager
+        self.job_store = job_store
         if state_dir is None:
             state_home = Path(os.environ.get('XDG_STATE_HOME', Path.home() / '.local' / 'state'))
             self.state_dir = state_home / 'jarvis-hermes'
@@ -284,6 +286,9 @@ class CommandPolicyManager:
         start_time = time.time()
         exec_cwd = Path(cwd).resolve() if cwd else Path.cwd()
 
+        if job_id and self.job_store:
+            self.job_store.check_not_cancelled(job_id)
+
         # If WRITE_RECOVERABLE and checkpoint_manager is configured, snapshot the target file before running
         checkpoint_id = None
         if classification.category == 'WRITE_RECOVERABLE' and classification.target_file and self.checkpoint_manager:
@@ -301,26 +306,67 @@ class CommandPolicyManager:
         try:
             # We execute with shell=True if unparseable/complex or if redirected, or run token list directly if simple
             if classification.is_unparseable_or_complex or classification.category == 'WRITE_RECOVERABLE':
-                proc = subprocess.run(
-                    command,
-                    shell=True,
-                    cwd=exec_cwd,
-                    capture_output=True,
-                    text=True,
-                    timeout=timeout_seconds,
-                )
+                popen_args: dict[str, Any] = {
+                    'cwd': exec_cwd,
+                    'stdout': subprocess.PIPE,
+                    'stderr': subprocess.PIPE,
+                    'text': True,
+                    'shell': True,
+                }
+                cmd_input = command
             else:
-                proc = subprocess.run(
-                    classification.tokens,
-                    shell=False,
-                    cwd=exec_cwd,
-                    capture_output=True,
-                    text=True,
-                    timeout=timeout_seconds,
-                )
+                popen_args = {
+                    'cwd': exec_cwd,
+                    'stdout': subprocess.PIPE,
+                    'stderr': subprocess.PIPE,
+                    'text': True,
+                    'shell': False,
+                }
+                cmd_input = classification.tokens
+
+            if os.name != 'nt':
+                popen_args['start_new_session'] = True
+
+            proc = subprocess.Popen(
+                cmd_input,
+                **popen_args
+            )
+
+            # Register PID/PGID with job if job_id provided
+            if job_id and self.job_store:
+                pgid = None
+                if os.name != 'nt':
+                    try:
+                        pgid = os.getpgid(proc.pid)
+                    except OSError:
+                        pgid = proc.pid
+                try:
+                    self.job_store.register_process(job_id=job_id, pid=proc.pid, pgid=pgid)
+                except Exception:
+                    # Job was already cancelled: terminate immediately
+                    proc.kill()
+                    proc.wait()
+                    raise
+
+            try:
+                stdout_data, stderr_data = proc.communicate(timeout=timeout_seconds)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                stdout_data, stderr_data = proc.communicate()
+                elapsed = round(time.time() - start_time, 3)
+                return {
+                    'exit_code': -1,
+                    'output': 'Command execution timed out.',
+                    'elapsed_seconds': elapsed,
+                    'category': classification.category,
+                    'requires_approval': classification.requires_approval,
+                    'checkpoint_id': checkpoint_id,
+                    'command': command,
+                    'digest': classification.command_digest,
+                }
 
             elapsed = round(time.time() - start_time, 3)
-            raw_output = proc.stdout + (("\n" + proc.stderr) if proc.stderr else "")
+            raw_output = (stdout_data or '') + (("\n" + stderr_data) if stderr_data else "")
             redacted_output = redact_secrets(raw_output)
 
             return {

@@ -17,7 +17,8 @@ class CheckpointError(Exception):
 
 
 class CheckpointManager:
-    def __init__(self, storage_dir: str | Path | None = None):
+    def __init__(self, storage_dir: str | Path | None = None, job_store: Any | None = None):
+        self.job_store = job_store
         if storage_dir is None:
             state_home = Path(os.environ.get('XDG_STATE_HOME', Path.home() / '.local' / 'state'))
             self.storage_dir = state_home / 'jarvis-hermes' / 'checkpoints'
@@ -66,6 +67,9 @@ class CheckpointManager:
         return h.hexdigest()
 
     def create_checkpoint(self, job_id: str, file_path: Path, project_id: str, relative_path: str) -> dict[str, Any]:
+        if self.job_store:
+            self.job_store.check_not_cancelled(job_id)
+
         target = file_path.resolve()
         initial_hash = self.compute_hash(target)
         timestamp = time.time()
@@ -115,6 +119,10 @@ class CheckpointManager:
             if not row:
                 raise CheckpointError('CHECKPOINT_REQUIRED', f'Checkpoint {checkpoint_id!r} not found.')
 
+            actual_job_id = job_id or row['job_id']
+            if self.job_store:
+                self.job_store.check_not_cancelled(actual_job_id)
+
             if row['restored_at'] is not None:
                 raise CheckpointError('CHECKPOINT_REQUIRED', f'Checkpoint {checkpoint_id!r} has already been restored and cannot accept writes.')
 
@@ -149,7 +157,11 @@ class CheckpointManager:
             'new_hash': new_hash
         }
 
-    def restore_checkpoint(self, checkpoint_id: str, expected_job_id: str | None = None, expected_current_hash: str | None = None) -> dict[str, Any]:
+    def restore_checkpoint(self, checkpoint_id: str, expected_job_id: str | None = None, expected_current_hash: str | None = None, job_id: str | None = None) -> dict[str, Any]:
+        effective_job = expected_job_id or job_id
+        if effective_job and self.job_store:
+            self.job_store.check_not_cancelled(effective_job)
+
         with self._get_connection() as conn:
             row = conn.execute('SELECT * FROM checkpoints WHERE checkpoint_id = ?', (checkpoint_id,)).fetchone()
             if not row:

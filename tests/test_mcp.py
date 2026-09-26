@@ -255,7 +255,7 @@ class MCPTests(unittest.IsolatedAsyncioTestCase):
                 self.assertFalse(missing['ok'])
                 self.assertEqual(missing['error']['code'], 'NOT_FOUND')
 
-                # 3. Create a fresh running job through store and cancel via MCP
+                # 3. Create a fresh running job through store and cancel via MCP (no process attached)
                 j2 = store.create_job(actor_id=123, target="task2", description="second task")
                 jid2 = j2['job_id']
                 store.update_status(jid2, 'running', step='active step', effects_count=2)
@@ -265,7 +265,22 @@ class MCPTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(cancel_res['data']['status'], 'cancelled')
                 self.assertEqual(cancel_res['data']['last_completed_step'], 'active step')
                 self.assertEqual(cancel_res['data']['unreverted_effects_count'], 2)
-                self.assertTrue(cancel_res['data']['process_stopped'])
+                self.assertIsNone(cancel_res['data']['process_stopped'])
+
+                # 4. Job with real running process terminated via MCP
+                import subprocess
+                sleep_proc = subprocess.Popen(['sleep', '60'], start_new_session=True)
+                j3 = store.create_job(actor_id=123, target="sleep_task", description="sleep")
+                jid3 = j3['job_id']
+                pgid3 = os.getpgid(sleep_proc.pid) if hasattr(os, 'getpgid') else sleep_proc.pid
+                store.register_process(jid3, pid=sleep_proc.pid, pgid=pgid3)
+
+                cancel_proc_res = (await client.call_tool('job_cancel', {'job_id': jid3})).structuredContent
+                self.assertTrue(cancel_proc_res['ok'])
+                self.assertEqual(cancel_proc_res['data']['status'], 'cancelled')
+                self.assertTrue(cancel_proc_res['data']['process_stopped'])
+                self.assertFalse(store._is_process_alive(sleep_proc.pid))
+                sleep_proc.poll()
 
     async def test_read_project_file_mcp_tool(self):
         from pathlib import Path

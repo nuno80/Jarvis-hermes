@@ -110,14 +110,15 @@ def build_server() -> FastMCP:
     projects_config = os.environ.get('JARVIS_PROJECTS_CONFIG')
     approval_store = _approval_store()
     verifications_dir = _verifications_dir()
-    project_registry = ProjectRegistry(projects_config, current_device=device, current_environment=current_env, approval_store=approval_store, state_dir=verifications_dir)
-    checkpoint_manager = CheckpointManager()
-    gui_manager = GuiAutomationManager()
+    project_registry = ProjectRegistry(projects_config, current_device=device, current_environment=current_env, approval_store=approval_store, state_dir=verifications_dir, job_store=job_store)
+    checkpoint_manager = CheckpointManager(job_store=job_store)
+    gui_manager = GuiAutomationManager(job_store=job_store)
     web_manager = WebManager(approval_store=approval_store)
     budget_tracker = _budget_tracker()
     command_policy_manager = CommandPolicyManager(
         approval_store=approval_store,
         checkpoint_manager=checkpoint_manager,
+        job_store=job_store,
     )
     readonly = ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=False)
     destructive = ToolAnnotations(readOnlyHint=False, destructiveHint=True, idempotentHint=False, openWorldHint=False)
@@ -224,9 +225,10 @@ def build_server() -> FastMCP:
 
     @server.tool(annotations=destructive)
     def execute_gui_action(app_name: str, action: str = "open_and_inspect",
+                           job_id: str | None = None,
                            request_id: str | None = None) -> dict[str, Any]:
         """Perform a benign observable GUI action with before/after screenshots and concurrency guard."""
-        return respond(lambda: gui_manager.execute_gui_action(app_name=app_name, action=action), request_id)
+        return respond(lambda: gui_manager.execute_gui_action(app_name=app_name, action=action, job_id=job_id), request_id)
 
     @server.tool(annotations=destructive)
     async def run_command(
@@ -384,12 +386,14 @@ def build_server() -> FastMCP:
                                commit_message: str, verification_run_id: str,
                                device_id: str | None = None,
                                no_verify: bool = False,
+                               job_id: str | None = None,
                                request_id: str | None = None) -> dict[str, Any]:
         """Commit only relevant files changed by the job after verifying verification_run_id."""
         return respond(lambda: project_registry.commit_project_changes(
             project_id=project_id, files=files,
             commit_message=commit_message, verification_run_id=verification_run_id,
-            device_id=device_id, no_verify=no_verify
+            device_id=device_id, no_verify=no_verify,
+            job_id=job_id
         ), request_id)
 
     @server.tool(annotations=destructive)
