@@ -827,6 +827,18 @@ class MCPTests(unittest.IsolatedAsyncioTestCase):
                 })).structuredContent
                 self.assertTrue(prop['ok'])
                 self.assertEqual(prop['data']['status'], 'candidate')
+
+                # 6. Travel tools via MCP: search_flights
+                self.assertIn('search_flights', names)
+                # Without credentials, search_flights fails closed
+                res_travel = (await client.call_tool('search_flights', {
+                    'origin': 'MXP',
+                    'destination': 'JFK',
+                    'departure_date': '2026-11-01',
+                    'passengers': 1
+                })).structuredContent
+                self.assertFalse(res_travel['ok'])
+                self.assertEqual(res_travel['error']['code'], 'PROVIDER_NOT_CONFIGURED')
                 self.assertEqual(prop['data']['value'], 'FCO')
                 note_id = prop['data']['note_id']
 

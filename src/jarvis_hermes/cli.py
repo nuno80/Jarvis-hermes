@@ -48,6 +48,12 @@ def main() -> int:
     gui_demo = sub.add_parser("gui-demo", help="Run an isolated GUI demo (or status check if locked/non-interactive)")
     cmd_demo = sub.add_parser("command-demo", help="Run an isolated administrative command demo showing policy enforcement")
     cancel_demo = sub.add_parser("cancel-demo", help="Run an isolated job cancellation demo with a real subprocess (sleep)")
+    travel_demo = sub.add_parser("travel-demo", help="Run a travel provider demo showing normalization and credentials check")
+    travel_demo.add_argument("--origin", default="MXP", help="Origin IATA code")
+    travel_demo.add_argument("--destination", default="JFK", help="Destination IATA code")
+    travel_demo.add_argument("--date", default="2026-11-15", help="Departure date (YYYY-MM-DD)")
+    travel_demo.add_argument("--passengers", type=int, default=1, help="Number of passengers")
+    travel_demo.add_argument("--json", action="store_true", dest="as_json")
     web_demo = sub.add_parser("web-demo", help="Run an isolated web page read, fill, and consent-gated submission demo")
     gemini_demo = sub.add_parser("gemini-demo", help="Run an isolated Gemini call demo recording token and cost tracking")
     routing_demo = sub.add_parser("routing-demo", help="Run an isolated routing demo testing deterministic fast-path, Jev timeout, and conservative fallback")
@@ -514,6 +520,33 @@ def main() -> int:
             print("\nChosen per-action-class thresholds:")
             for cls, thr in report["chosen_thresholds"].items():
                 print(f"  • {cls}: {thr}")
+        return 0
+    if args.command == "travel-demo":
+        from .travel import TravelError, TravelManager
+        mgr = TravelManager()
+        try:
+            res = mgr.search_flights({
+                "origin": args.origin,
+                "destination": args.destination,
+                "departure_date": args.date,
+                "passengers": args.passengers,
+            })
+            if args.as_json:
+                print(json.dumps(res, indent=2, ensure_ascii=False))
+            else:
+                print(f"Provider: {res['provider']}")
+                print(f"Offerte trovate: {res['offers_count']}")
+                for off in res["offers"]:
+                    print(f"  - Offerta {off['offer_id']}: {off['total_amount']} {off['currency']} (per pax: {off['price_per_passenger']})")
+                    for s in off["slices"]:
+                        print(f"    Tratta {s['origin']} -> {s['destination']} ({s['duration']}), scali: {s['stops_count']}")
+        except TravelError as exc:
+            payload = {"error": {"code": exc.code, "message": exc.message, "retryable": exc.retryable}}
+            if args.as_json:
+                print(json.dumps(payload, indent=2, ensure_ascii=False))
+            else:
+                print(f"[{exc.code}] {exc.message}")
+            return 1
         return 0
     if args.command == "serve":
         from .server import main as serve

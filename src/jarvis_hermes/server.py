@@ -20,6 +20,7 @@ from .telemetry import RoutingDecisionStore
 from .projects import ProjectError, ProjectRegistry
 from .decision import pre_turn_dispatch as system1_pre_turn_dispatch
 from .router import JevClient, RequestRouter, RouterError
+from .travel import TravelError, TravelManager
 from .vault import Vault, VaultError
 from .web import WebError, WebManager
 
@@ -129,6 +130,7 @@ def build_server() -> FastMCP:
     checkpoint_manager = CheckpointManager(job_store=job_store)
     gui_manager = GuiAutomationManager(job_store=job_store)
     web_manager = WebManager(approval_store=approval_store)
+    travel_manager = TravelManager()
     budget_tracker = _budget_tracker()
     telemetry_store = _routing_store()
     command_policy_manager = CommandPolicyManager(
@@ -173,6 +175,9 @@ def build_server() -> FastMCP:
         except RouterError as exc:
             return {**result, 'ok': False, 'data': None,
                     'error': {'code': exc.code, 'message': exc.message, 'retryable': False}}
+        except TravelError as exc:
+            return {**result, 'ok': False, 'data': None,
+                    'error': {'code': exc.code, 'message': exc.message, 'retryable': exc.retryable}}
         except (OSError, UnicodeError, ValueError):
             return {**result, 'ok': False, 'data': None,
                     'error': {'code': 'RESOURCE_UNAVAILABLE', 'message': 'The local resource cannot be read.', 'retryable': False}}
@@ -528,6 +533,28 @@ def build_server() -> FastMCP:
     def get_job_budget_usage(job_id: str, request_id: str | None = None) -> dict[str, Any]:
         """Inspect token usage and total cost accumulated for a given job."""
         return respond(lambda: budget_tracker.get_job_usage(job_id), request_id)
+
+    @server.tool(annotations=readonly)
+    def search_flights(
+        origin: str,
+        destination: str,
+        departure_date: str,
+        passengers: int,
+        return_date: str | None = None,
+        cabin_class: str = "economy",
+        request_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Search flight offers using configured live travel provider (Duffel or Amadeus) with normalized schema."""
+        def _do_search() -> dict[str, Any]:
+            return travel_manager.search_flights({
+                "origin": origin,
+                "destination": destination,
+                "departure_date": departure_date,
+                "passengers": passengers,
+                "return_date": return_date,
+                "cabin_class": cabin_class,
+            })
+        return respond(_do_search, request_id)
 
     @server.tool(annotations=readonly)
     def read_web_page(url: str, timeout_seconds: int = 15, request_id: str | None = None) -> dict[str, Any]:
