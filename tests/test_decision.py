@@ -206,6 +206,30 @@ class PolicyTests(unittest.TestCase):
 class PreTurnDispatchTests(unittest.TestCase):
     """Hook Hermes (ADR 0005): bypass sicuro, skill suggestion, telemetria."""
 
+    def test_disk_reply_reports_physical_disk_not_wsl_vhdx(self):
+        # Regressione #42: in WSL / e un VHDX virtuale, il disco reale e /mnt/c.
+        import shutil
+        from collections import namedtuple
+        from unittest.mock import patch
+        Usage = namedtuple("Usage", "total used free")
+        GiB = 1024.0 ** 3
+        fake = {"/mnt/c": Usage(953 * GiB, 920 * GiB, 33 * GiB),
+                "/": Usage(1007 * GiB, 162 * GiB, 845 * GiB)}
+        good = decide(build_v1_request("quanto spazio libero ho?"),
+                      model_call=_good_call())
+        with patch.object(shutil, "disk_usage",
+                           side_effect=lambda p: fake[p]):
+            self.assertIn("33.0", direct_reply(good) or "")
+        def _no_c(path):
+            if path == "/mnt/c":
+                raise OSError("no C:")
+            return fake[path]
+        with patch.object(shutil, "disk_usage", side_effect=_no_c):
+            self.assertIn("845.0", direct_reply(good) or "")
+        with patch.object(shutil, "disk_usage",
+                           side_effect=OSError("no disk")):
+            self.assertIsNone(direct_reply(good))
+
     def test_safe_handler_returns_direct_reply_and_no_skill_context(self):
         out = pre_turn_dispatch("quanto spazio libero ho?", model_call=_good_call())
         self.assertEqual(out["path"], "system_1")
