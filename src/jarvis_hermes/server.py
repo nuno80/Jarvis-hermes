@@ -18,6 +18,7 @@ from .jobs import JobError, JobStore
 from .llm import BudgetTracker, LLMClient, LLMConfig, LLMError
 from .telemetry import RoutingDecisionStore
 from .projects import ProjectError, ProjectRegistry
+from .decision import pre_turn_dispatch as system1_pre_turn_dispatch
 from .router import JevClient, RequestRouter, RouterError
 from .vault import Vault, VaultError
 from .web import WebError, WebManager
@@ -481,28 +482,36 @@ def build_server() -> FastMCP:
 
     @server.tool(annotations=readonly)
     def route_request(query: str, job_id: str = "interactive", request_id: str | None = None) -> dict[str, Any]:
-        """Route user query with deterministic fast-path, Jev classifier, or conservative fallback."""
-        jev_client = JevClient() if os.environ.get("JEV_ENDPOINT_URL") else None
-        llm_config = LLMConfig(provider="gemini", model_id="gemini-2.5-flash")
-        llm_client = LLMClient(config=llm_config, budget_tracker=budget_tracker)
-        router = RequestRouter(
-            jev_client=jev_client,
-            llm_client=llm_client,
-            budget_tracker=budget_tracker,
-            telemetry_store=telemetry_store,
-        )
+        """Diagnostica di routing (sezione 7): NON e un fast path pre-turno.
+
+        Il System 1 gira prima del turno via plugin Hermes (ADR 0005); questo
+        tool resta per diagnostica e test sul dataset. Jev e solo adapter
+        opzionale (JEV_ENDPOINT_URL esplicito), altrimenti System 1 locale.
+        """
         def _do_route():
-            route = router.route(query, job_id=job_id)
-            return {
-                "intent": route.intent,
-                "target": route.target.value,
-                "confidence": route.confidence,
-                "handler": route.handler,
-                "used_fast_path": route.used_fast_path,
-                "classifier": route.classifier,
-                "fallback_applied": route.fallback_applied,
-                "details": route.details,
-            }
+            if os.environ.get("JEV_ENDPOINT_URL"):
+                jev_client: JevClient | None = JevClient()
+                llm_config = LLMConfig(provider="gemini", model_id="gemini-2.5-flash")
+                llm_client = LLMClient(config=llm_config, budget_tracker=budget_tracker)
+                route = RequestRouter(
+                    jev_client=jev_client,
+                    llm_client=llm_client,
+                    budget_tracker=budget_tracker,
+                    telemetry_store=telemetry_store,
+                ).route(query, job_id=job_id)
+                return {
+                    "intent": route.intent,
+                    "target": route.target.value,
+                    "confidence": route.confidence,
+                    "handler": route.handler,
+                    "used_fast_path": route.used_fast_path,
+                    "classifier": route.classifier,
+                    "fallback_applied": route.fallback_applied,
+                    "details": route.details,
+                }
+            return system1_pre_turn_dispatch(
+                query, job_id=job_id,
+                telemetry_store=telemetry_store, budget_tracker=budget_tracker)
         return respond(_do_route, request_id)
 
     @server.tool(annotations=readonly)

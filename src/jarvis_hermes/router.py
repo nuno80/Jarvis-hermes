@@ -1,11 +1,14 @@
-"""Router and intent classifier with deterministic fast-path, Jev classifier, and fallback.
+"""Router and intent classifier with deterministic fast-path and fallback.
 
 Traceability:
-- Issue 16 / JARVIS-16 / J10
-- Decision D01, D09, AT07
+- Issue 16 / JARVIS-16 / J10; issue 31 / JARVIS-31 (System 1 locale)
+- Decision D01, D09, D13, AT07
 - Rule: Deterministic fast-path first (bypasses main LLM).
-- Rule: Jev classification / scoring next; classification never grants permissions or authorization.
-- Rule: Timeout / failure of Jev applies configured conservative fallback (Gemini/reasoning or deterministic error) with unchanged permissions.
+- Rule: TypeSafe/Jev resta solo adapter opzionale dietro la stessa interfaccia
+  (sezione 7); di default il System 1 locale decide, con policy in codice.
+- Rule: classification never grants permissions or authorization.
+- Rule: Timeout / failure applies configured conservative fallback (Gemini/reasoning
+  or deterministic error) with unchanged permissions.
 - Rule: Usage and costs recorded per job.
 """
 from dataclasses import dataclass
@@ -144,7 +147,12 @@ FAST_PATH_RULES = [
 
 
 class JevClient:
-    """Client for Jev classification and scoring API."""
+    """Adapter opzionale TypeSafe/Jev dietro la stessa interfaccia (sezione 7).
+
+    Isolato dalla issue 31: non usato di default, attivabile solo con
+    JEV_ENDPOINT_URL esplicito; non modifica soglie o permessi senza
+    nuova calibrazione sullo stesso dataset.
+    """
     def __init__(self, endpoint_url: str | None = None, api_key: str | None = None, timeout_seconds: float = 3.0):
         self.endpoint_url = endpoint_url or os.environ.get("JEV_ENDPOINT_URL")
         self.api_key = api_key or os.environ.get("JEV_API_KEY")

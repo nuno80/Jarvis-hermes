@@ -1,0 +1,9 @@
+name: jarvis-s1
+version: 1.0.0
+description: "Jarvis System 1 pre-turno: risposta diretta sicura, skill suggestion, model passthrough (issue #31)."
+author: "jarvis-hermes"
+provides_hooks:
+  - pre_gateway_dispatch
+  - pre_llm_call
+provides_middleware:
+  - llm_request
