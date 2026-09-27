@@ -427,10 +427,14 @@ def decide(request: DecisionRequest,
            model_id: str = DEFAULT_MODEL,
            endpoint: str = "http://localhost:11434/api/generate",
            timeout_s: float = DEFAULT_TIMEOUT_S,
-           latency_budget_ms: float = LATENCY_BUDGET_MS) -> DecisionResult:
+           latency_budget_ms: float = LATENCY_BUDGET_MS,
+           confidence_override: dict[str, float] | None = None) -> DecisionResult:
     """Esegue le domande V1 in una sola chiamata; fail-closed verso system_2 (AT14).
 
     ``model_call`` e il seam di test (prompt, format) -> (testo, logprobs, prompt_tok, eval_tok).
+    ``confidence_override`` serve ai backend senza logprob (es. Laya, issue #41):
+    confidenze calibrate fornite dal backend invece che derivate dalle etichette.
+    Override non finito o fuori [0,1] -> escalation invalid_confidence, mai permessi.
     Lo state non deve mai contenere token di approvazione o segreti (AT13):
     qui viaggia solo il testo utente.
     """
@@ -462,11 +466,23 @@ def decide(request: DecisionRequest,
                               "system_2", escalation_reason="invalid_output", valid=False)
 
     confidences: dict[str, float] = {}
-    for key in ("intent", "handler", "skill_hint"):
-        confidences[key] = label_confidence(response_text, lp_tokens, str(answers[key]))
-    # ponytail: binary/score senza distribuzione token -> confidenza = media delle choice, documentata come euristica
-    choice_confs = [c for c in confidences.values() if math.isfinite(c)]
-    proxy = sum(choice_confs) / len(choice_confs) if choice_confs else float("nan")
+    if confidence_override is not None:
+        # ponytail: backend calibrato senza logprob (Laya #41): usa le sue probabilita, validale come AT14
+        for key in ("intent", "handler", "skill_hint"):
+            confidences[key] = confidence_override.get(key, float("nan"))
+        proxy_vals = [c for c in confidences.values()
+                      if isinstance(c, (int, float)) and not isinstance(c, bool)
+                      and math.isfinite(c) and 0.0 <= c <= 1.0]
+        if len(proxy_vals) != len(confidences):
+            return DecisionResult({}, {}, model_id, latency_ms, prompt_tok + eval_tok,
+                                  "system_2", escalation_reason="invalid_confidence", valid=False)
+        proxy = sum(proxy_vals) / len(proxy_vals)
+    else:
+        for key in ("intent", "handler", "skill_hint"):
+            confidences[key] = label_confidence(response_text, lp_tokens, str(answers[key]))
+        # ponytail: binary/score senza distribuzione token -> confidenza = media delle choice, documentata come euristica
+        choice_confs = [c for c in confidences.values() if math.isfinite(c)]
+        proxy = sum(choice_confs) / len(choice_confs) if choice_confs else float("nan")
     for key in ("skill_hint_2", "skill_hint_3", "needs_clarification",
                 "external_effect", "private_data", "risk", "complexity"):
         confidences[key] = proxy
