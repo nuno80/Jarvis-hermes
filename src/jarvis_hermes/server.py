@@ -17,6 +17,12 @@ from .gui import GuiAutomationManager, GuiError
 from .jobs import JobError, JobStore
 from .llm import BudgetTracker, LLMClient, LLMConfig, LLMError
 from .telemetry import RoutingDecisionStore
+from .pi_coding import (
+    PiCodingError,
+    ensure_proxy_servers_running,
+    resolve_project_path,
+    run_pi_task,
+)
 from .projects import ProjectError, ProjectRegistry
 from .decision import pre_turn_dispatch as system1_pre_turn_dispatch
 from .router import JevClient, RequestRouter, RouterError
@@ -670,6 +676,64 @@ def build_server() -> FastMCP:
         except ApprovalError as exc:
             return {**observed, 'ok': False, 'data': None,
                     'error': {'code': exc.code, 'message': 'Approval is unavailable or invalid.', 'retryable': False}}
+
+    @server.tool(annotations=readonly)
+    def coding_session_init(
+        project_name_or_query: str | None = None,
+        request_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Initialize coding workspace, check/start proxy servers, and list or resolve projects in ~/programmazione."""
+        def _do_init() -> dict[str, Any]:
+            proxies = ensure_proxy_servers_running()
+            home = Path.home()
+            prog_dir = home / "programmazione"
+            available_projects = sorted([d.name for d in prog_dir.iterdir() if d.is_dir()]) if prog_dir.is_dir() else []
+
+            if not project_name_or_query or not project_name_or_query.strip():
+                return {
+                    "action": "prompt_project_selection",
+                    "proxies": proxies,
+                    "available_projects": available_projects,
+                    "message": (
+                        "Ecco i progetti disponibili in ~/programmazione:\n"
+                        + "\n".join(f"• {p}" for p in available_projects)
+                        + "\n\nVuoi creare un nuovo progetto o continuarne uno?"
+                    ),
+                }
+
+            path, resolved_name = resolve_project_path(project_name_or_query)
+            return {
+                "action": "ready",
+                "proxies": proxies,
+                "project_name": resolved_name,
+                "project_path": str(path),
+                "message": (
+                    f"Sessione Pi pronta su '{resolved_name}' ({path}).\n"
+                    f"Proxy attivi (8317 e 3050). Cosa vuoi fare sul codice?"
+                ),
+            }
+        return respond(_do_init, request_id)
+
+    @server.tool(annotations=destructive)
+    def pi_task(
+        prompt: str,
+        project_name_or_path: str | None = None,
+        new_session: bool = False,
+        model: str | None = None,
+        timeout_seconds: int = 300,
+        request_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Execute an autonomous coding task via PI Code CLI (pi) in a project directory."""
+        def _do_task() -> dict[str, Any]:
+            return run_pi_task(
+                prompt=prompt,
+                project_query=project_name_or_path,
+                new_session=new_session,
+                model=model,
+                timeout_seconds=timeout_seconds,
+            )
+        return respond(_do_task, request_id)
+
 
     return server
 

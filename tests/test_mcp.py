@@ -145,7 +145,7 @@ class MCPTests(unittest.IsolatedAsyncioTestCase):
             names = {t.name for t in catalog.tools}
             self.assertIn('simulate_with_approval', names)
             self.assertTrue(all(t.annotations.readOnlyHint for t in catalog.tools
-                                if t.name not in ('simulate_with_approval', 'git_push', 'job_cancel', 'create_checkpoint', 'write_project_file', 'restore_checkpoint', 'commit_project_changes', 'execute_gui_action', 'run_command', 'submit_web_form', 'update_preference', 'propose_memory', 'forget_memory', 'write_note')))
+                                if t.name not in ('simulate_with_approval', 'git_push', 'job_cancel', 'create_checkpoint', 'write_project_file', 'restore_checkpoint', 'commit_project_changes', 'execute_gui_action', 'run_command', 'submit_web_form', 'update_preference', 'propose_memory', 'forget_memory', 'write_note', 'pi_task')))
 
     async def test_simulated_approval_records_once_and_counts_only_this_decision(self):
         from pathlib import Path
