@@ -37,6 +37,19 @@ class RouterError(Exception):
         super().__init__(f"[{code}] {message}")
 
 
+def _action_class_from_target(target: RoutingTarget | None) -> str | None:
+    """Map a routing target to the per-action-class threshold key (issue 40 / JARVIS-38)."""
+    if target == RoutingTarget.TOOL_WORKFLOW:
+        return "protected"
+    if target == RoutingTarget.REASONING_LLM:
+        return "reasoning"
+    if target == RoutingTarget.CLARIFICATION:
+        return "clarify"
+    if target == RoutingTarget.DETERMINISTIC:
+        return "readonly"
+    return None
+
+
 @dataclass
 class IntentRoute:
     intent: str
@@ -192,12 +205,15 @@ class RequestRouter:
         budget_tracker: BudgetTracker | None = None,
         telemetry_store: RoutingDecisionStore | None = None,
         confidence_threshold: float = 0.70,
+        action_class_thresholds: dict[str, float] | None = None,
     ):
         self.jev_client = jev_client
         self.llm_client = llm_client
         self.budget_tracker = budget_tracker
         self.telemetry_store = telemetry_store
         self.confidence_threshold = confidence_threshold
+        # Per-action-class thresholds (issue 40 / JARVIS-38); fall back to the global one.
+        self.action_class_thresholds = dict(action_class_thresholds) if action_class_thresholds else {}
 
     def route(self, text: str, job_id: str = "default-job") -> IntentRoute:
         import time
@@ -282,8 +298,17 @@ class RequestRouter:
                 handler = jev_res.get("handler")
                 elapsed_ms = (time.perf_counter() - start_time) * 1000.0
 
-                # If confidence is below calibrated threshold, route to clarification
-                if confidence < self.confidence_threshold:
+                # If confidence is below calibrated threshold, route to clarification.
+                # Threshold depends on the action class (issue 40 / JARVIS-38): protected
+                # actions may require a higher threshold than the global default.
+                threshold = self.confidence_threshold
+                try:
+                    cls = _action_class_from_target(RoutingTarget(target_str) if isinstance(target_str, str) else None)
+                except ValueError:
+                    cls = None
+                if cls and cls in self.action_class_thresholds:
+                    threshold = self.action_class_thresholds[cls]
+                if confidence < threshold:
                     res = IntentRoute(
                         intent=intent,
                         target=RoutingTarget.CLARIFICATION,

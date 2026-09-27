@@ -193,3 +193,50 @@ class RouterTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ActionClassThresholdTests(unittest.TestCase):
+    """Issue 40 / JARVIS-38: thresholds per action class from calibration config."""
+
+    def test_protected_class_uses_higher_threshold(self):
+        jev_client = JevClient(endpoint_url="http://mock-jev:8080/classify")
+        router = RequestRouter(
+            jev_client=jev_client,
+            confidence_threshold=0.70,
+            action_class_thresholds={"protected": 0.95},
+        )
+        with patch.object(jev_client, "classify", return_value={
+            "intent": "git_push", "target": "tool_workflow",
+            "confidence": 0.90, "handler": "git_push",
+        }):
+            route = router.route("fai push su origin main", job_id="thr-job")
+            # 0.90 >= global 0.70 but < protected 0.95 -> clarification
+            self.assertEqual(route.target, RoutingTarget.CLARIFICATION)
+            self.assertIn("confidence_below_threshold", route.details["reason"])
+
+    def test_reasoning_class_uses_lower_threshold(self):
+        jev_client = JevClient(endpoint_url="http://mock-jev:8080/classify")
+        router = RequestRouter(
+            jev_client=jev_client,
+            confidence_threshold=0.70,
+            action_class_thresholds={"reasoning": 0.50},
+        )
+        with patch.object(jev_client, "classify", return_value={
+            "intent": "explain_concept", "target": "reasoning_llm",
+            "confidence": 0.60, "handler": "gemini_reasoning",
+        }):
+            route = router.route("spiega la differenza tra wal e rollback", job_id="thr-job2")
+            self.assertEqual(route.target, RoutingTarget.REASONING_LLM)
+
+    def test_unknown_class_falls_back_to_global(self):
+        jev_client = JevClient(endpoint_url="http://mock-jev:8080/classify")
+        router = RequestRouter(
+            jev_client=jev_client,
+            confidence_threshold=0.70,
+            action_class_thresholds={},
+        )
+        with patch.object(jev_client, "classify", return_value={
+            "intent": "x", "target": "reasoning_llm", "confidence": 0.75, "handler": None,
+        }):
+            route = router.route("domanda generica", job_id="thr-job3")
+            self.assertEqual(route.target, RoutingTarget.REASONING_LLM)

@@ -54,6 +54,11 @@ def main() -> int:
     routing_report = sub.add_parser("routing-report", help="Print routing decisions telemetry report (p50/p95 latency, escalation rate, path distribution)")
     routing_report.add_argument("--json", action="store_true", dest="as_json", help="Output report in JSON format")
     routing_report.add_argument("--cleanup", action="store_true", help="Run retention cleanup before generating report")
+    calibrate = sub.add_parser("routing-calibrate", help="Reproducible calibration report: accuracy per question, ECE, escalation rate, per-action-class thresholds (issue 40 / JARVIS-38)")
+    calibrate.add_argument("--dataset", default=str(Path(__file__).resolve().parents[2] / "tests" / "data" / "routing_it.jsonl"), help="Path to the labeled routing dataset (JSONL)")
+    calibrate.add_argument("--thresholds", default=None, help="Path to the thresholds config JSON (default: config/routing_thresholds.json)")
+    calibrate.add_argument("--seed", type=int, default=42, help="Deterministic split seed")
+    calibrate.add_argument("--json", action="store_true", dest="as_json", help="Output report in JSON format")
     args = parser.parse_args()
     if args.command == "approval-demo":
         from .approval import ApprovalError, ApprovalStore
@@ -478,6 +483,37 @@ def main() -> int:
             print(f"\nUser corrections ({report['corrections_count']}):")
             for c in report['corrections']:
                 print(f"  • [#{c['id']}] Path: {c['path_chosen']} | Request: {c['request']} | Correction: {c['correzione_utente']}")
+        return 0
+    if args.command == "routing-calibrate":
+        from .calibration import (
+            load_dataset,
+            load_thresholds,
+            protected_fast_path_errors,
+            run_calibration,
+        )
+        from .router import RequestRouter
+        rows = load_dataset(args.dataset)
+        thresholds = load_thresholds(args.thresholds)
+        router = RequestRouter(action_class_thresholds=thresholds)
+        report = run_calibration(
+            rows, router=router, seed=args.seed, thresholds=thresholds,
+        )
+        # AT13: zero wrong fast paths on protected actions on the full dataset too
+        report["protected_fast_path_errors_full_dataset"] = len(protected_fast_path_errors(rows, router))
+        if args.as_json:
+            print(json.dumps(report, indent=2, ensure_ascii=False))
+        else:
+            print("=== Jarvis Routing Calibration Report ===")
+            print(f"Dataset: {report['dataset_size']} examples (calibration {report['calibration_size']} / test {report['test_size']}, seed {report['calibration_split_seed']})")
+            print("\nAccuracy per question (test set):")
+            for q, d in report["accuracy_per_question"].items():
+                print(f"  • {q}: accuracy={d['accuracy']}, ECE={d['ece']}, n={d['sample_count']}")
+            print(f"\nEscalation rate (test): {report['escalation_rate'] * 100:.1f}%")
+            print(f"Wrong fast paths on protected actions (test): {report['protected_fast_path_errors_on_test']}")
+            print(f"Wrong fast paths on protected actions (full dataset): {report['protected_fast_path_errors_full_dataset']}")
+            print("\nChosen per-action-class thresholds:")
+            for cls, thr in report["chosen_thresholds"].items():
+                print(f"  • {cls}: {thr}")
         return 0
     if args.command == "serve":
         from .server import main as serve

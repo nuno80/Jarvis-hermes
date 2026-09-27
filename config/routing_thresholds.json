@@ -1,0 +1,7 @@
+{
+  "_comment": "Per-action-class confidence thresholds for the router (issue 40 / JARVIS-38). Calibrated on tests/data/routing_it.jsonl; goal: zero wrong fast paths on protected actions (AT13). Recalibrate after any change of model, prompt or questions (Appendix I2).",
+  "protected": 0.95,
+  "reasoning": 0.60,
+  "readonly": 0.70,
+  "clarify": 0.70
+}

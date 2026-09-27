@@ -8,6 +8,10 @@ Future schema validation, provider settings and policy configuration are tracked
 No sample Hermes YAML is presented as executable until its installed version is known.
 Existing bot: @nuno_agent_bot. Reuse the existing local Hermes configuration.
 
+## Soglie di routing per classe di azione (issue 40 / JARVIS-38)
+
+`config/routing_thresholds.json` contiene le soglie di confidenza calibrate per classe di azione (`readonly`, `protected`, `reasoning`, `clarify`). Il router applicherà la soglia della classe target; quelle protette restano comunque vincolate a policy e consenso (D07, AT13). Ricalibrare con `uv run jarvis routing-calibrate` a ogni cambio di modello, prompt o domande (Appendice I2); il report usa il dataset versionato `tests/data/routing_it.jsonl` con split deterministico (seed 42).
+
 ## Gestione lavori lunghi (`job_status`, `job_cancel`)
 
 I lavori di lunga durata e le relative transizioni di stato sono tracciati in modo persistente nel database SQLite locale (`$XDG_STATE_HOME/jarvis-hermes/jobs.sqlite3`):
