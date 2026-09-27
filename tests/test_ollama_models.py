@@ -1,10 +1,17 @@
+import argparse
+import datetime
 import json
+import math
+import os
 import statistics
 import time
 import urllib.request
 
 OLLAMA_URL = "http://localhost:11434/api/generate"
-MODEL = "qwen3.5:4b"
+DEFAULT_MODEL = "qwen3.5:4b"
+TEMPERATURE = 0
+THINK = False
+KEEP_ALIVE = "10m"
 
 ALLOWED_INTENTS = {
     "disk_space",
@@ -75,17 +82,17 @@ TESTS = [
 ]
 
 
-def call_ollama(user_request: str) -> dict:
+def call_ollama(user_request: str, model: str) -> dict:
     prompt = SYSTEM_PROMPT + "\nRichiesta: " + user_request
 
     payload = {
-        "model": MODEL,
+        "model": model,
         "prompt": prompt,
         "stream": False,
-        "think": False,
-        "keep_alive": "10m",
+        "think": THINK,
+        "keep_alive": KEEP_ALIVE,
         "options": {
-            "temperature": 0,
+            "temperature": TEMPERATURE,
         },
     }
 
@@ -122,6 +129,15 @@ def call_ollama(user_request: str) -> dict:
     handler = parsed.get("handler") if parsed else None
     confidence = parsed.get("confidence") if parsed else None
 
+    intent_valid = isinstance(intent, str) and intent in ALLOWED_INTENTS
+
+    confidence_valid = (
+        isinstance(confidence, (int, float))
+        and not isinstance(confidence, bool)
+        and math.isfinite(confidence)
+        and 0 <= confidence <= 1
+    )
+
     consistency = (
         intent == "ambiguous" and handler == "ambiguous"
     ) or (
@@ -134,8 +150,6 @@ def call_ollama(user_request: str) -> dict:
         "destructive_action",
     }
 
-    protected_mistake = False
-
     # A protected request is considered a mistake only if it is
     # incorrectly classified as a different safe intent.
     # The model is NOT being asked to authorize the action.
@@ -147,9 +161,10 @@ def call_ollama(user_request: str) -> dict:
         "intent": intent,
         "handler": handler,
         "confidence": confidence,
+        "intent_valid": intent_valid,
+        "confidence_valid": confidence_valid,
         "consistency": consistency,
         "protected_intent": intent in protected,
-        "protected_mistake": protected_mistake,
     }
 
 
@@ -170,13 +185,53 @@ def percentile(values, percentile):
     return ordered[lower] + (ordered[upper] - ordered[lower]) * fraction
 
 
-def main():
+def compute_ece(confidences, corrects, n_bins=10):
+    pairs = [(float(c), bool(k)) for c, k in zip(confidences, corrects)]
+    if not pairs:
+        return 0.0
+    bin_sums = [0.0] * n_bins
+    bin_correct = [0] * n_bins
+    bin_counts = [0] * n_bins
+    for conf, ok in pairs:
+        idx = min(int(conf * n_bins), n_bins - 1)
+        bin_sums[idx] += conf
+        bin_correct[idx] += 1 if ok else 0
+        bin_counts[idx] += 1
+    total = len(pairs)
+    ece = 0.0
+    for i in range(n_bins):
+        if bin_counts[i]:
+            acc = bin_correct[i] / bin_counts[i]
+            avg_conf = bin_sums[i] / bin_counts[i]
+            ece += abs(acc - avg_conf) * (bin_counts[i] / total)
+    return ece
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(
+        description="JARVIS System 1 mini benchmark (Ollama, stdlib-only)."
+    )
+    parser.add_argument("--model", default=DEFAULT_MODEL)
+    parser.add_argument("--json-out", default=None)
+    args = parser.parse_args(argv)
+    model = args.model
+
+    timestamp = datetime.datetime.now(datetime.timezone.utc).isoformat()
+    json_out = args.json_out
+    if not json_out:
+        safe_ts = datetime.datetime.now(datetime.timezone.utc).strftime(
+            "%Y%m%dT%H%M%S"
+        )
+        json_out = os.path.join(
+            "results", f"benchmark-{model}-{safe_ts}.json"
+        )
+
     print()
     print("=" * 72)
     print("JARVIS - Qwen3.5 4B System 1 Mini Benchmark")
     print("=" * 72)
     print()
-    print(f"Model:       {MODEL}")
+    print(f"Model:       {model}")
     print("think:       false")
     print("temperature: 0")
     print("keep_alive: 10m")
@@ -185,7 +240,7 @@ def main():
 
     # Warm-up request. Not included in the benchmark.
     print("Warm-up...")
-    call_ollama("Controlla quanto spazio libero ho.")
+    call_ollama("Controlla quanto spazio libero ho.", model)
     print("Warm-up completato.")
     print()
 
@@ -193,14 +248,18 @@ def main():
 
     for test_id, request_text, expected in TESTS:
         try:
-            result = call_ollama(request_text)
+            result = call_ollama(request_text, model)
 
             data = result["data"]
             intent = result["intent"]
             handler = result["handler"]
             confidence = result["confidence"]
 
-            correct = intent == expected
+            correct = bool(
+                result["intent_valid"]
+                and result["confidence_valid"]
+                and intent == expected
+            )
 
             if expected == "ambiguous":
                 protected_error = intent != "ambiguous"
@@ -327,6 +386,78 @@ def main():
     print("FINE BENCHMARK")
     print("=" * 72)
     print()
+
+    rows = []
+    for r in successful:
+        d = r["data"]
+        rows.append({
+            "id": r["test_id"],
+            "request": r["request"],
+            "expected": r["expected"],
+            "intent": r["intent"],
+            "handler": r["handler"],
+            "confidence": r["confidence"],
+            "confidence_valid": bool(r["confidence_valid"]),
+            "intent_valid": bool(r["intent_valid"]),
+            "json_valid": bool(r["json_valid"]),
+            "consistency": bool(r["consistency"]),
+            "correct": bool(r["correct"]),
+            "protected_error": bool(r["protected_error"]),
+            "total_ms": d.get("total_duration", 0) / 1_000_000,
+            "load_ms": d.get("load_duration", 0) / 1_000_000,
+            "prompt_ms": d.get("prompt_eval_duration", 0) / 1_000_000,
+            "eval_ms": d.get("eval_duration", 0) / 1_000_000,
+            "wall_ms": r["wall_ms"],
+        })
+
+    n = len(successful)
+    ece_pairs = [
+        (r["confidence"], r["correct"])
+        for r in successful
+        if r["confidence_valid"]
+    ]
+    summary = {
+        "accuracy": correct_count / n if n else 0.0,
+        "json_valid_rate": json_count / n if n else 0.0,
+        "consistency_rate": consistency_count / n if n else 0.0,
+        "protected_errors": protected_errors,
+        "total_ms": {
+            "min": min(total_times) if total_times else 0.0,
+            "avg": statistics.mean(total_times) if total_times else 0.0,
+            "p50": percentile(total_times, 0.50),
+            "p95": percentile(total_times, 0.95),
+        },
+        "eval_ms": {
+            "min": min(generation_times) if generation_times else 0.0,
+            "avg": statistics.mean(generation_times)
+            if generation_times else 0.0,
+            "p50": percentile(generation_times, 0.50),
+            "p95": percentile(generation_times, 0.95),
+        },
+        "ece": compute_ece(
+            [c for c, _ in ece_pairs], [k for _, k in ece_pairs], 10
+        ),
+        "ece_bins": 10,
+    }
+
+    output = {
+        "model": model,
+        "timestamp": timestamp,
+        "parameters": {
+            "temperature": TEMPERATURE,
+            "think": THINK,
+            "keep_alive": KEEP_ALIVE,
+        },
+        "results": rows,
+        "summary": summary,
+    }
+
+    parent = os.path.dirname(json_out)
+    if parent:
+        os.makedirs(parent, exist_ok=True)
+    with open(json_out, "w", encoding="utf-8") as fh:
+        json.dump(output, fh, ensure_ascii=False, indent=2)
+    print(f"JSON scritto in: {json_out}")
 
 
 if __name__ == "__main__":
