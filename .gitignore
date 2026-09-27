@@ -19,3 +19,4 @@ config/local.*
 vault/
 checkpoints/
 screenshots/
+results/
