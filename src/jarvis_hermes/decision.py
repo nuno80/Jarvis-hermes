@@ -176,6 +176,21 @@ def _disk_free_gb(path: str) -> float | None:
         return None
 
 
+def _disk_free_gb_user() -> float | None:
+    """Spazio libero del disco reale dell'utente (fail-closed).
+
+    In WSL2 ``/`` e un VHDX virtuale (issue #42): il suo libero non
+    corrisponde al disco fisico. ``/mnt/c`` e il disco Windows reale
+    (unico HD dell'owner); fallback a ``/`` fuori WSL o se illeggibile.
+    """
+    release = platform.release().lower()
+    if platform.system() == "Linux" and "microsoft" in release:
+        free_gb = _disk_free_gb("/mnt/c")
+        if free_gb is not None:
+            return free_gb
+    return _disk_free_gb("/")
+
+
 def diagnose_local(disk_path: str = "/") -> dict[str, Any]:
     """Diagnostica sola lettura dell'host corrente, riusata da CLI e hook."""
     system = platform.system()
@@ -207,7 +222,7 @@ def direct_reply(result: DecisionResult) -> str | None:
     if result.confidences.get("overall", 0.0) < 0.70:
         return None
     if handler == "disk_usage":
-        free_gb = _disk_free_gb("/")
+        free_gb = _disk_free_gb_user()
         if free_gb is None:
             return None
         return f"Spazio libero: {free_gb:.1f} GiB."
