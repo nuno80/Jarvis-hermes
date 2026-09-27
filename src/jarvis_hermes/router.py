@@ -257,7 +257,26 @@ class RequestRouter:
         if self.jev_client and self.jev_client.endpoint_url:
             try:
                 jev_res = self.jev_client.classify(clean_text, job_id=job_id)
-                confidence = float(jev_res.get("confidence", 0.0))
+                # Fail-closed: missing/NaN/inf/out-of-range/non-numeric confidence never grants fast path (AT14)
+                raw_conf = jev_res.get("confidence")
+                if isinstance(raw_conf, bool) or not isinstance(raw_conf, (int, float)):
+                    confidence = float("nan")
+                else:
+                    confidence = float(raw_conf)
+                if not (0.0 <= confidence <= 1.0):  # NaN fails both comparisons -> invalid
+                    res = IntentRoute(
+                        intent=jev_res.get("intent", "unknown") if isinstance(jev_res.get("intent"), str) else "unknown",
+                        target=RoutingTarget.CLARIFICATION,
+                        confidence=0.0,
+                        handler="ask_clarification",
+                        used_fast_path=False,
+                        classifier="jev",
+                        fallback_applied=True,
+                        details={"reason": "invalid_confidence", "original_target": jev_res.get("target")},
+                    )
+                    elapsed_ms = (time.perf_counter() - start_time) * 1000.0
+                    _record(res, latency_s1=elapsed_ms, latency_first_msg=elapsed_ms, tokens=prompt_tokens, cost=0.0)
+                    return res
                 intent = jev_res.get("intent", "unknown")
                 target_str = jev_res.get("target", "reasoning_llm")
                 handler = jev_res.get("handler")

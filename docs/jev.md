@@ -1,5 +1,7 @@
 # Jev & Conservative Routing Integration
 
+> **Status (System 1 v1.2):** Jev/TypeSafe NON fa parte del percorso operativo V1. L'account non è ottenibile e l'API reale non corrisponde a questo client. `JevClient` resta come **adapter opzionale futuro**, inattivo di default: si attiva solo se `JEV_ENDPOINT_URL` è impostato (non lo è nell'ambiente attuale). La direzione attuale è il System 1 locale (spec sezione 7, D13, JARVIS-31). Questo documento descrive il comportamento dell'adapter, non il runtime attuale.
+
 Traceability: JARVIS-16 / J10 / AT07 / D01, D09.
 
 ## Summary

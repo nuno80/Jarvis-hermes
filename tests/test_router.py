@@ -121,6 +121,35 @@ class RouterTests(unittest.TestCase):
             self.assertEqual(route.classifier, "jev")
             self.assertIn("confidence_below_threshold", route.details["reason"])
 
+    def test_jev_invalid_confidence_is_fail_closed_to_clarification(self):
+        """AT14: missing, NaN, infinite, or out-of-range confidence escalates, never routes.
+
+        float('nan') < threshold is False, so the old code let NaN through as high confidence.
+        Invalid confidence must never grant a route (fail-closed).
+        """
+        jev_client = JevClient(endpoint_url="http://mock-jev:8080/classify", api_key="secret-jev-key")
+        router = RequestRouter(jev_client=jev_client, confidence_threshold=0.70)
+
+        invalid_payloads = [
+            {"intent": "git_push", "target": "tool_workflow", "handler": "git_push"},                       # missing
+            {"intent": "git_push", "target": "tool_workflow", "confidence": float("nan")},               # NaN
+            {"intent": "git_push", "target": "tool_workflow", "confidence": float("inf")},               # +inf
+            {"intent": "git_push", "target": "tool_workflow", "confidence": 1.5},                      # > 1
+            {"intent": "git_push", "target": "tool_workflow", "confidence": -0.1},                     # < 0
+            {"intent": "git_push", "target": "tool_workflow", "confidence": "0.9"},                   # non-numeric string
+        ]
+
+        for mock_bad in invalid_payloads:
+            with self.subTest(payload=mock_bad):
+                with patch.object(jev_client, "classify", return_value=mock_bad):
+                    route = router.route("fai push su origin main", job_id="bad-confidence-job")
+                    self.assertEqual(route.target, RoutingTarget.CLARIFICATION)
+                    self.assertEqual(route.handler, "ask_clarification")
+                    self.assertEqual(route.classifier, "jev")
+                    self.assertEqual(route.confidence, 0.0)
+                    self.assertTrue(route.fallback_applied)
+                    self.assertEqual(route.details["reason"], "invalid_confidence")
+
     def test_jev_timeout_and_error_applies_conservative_fallback_without_granting_permissions(self):
         """AT07 / Spec J10: Jev timeout or failure applies configured conservative fallback; permissions unchanged."""
         jev_client = JevClient(endpoint_url="http://mock-jev:8080/classify", api_key="secret-jev-key")
