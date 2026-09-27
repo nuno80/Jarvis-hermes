@@ -4,6 +4,21 @@
 > (dipendenze "Blocked by", non numero issue). Stato issue: solo su GitHub
 > (`gh issue view N`); questo file non è un tracker.
 
+## Passo 0 — prepara il worktree (obbligatorio, prima di tutto)
+
+Ogni issue lavora in un worktree dedicato, creato dallo script idempotente:
+
+```bash
+./scripts/issue-worktree.sh N   # es. ./scripts/issue-worktree.sh 31
+cd ../Jarvis-hermes-N
+```
+
+Lo script crea (o riusa se esiste) `../Jarvis-hermes-N` con branch
+esattamente `feat/issue-N` (da `origin/main` fresco, o dal branch esistente
+locale/remoto). Lancia l'agent **già dentro** quel worktree, così il vincolo
+"opera solo qui" è fisico, non solo scritto. Per rimuovere a fine lavoro
+(dopo il merge del coordinatore): `git worktree remove ../Jarvis-hermes-N`.
+
 ## Contesto che devi conoscere
 
 - Repo `nuno80/Jarvis-hermes`, branch principale `main`, remote `origin`.
