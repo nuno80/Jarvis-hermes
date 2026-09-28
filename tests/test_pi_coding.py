@@ -70,6 +70,7 @@ class PiCodingTests(unittest.TestCase):
                 project_query="test_repo",
                 new_session=False,
                 model="gemini-3.8-flash-high",
+                notify_telegram=False,
             )
 
             self.assertTrue(res["ok"])
@@ -88,34 +89,26 @@ class PiCodingTests(unittest.TestCase):
             self.assertIn("gemini-3.8-flash-high", called_args)
             self.assertEqual(called_args[-1], "Add test suite")
 
-    def test_run_pi_task_large_output_saved_to_file(self):
-        target_dir = self.base_path / "programmazione" / "large_repo"
+    def test_run_pi_task_async_mode(self):
+        target_dir = self.base_path / "programmazione" / "async_repo"
         target_dir.mkdir(parents=True)
-
-        large_output = "X" * 4000
 
         with patch("pathlib.Path.home", return_value=self.base_path), \
              patch("shutil.which", return_value="/usr/local/bin/pi"), \
              patch("jarvis_hermes.pi_coding.ensure_proxy_servers_running", return_value={}), \
-             patch("subprocess.run") as mock_run:
-
-            mock_res = MagicMock()
-            mock_res.returncode = 0
-            mock_res.stdout = large_output
-            mock_res.stderr = ""
-            mock_run.return_value = mock_res
+             patch("jarvis_hermes.pi_coding.send_telegram_notification") as mock_tg:
 
             res = run_pi_task(
-                prompt="Generate big codebase",
-                project_query="large_repo",
-                max_inline_chars=3500,
+                prompt="Run async background task",
+                project_query="async_repo",
+                async_mode=True,
+                notify_telegram=True,
             )
 
             self.assertTrue(res["ok"])
-            self.assertTrue(res["is_long_output"])
-            self.assertIsNotNone(res["output_file"])
-            self.assertIsNone(res["output"])
-            self.assertTrue(Path(res["output_file"]).is_file())
+            self.assertTrue(res.get("async"))
+            self.assertEqual(res["status"], "running_in_background")
+            mock_tg.assert_called()
 
 
 if __name__ == "__main__":

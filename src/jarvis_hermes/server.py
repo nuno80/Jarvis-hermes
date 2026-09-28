@@ -721,6 +721,8 @@ def build_server() -> FastMCP:
         new_session: bool = False,
         model: str | None = None,
         timeout_seconds: int = 300,
+        async_mode: bool = False,
+        notify_telegram: bool = True,
         request_id: str | None = None,
     ) -> dict[str, Any]:
         """Execute an autonomous coding task via PI Code CLI (pi) in a project directory."""
@@ -731,6 +733,8 @@ def build_server() -> FastMCP:
                 new_session=new_session,
                 model=model,
                 timeout_seconds=timeout_seconds,
+                async_mode=async_mode,
+                notify_telegram=notify_telegram,
             )
         return respond(_do_task, request_id)
 

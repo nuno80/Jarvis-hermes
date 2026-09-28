@@ -19,8 +19,11 @@ from pathlib import Path
 import re
 import shutil
 import subprocess
+import threading
 import time
 from typing import Any
+import urllib.parse
+import urllib.request
 
 from jarvis_hermes.projects import redact_secrets
 
@@ -124,8 +127,53 @@ def resolve_project_path(project_query: str | None = None) -> tuple[Path, str]:
     raise PiCodingError("PROJECT_NOT_FOUND", f"Could not find project directory matching '{project_query}'")
 
 
+def send_telegram_notification(text: str) -> bool:
+    """Send direct notification to Telegram using Bot API credentials if available."""
+    token = os.environ.get("TELEGRAM_BOT_TOKEN")
+    chat_id = os.environ.get("TELEGRAM_HOME_CHANNEL") or os.environ.get("TELEGRAM_ALLOWED_USERS")
+    if not token or not chat_id:
+        # Fallback reading from ~/.hermes/.env
+        env_file = Path.home() / ".hermes" / ".env"
+        if env_file.is_file():
+            try:
+                for line in env_file.read_text(encoding="utf-8").splitlines():
+                    line = line.strip()
+                    if line.startswith("TELEGRAM_BOT_TOKEN="):
+                        token = line.split("=", 1)[1].strip().strip('"').strip("'")
+                    elif line.startswith("TELEGRAM_HOME_CHANNEL="):
+                        chat_id = line.split("=", 1)[1].strip().strip('"').strip("'")
+            except Exception:
+                pass
+
+    if not token or not chat_id:
+        return False
+
+    first_chat_id = chat_id.split(",")[0].strip()
+    url = f"https://api.telegram.org/bot{token}/sendMessage"
+    payload = urllib.parse.urlencode({
+        "chat_id": first_chat_id,
+        "text": text,
+        "parse_mode": "Markdown",
+    }).encode("utf-8")
+
+    try:
+        req = urllib.request.Request(url, data=payload, headers={"User-Agent": "Jarvis-Hermes/1.0"})
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            return resp.status == 200
+    except Exception:
+        return False
+
+
+def _extract_summary(full_output: str, max_lines: int = 15) -> str:
+    """Extract clean summary from pi output without requiring a full LLM pass."""
+    lines = [ln.strip() for ln in full_output.strip().splitlines() if ln.strip()]
+    if not lines:
+        return ""
+    # Look for conclusion or take the last few lines
+    return "\n".join(lines[-max_lines:])
+
+
 def ensure_proxy_servers_running() -> dict[str, str]:
-    """Ensure cli-proxy-api (8317) and commandcode-proxy (3050) are running in background."""
     home = Path.home()
     status = {}
 
@@ -196,6 +244,8 @@ def run_pi_task(
     model: str | None = None,
     timeout_seconds: int = 300,
     max_inline_chars: int = 3500,
+    async_mode: bool = False,
+    notify_telegram: bool = True,
 ) -> dict[str, Any]:
     """Execute a coding task via pi CLI and return output or file path for large outputs."""
     pi_bin = shutil.which("pi")
@@ -221,81 +271,119 @@ def run_pi_task(
         cmd.extend(["--model", model])
     cmd.append(prompt)
 
-    # 4. Execute pi in target_dir
-    start_time = time.time()
-    try:
-        res = subprocess.run(
-            cmd,
-            cwd=str(target_dir),
-            capture_output=True,
-            text=True,
-            timeout=timeout_seconds,
-        )
-    except subprocess.TimeoutExpired:
-        raise PiCodingError("TIMEOUT", f"pi task timed out after {timeout_seconds} seconds")
-    except Exception as e:
-        raise PiCodingError("EXECUTION_FAILED", f"Failed to execute pi: {e}")
+    def _execute_sync() -> dict[str, Any]:
+        start_time = time.time()
+        try:
+            res = subprocess.run(
+                cmd,
+                cwd=str(target_dir),
+                capture_output=True,
+                text=True,
+                timeout=timeout_seconds,
+            )
+        except subprocess.TimeoutExpired:
+            raise PiCodingError("TIMEOUT", f"pi task timed out after {timeout_seconds} seconds")
+        except Exception as e:
+            raise PiCodingError("EXECUTION_FAILED", f"Failed to execute pi: {e}")
 
-    elapsed = round(time.time() - start_time, 2)
-    stdout = res.stdout or ""
-    stderr = res.stderr or ""
-    full_output = stdout if stdout else stderr
+        elapsed = round(time.time() - start_time, 2)
+        stdout = res.stdout or ""
+        stderr = res.stderr or ""
+        full_output = stdout if stdout else stderr
 
-    # 5. Check git diff stat if target_dir is a git repository
-    git_diff_stat = ""
-    try:
-        diff_res = subprocess.run(
-            ["git", "diff", "--stat"],
-            cwd=str(target_dir),
-            capture_output=True,
-            text=True,
-            timeout=10,
-        )
-        if diff_res.returncode == 0 and diff_res.stdout.strip():
-            git_diff_stat = diff_res.stdout.strip()
-    except Exception:
-        pass
+        # Check git diff stat if target_dir is a git repository
+        git_diff_stat = ""
+        try:
+            diff_res = subprocess.run(
+                ["git", "diff", "--stat"],
+                cwd=str(target_dir),
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            if diff_res.returncode == 0 and diff_res.stdout.strip():
+                git_diff_stat = diff_res.stdout.strip()
+        except Exception:
+            pass
 
-    # 6. Check length and handle large output file
-    clean_output = redact_secrets(full_output.strip())
-    is_long = len(clean_output) > max_inline_chars
-    output_file_path: str | None = None
+        clean_output = redact_secrets(full_output.strip())
+        is_long = len(clean_output) > max_inline_chars
+        output_file_path: str | None = None
+        summary = _extract_summary(clean_output)
 
-    if is_long:
-        # Save output to a markdown file
-        state_home = Path(os.environ.get('XDG_STATE_HOME', Path.home() / '.local' / 'state'))
-        output_dir = state_home / 'jarvis-hermes' / 'pi-outputs'
-        output_dir.mkdir(parents=True, exist_ok=True)
-        ts = int(time.time())
-        file_path = output_dir / f"pi_{resolved_name}_{ts}.md"
-        
-        file_content = (
-            f"# Pi Task Output - {resolved_name}\n\n"
-            f"- **Timestamp:** {time.strftime('%Y-%m-%d %H:%M:%S')}\n"
-            f"- **Directory:** `{target_dir}`\n"
-            f"- **Prompt:** {prompt}\n\n"
-            f"## Execution Log\n\n```text\n{clean_output}\n```\n"
-        )
-        if git_diff_stat:
-            file_content += f"\n## Git Changes\n\n```text\n{git_diff_stat}\n```\n"
+        if is_long:
+            state_home = Path(os.environ.get('XDG_STATE_HOME', Path.home() / '.local' / 'state'))
+            output_dir = state_home / 'jarvis-hermes' / 'pi-outputs'
+            output_dir.mkdir(parents=True, exist_ok=True)
+            ts = int(time.time())
+            file_path = output_dir / f"pi_{resolved_name}_{ts}.md"
 
-        file_path.write_text(file_content, encoding="utf-8")
-        output_file_path = str(file_path)
+            file_content = (
+                f"# Pi Task Output - {resolved_name}\n\n"
+                f"- **Timestamp:** {time.strftime('%Y-%m-%d %H:%M:%S')}\n"
+                f"- **Directory:** `{target_dir}`\n"
+                f"- **Prompt:** {prompt}\n\n"
+                f"## Execution Log\n\n```text\n{clean_output}\n```\n"
+            )
+            if git_diff_stat:
+                file_content += f"\n## Git Changes\n\n```text\n{git_diff_stat}\n```\n"
 
-    return {
-        "ok": res.returncode == 0,
-        "exit_code": res.returncode,
-        "project_name": resolved_name,
-        "project_path": str(target_dir),
-        "elapsed_seconds": elapsed,
-        "proxies": proxy_status,
-        "is_long_output": is_long,
-        "output_file": output_file_path,
-        "output": clean_output if not is_long else None,
-        "git_diff_stat": git_diff_stat if git_diff_stat else None,
-        "message": (
-            f"Task completato in {elapsed}s sul progetto '{resolved_name}'."
-            if res.returncode == 0 else
-            f"Task terminato con codice {res.returncode} in {elapsed}s."
-        )
-    }
+            file_path.write_text(file_content, encoding="utf-8")
+            output_file_path = str(file_path)
+
+        result_payload = {
+            "ok": res.returncode == 0,
+            "exit_code": res.returncode,
+            "project_name": resolved_name,
+            "project_path": str(target_dir),
+            "elapsed_seconds": elapsed,
+            "proxies": proxy_status,
+            "is_long_output": is_long,
+            "output_file": output_file_path,
+            "summary": summary,
+            "output": clean_output if not is_long else summary,
+            "git_diff_stat": git_diff_stat if git_diff_stat else None,
+            "message": (
+                f"Task completato in {elapsed}s su '{resolved_name}'."
+                if res.returncode == 0 else
+                f"Task terminato con codice {res.returncode} in {elapsed}s."
+            )
+        }
+
+        if notify_telegram:
+            status_icon = "✅" if res.returncode == 0 else "❌"
+            tg_msg = (
+                f"{status_icon} *PI Task Completato* su `{resolved_name}` in {elapsed}s\n\n"
+                f"*Prompt:* _{prompt[:120]}_\n\n"
+            )
+            if git_diff_stat:
+                tg_msg += f"```text\n{git_diff_stat}\n```\n\n"
+            if summary:
+                tg_msg += f"*Conclusioni:*\n```text\n{summary[-800:]}\n```\n"
+            if output_file_path:
+                tg_msg += f"\n📄 Log completo: `{output_file_path}`"
+            send_telegram_notification(tg_msg)
+
+        return result_payload
+
+    if async_mode:
+        job_thread = threading.Thread(target=_execute_sync, daemon=True)
+        job_thread.start()
+        if notify_telegram:
+            send_telegram_notification(
+                f"🚀 *PI Task avviato in background*\n"
+                f"- **Progetto:** `{resolved_name}`\n"
+                f"- **Task:** _{prompt[:150]}_\n\n"
+                f"Riceverai una notifica non appena completato."
+            )
+        return {
+            "ok": True,
+            "async": True,
+            "status": "running_in_background",
+            "project_name": resolved_name,
+            "project_path": str(target_dir),
+            "message": f"Task avviato in background su '{resolved_name}'. Riceverai una notifica al completamento.",
+        }
+
+    return _execute_sync()
+
