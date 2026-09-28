@@ -200,6 +200,11 @@ def run_pi_task(
     """Execute a coding task via pi CLI and return output or file path for large outputs."""
     pi_bin = shutil.which("pi")
     if not pi_bin:
+        for candidate in ["/home/nuno/.local/bin/pi", "/home/nuno/.pnpm-global/pi"]:
+            if Path(candidate).is_file():
+                pi_bin = candidate
+                break
+    if not pi_bin:
         raise PiCodingError("PI_NOT_INSTALLED", "'pi' CLI executable was not found in PATH")
 
     # 1. Resolve project directory
