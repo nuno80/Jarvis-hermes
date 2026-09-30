@@ -241,3 +241,20 @@ class PiJobTrackingTests(unittest.TestCase):
         self.assertEqual(self.store.get_job(res["job_id"])["status"], "failed")
 
     def test_async_task_can_be_cancelled_and_process_is_killed(self):
+        job_id = res["job_id"]
+        self.assertTrue(job_id)
+        # wait for the process to be registered
+        deadline = time.time() + 10
+        pid = None
+        while time.time() < deadline and not pid:
+            with sqlite3.connect(self.tmp / "jobs.sqlite3") as conn:
+                row = conn.execute("SELECT process_pid FROM jobs WHERE job_id=?", (job_id,)).fetchone()
+            pid = row[0] if row else None
+            time.sleep(0.1)
+        self.assertTrue(pid, "process was never registered")
+
+        self.store.cancel_job(job_id)
+
+        self.assertEqual(self.store.get_job(job_id)["status"], "cancelled")
+        self.assertFalse(JobStore._is_process_alive(pid))
+        time.sleep(0.5)  # let the background runner wind down before the temp dir is removed
