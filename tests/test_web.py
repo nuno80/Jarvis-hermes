@@ -1,8 +1,11 @@
 import http.server
 import json
+import os
+import socket
 import socketserver
 import threading
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
@@ -127,7 +130,7 @@ class WebManagerTests(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.state_dir = Path(self.tmp.name)
         self.approval_store = ApprovalStore(self.state_dir / "approvals.sqlite3")
-        self.web_manager = WebManager(approval_store=self.approval_store)
+        self.web_manager = WebManager(approval_store=self.approval_store, allowed_hosts={"127.0.0.1"})
         self.actor_id = 998877
 
     def tearDown(self):
@@ -294,6 +297,99 @@ class WebManagerTests(unittest.TestCase):
         self.assertEqual(ctx.exception.code, "OUTCOME_UNKNOWN")
         # Exactly 1 post received by mock server, NO blind retry
         self.assertEqual(len(self.server.received_posts), 1)
+
+
+class SsrfProtectionTests(unittest.TestCase):
+    """read_web_page is auto-approved: it must not reach loopback, LAN or metadata endpoints."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.hits = []
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def log_message(self, *a):
+                pass
+
+            def do_GET(self):
+                cls.hits.append(self.path)
+                if self.path == "/redirect-to-metadata":
+                    self.send_response(302)
+                    self.send_header("Location", "http://169.254.169.254/latest/meta-data/")
+                    self.end_headers()
+                else:
+                    self.send_response(200)
+                    self.send_header("Content-Type", "text/html")
+                    self.end_headers()
+                    self.wfile.write(b"<html><title>secret internal</title></html>")
+
+        class Server(socketserver.ThreadingMixIn, http.server.HTTPServer):
+            daemon_threads = True
+
+        cls.server = Server(("127.0.0.1", 0), Handler)
+        cls.port = cls.server.server_address[1]
+        threading.Thread(target=cls.server.serve_forever, daemon=True).start()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.server.shutdown()
+        cls.server.server_close()
+
+    def setUp(self):
+        self.hits.clear()
+        self.strict = WebManager(allowed_hosts=[])
+
+    def test_private_and_special_addresses_are_blocked(self):
+        for url in ("http://169.254.169.254/latest/meta-data/", "http://10.0.0.1/", "http://192.168.1.1/",
+                    "http://172.16.0.1/", "http://100.64.0.1/", "http://[::1]/", "http://[::ffff:127.0.0.1]/",
+                    "http://0.0.0.0/", "http://localhost/"):
+            with self.assertRaises(WebError, msg=url) as ctx:
+                self.strict.read_web_page(url)
+            self.assertEqual(ctx.exception.code, "BLOCKED_ADDRESS", url)
+
+    def test_loopback_server_is_never_contacted(self):
+        with self.assertRaises(WebError) as ctx:
+            self.strict.read_web_page(f"http://127.0.0.1:{self.port}/")
+        self.assertEqual(ctx.exception.code, "BLOCKED_ADDRESS")
+        self.assertEqual(self.hits, [])
+
+    def test_hostname_resolving_to_private_address_is_blocked(self):
+        fake = [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("10.0.0.5", 80))]
+        with patch("jarvis_hermes.web.socket.getaddrinfo", return_value=fake):
+            with self.assertRaises(WebError) as ctx:
+                self.strict.read_web_page("http://innocent.example/")
+        self.assertEqual(ctx.exception.code, "BLOCKED_ADDRESS")
+
+    def test_mixed_public_and_private_answers_are_blocked(self):
+        fake = [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", 80)),
+                (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("127.0.0.1", 80))]
+        with patch("jarvis_hermes.web.socket.getaddrinfo", return_value=fake):
+            with self.assertRaises(WebError):
+                self.strict.read_web_page("http://rebind.example/")
+
+    def test_redirect_to_metadata_endpoint_is_blocked(self):
+        manager = WebManager(allowed_hosts={"127.0.0.1"})  # the first hop is explicitly allowed
+        with self.assertRaises(WebError) as ctx:
+            manager.read_web_page(f"http://127.0.0.1:{self.port}/redirect-to-metadata")
+        self.assertEqual(ctx.exception.code, "BLOCKED_ADDRESS")
+        self.assertEqual(self.hits, ["/redirect-to-metadata"])
+
+    def test_owner_allowlist_permits_a_local_dev_server(self):
+        page = WebManager(allowed_hosts={"127.0.0.1"}).read_web_page(f"http://127.0.0.1:{self.port}/")
+        self.assertEqual(page["title"], "secret internal")
+
+    def test_allowlist_is_read_from_environment(self):
+        with patch.dict("os.environ", {"JARVIS_WEB_ALLOWED_HOSTS": "localhost, 127.0.0.1"}):
+            self.assertEqual(WebManager().allowed_hosts, frozenset({"localhost", "127.0.0.1"}))
+        with patch.dict("os.environ", {}, clear=False):
+            os.environ.pop("JARVIS_WEB_ALLOWED_HOSTS", None)
+            self.assertEqual(WebManager().allowed_hosts, frozenset())
+
+    def test_public_address_classification(self):
+        from jarvis_hermes.web import _is_public_address
+        self.assertTrue(_is_public_address("93.184.216.34"))
+        self.assertTrue(_is_public_address("2606:2800:220:1:248:1893:25c8:1946"))
+        for bad in ("127.0.0.1", "10.1.2.3", "169.254.169.254", "100.64.0.1", "::1", "::ffff:10.0.0.1", "224.0.0.1"):
+            self.assertFalse(_is_public_address(bad), bad)
 
 
 if __name__ == "__main__":

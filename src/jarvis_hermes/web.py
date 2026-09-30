@@ -11,14 +11,18 @@ Enforces:
 from __future__ import annotations
 
 import hashlib
+import http.client
+import ipaddress
 import json
+import os
 import re
+import socket
 import urllib.error
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass
 from html.parser import HTMLParser
-from typing import Any, Tuple
+from typing import Any, Iterable, Tuple
 
 from jarvis_hermes.approval import ApprovalError, ApprovalStore
 from jarvis_hermes.projects import redact_secrets
@@ -125,9 +129,109 @@ def mask_sensitive_fields(fields: dict[str, Any]) -> dict[str, Any]:
     return masked
 
 
+def _is_public_address(raw: str) -> bool:
+    """True only for globally routable addresses (blocks loopback, RFC1918, link-local/metadata,
+    CGNAT, multicast, reserved, and IPv4-mapped IPv6 forms of those)."""
+    ip = ipaddress.ip_address(raw.split("%", 1)[0])
+    if ip.version == 6 and ip.ipv4_mapped is not None:
+        ip = ip.ipv4_mapped
+    return ip.is_global and not ip.is_multicast
+
+
+class _PinnedHTTPConnection(http.client.HTTPConnection):
+    """Connects to an IP that was already validated, so DNS cannot change between check and use."""
+    def __init__(self, *args: Any, pinned_ip: str | None = None, **kwargs: Any):
+        super().__init__(*args, **kwargs)
+        self._pinned_ip = pinned_ip
+
+    def connect(self) -> None:
+        if self._pinned_ip is None:
+            return super().connect()
+        self.sock = socket.create_connection((self._pinned_ip, self.port), self.timeout, self.source_address)
+
+
+class _PinnedHTTPSConnection(http.client.HTTPSConnection):
+    def __init__(self, *args: Any, pinned_ip: str | None = None, **kwargs: Any):
+        super().__init__(*args, **kwargs)
+        self._pinned_ip = pinned_ip
+
+    def connect(self) -> None:
+        if self._pinned_ip is None:
+            return super().connect()
+        sock = socket.create_connection((self._pinned_ip, self.port), self.timeout, self.source_address)
+        # TLS still verifies the certificate against the original hostname.
+        self.sock = self._context.wrap_socket(sock, server_hostname=self.host)
+
+
+class _SafeHTTPHandler(urllib.request.HTTPHandler):
+    def __init__(self, resolve: Any):
+        super().__init__()
+        self._resolve = resolve
+
+    def http_open(self, req: urllib.request.Request):
+        ip = self._resolve(req.host)
+        return self.do_open(lambda host, **kw: _PinnedHTTPConnection(host, pinned_ip=ip, **kw), req)
+
+
+class _SafeHTTPSHandler(urllib.request.HTTPSHandler):
+    def __init__(self, resolve: Any):
+        super().__init__()
+        self._resolve = resolve
+
+    def https_open(self, req: urllib.request.Request):
+        ip = self._resolve(req.host)
+        return self.do_open(lambda host, **kw: _PinnedHTTPSConnection(host, pinned_ip=ip, **kw),
+                            req, context=self._context)
+
+
 class WebManager:
-    def __init__(self, approval_store: ApprovalStore | None = None):
+    def __init__(self, approval_store: ApprovalStore | None = None,
+                 allowed_hosts: Iterable[str] | None = None):
         self.approval_store = approval_store
+        # Hostnames the owner explicitly allows even if they resolve to private addresses
+        # (e.g. a local dev server). Default: JARVIS_WEB_ALLOWED_HOSTS, comma-separated; empty = none.
+        if allowed_hosts is None:
+            allowed_hosts = os.environ.get("JARVIS_WEB_ALLOWED_HOSTS", "").split(",")
+        self.allowed_hosts = frozenset(h.strip().lower() for h in allowed_hosts if h.strip())
+
+    def _resolve_public_host(self, host_port: str) -> str | None:
+        """Validate the destination of every hop (initial request AND each redirect).
+
+        Returns the IP to connect to (pinned), or None for an owner-allowlisted host.
+        read_web_page is auto-approved and annotated read-only, so it must not reach
+        loopback services, the LAN, or cloud metadata endpoints on behalf of a web page.
+        """
+        parts = urllib.parse.urlsplit("//" + host_port)
+        host = (parts.hostname or "").lower()
+        if not host:
+            raise WebError("INVALID_URL", f"Missing host in {host_port!r}")
+        if host in self.allowed_hosts:
+            return None
+        try:
+            port = parts.port or 80
+            infos = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
+        except ValueError:
+            raise WebError("INVALID_URL", f"Invalid port in {host_port!r}")
+        addresses = [info[4][0] for info in infos]
+        if not addresses:
+            raise WebError("NETWORK_ERROR", f"Cannot resolve {host!r}")
+        for addr in addresses:
+            if not _is_public_address(addr):
+                raise WebError(
+                    "BLOCKED_ADDRESS",
+                    f"{host!r} resolves to a non-public address; reading local or private network "
+                    f"resources is not allowed (set JARVIS_WEB_ALLOWED_HOSTS to allow a specific host).")
+        return addresses[0]
+
+    def _build_opener(self) -> urllib.request.OpenerDirector:
+        # Built from scratch: no ProxyHandler, so env proxies cannot bypass the address check.
+        opener = urllib.request.OpenerDirector()
+        for handler in (urllib.request.HTTPRedirectHandler(), urllib.request.HTTPDefaultErrorHandler(),
+                        urllib.request.HTTPErrorProcessor(),
+                        _SafeHTTPHandler(self._resolve_public_host),
+                        _SafeHTTPSHandler(self._resolve_public_host)):
+            opener.add_handler(handler)
+        return opener
 
     def read_web_page(self, url: str, timeout_seconds: int = DEFAULT_TIMEOUT_SECONDS) -> dict[str, Any]:
         """Fetch and parse a web page extracting text and available forms."""
@@ -141,7 +245,7 @@ class WebManager:
         )
 
         try:
-            with urllib.request.urlopen(req, timeout=timeout_seconds) as resp:
+            with self._build_opener().open(req, timeout=timeout_seconds) as resp:
                 raw_bytes = resp.read(MAX_WEB_PAGE_BYTES + 1)
                 if len(raw_bytes) > MAX_WEB_PAGE_BYTES:
                     raw_bytes = raw_bytes[:MAX_WEB_PAGE_BYTES]

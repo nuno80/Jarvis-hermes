@@ -18,9 +18,9 @@ from .jobs import JobError, JobStore
 from .llm import BudgetTracker, LLMClient, LLMConfig, LLMError
 from .telemetry import RoutingDecisionStore
 from .pi_coding import (
-    PiCodingError,
     ensure_proxy_servers_running,
     resolve_project_path,
+    PiCodingError,
     run_pi_task,
 )
 from .projects import ProjectError, ProjectRegistry
@@ -175,6 +175,9 @@ def build_server() -> FastMCP:
         except WebError as exc:
             return {**result, 'ok': False, 'data': None,
                     'error': {'code': exc.code, 'message': exc.message, 'retryable': False}}
+        except PiCodingError as exc:
+            return {**result, 'ok': False, 'data': None,
+                    'error': {'code': exc.code, 'message': exc.message, 'retryable': False}}
         except LLMError as exc:
             return {**result, 'ok': False, 'data': None,
                     'error': {'code': exc.code, 'message': exc.message, 'retryable': False}}
@@ -273,7 +276,7 @@ def build_server() -> FastMCP:
                     'provenance': {'source': 'local_process', 'scope': 'terminal_command'}}
         try:
             # Deterministic classification server-side
-            classification = command_policy_manager.classify_command(command)
+            classification = command_policy_manager.classify_command(command, cwd=cwd)
 
             if not classification.requires_approval:
                 # Automatic execution (e.g. READONLY or WRITE_RECOVERABLE with checkpoint)
@@ -725,8 +728,16 @@ def build_server() -> FastMCP:
         notify_telegram: bool = True,
         request_id: str | None = None,
     ) -> dict[str, Any]:
-        """Execute an autonomous coding task via PI Code CLI (pi) in a project directory."""
+        """Execute an autonomous coding task via PI Code CLI (pi) in a project under ~/programmazione.
+
+        The tree state is snapshotted to a private git ref first (see `snapshot` in the result),
+        and the run is tracked as a job: use job_status / job_cancel with the returned job_id.
+        """
         def _do_task() -> dict[str, Any]:
+            try:
+                task_actor = _configured_approver()
+            except ApprovalError:
+                task_actor = 0  # unattended setup: job is still tracked and cancellable
             return run_pi_task(
                 prompt=prompt,
                 project_query=project_name_or_path,
@@ -735,6 +746,8 @@ def build_server() -> FastMCP:
                 timeout_seconds=timeout_seconds,
                 async_mode=async_mode,
                 notify_telegram=notify_telegram,
+                job_store=job_store,
+                actor_id=task_actor,
             )
         return respond(_do_task, request_id)
 

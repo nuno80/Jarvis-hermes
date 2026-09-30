@@ -217,8 +217,9 @@ class PreTurnDispatchTests(unittest.TestCase):
                 "/": Usage(1007 * GiB, 162 * GiB, 845 * GiB)}
         good = decide(build_v1_request("quanto spazio libero ho?"),
                       model_call=_good_call())
-        with patch.object(shutil, "disk_usage",
-                           side_effect=lambda p: fake[p]):
+        with patch("platform.system", return_value="Linux"), \
+             patch("platform.release", return_value="5.15.167.4-microsoft-standard-WSL2"), \
+             patch.object(shutil, "disk_usage", side_effect=lambda p: fake[p]):
             self.assertIn("33.0", direct_reply(good) or "")
         def _no_c(path):
             if path == "/mnt/c":
