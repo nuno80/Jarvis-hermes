@@ -718,7 +718,7 @@ class MCPTests(unittest.IsolatedAsyncioTestCase):
             state_dir = base / "state"
 
             # 1. Read web page via MCP tool
-            async with connected(approver_id=12345, state_home=state_dir) as client:
+            async with connected(approver_id=12345, state_home=state_dir, extra_env={'JARVIS_WEB_ALLOWED_HOSTS': '127.0.0.1'}) as client:
                 catalog = await client.list_tools()
                 names = {t.name for t in catalog.tools}
                 self.assertIn('read_web_page', names)
@@ -732,7 +732,7 @@ class MCPTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(len(read_res['data']['forms']), 1)
 
             # 2. Submit web form with approval
-            async with connected(approver_id=12345, approval_action='accept', state_home=state_dir) as client:
+            async with connected(approver_id=12345, approval_action='accept', state_home=state_dir, extra_env={'JARVIS_WEB_ALLOWED_HOSTS': '127.0.0.1'}) as client:
                 submit_res = (await client.call_tool('submit_web_form', {
                     'action_url': f'http://127.0.0.1:{port}/submit',
                     'method': 'POST',
@@ -744,7 +744,7 @@ class MCPTests(unittest.IsolatedAsyncioTestCase):
                 self.assertIn('title=Updated+Title', posts[0])
 
             # 3. Submit web form with decline
-            async with connected(approver_id=12345, approval_action='decline', state_home=state_dir) as client:
+            async with connected(approver_id=12345, approval_action='decline', state_home=state_dir, extra_env={'JARVIS_WEB_ALLOWED_HOSTS': '127.0.0.1'}) as client:
                 deny_res = (await client.call_tool('submit_web_form', {
                     'action_url': f'http://127.0.0.1:{port}/submit',
                     'method': 'POST',
