@@ -241,6 +241,9 @@ class PiJobTrackingTests(unittest.TestCase):
         self.assertEqual(self.store.get_job(res["job_id"])["status"], "failed")
 
     def test_async_task_can_be_cancelled_and_process_is_killed(self):
+        self._fake_pi("sleep 30")
+        res = self._run(async_mode=True)
+        self.assertTrue(res["ok"])
         job_id = res["job_id"]
         self.assertTrue(job_id)
         # wait for the process to be registered
