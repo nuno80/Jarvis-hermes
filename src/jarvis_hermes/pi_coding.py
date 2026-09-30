@@ -269,7 +269,7 @@ def snapshot_repo(target_dir: Path) -> dict[str, Any]:
 
     try:
         top = git("rev-parse", "--show-toplevel", cwd=target_dir)
-        if top.returncode != 0 or not (top.stdout or "").strip().startswith("/"):
+        if top.returncode != 0 or not (top.stdout or "").strip():
             return {"ref": None, "reason": "not_a_git_repository"}
         toplevel = Path(top.stdout.strip())
         with tempfile.TemporaryDirectory() as tmp:
