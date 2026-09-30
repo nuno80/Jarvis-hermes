@@ -18,13 +18,17 @@ import os
 from pathlib import Path
 import re
 import shutil
+import signal
+import sqlite3
 import subprocess
+import tempfile
 import threading
 import time
 from typing import Any
 import urllib.parse
 import urllib.request
 
+from jarvis_hermes.jobs import JobError, JobStore
 from jarvis_hermes.projects import redact_secrets
 
 
@@ -33,6 +37,25 @@ class PiCodingError(Exception):
         self.code = code
         self.message = message
         super().__init__(message)
+
+
+def _confined(path: Path, root: Path) -> Path:
+    """Return `path` only if, after resolving symlinks, it is a strict child of `root`.
+
+    pi runs headless with auto-approval (-a), so the working directory is the real
+    security boundary: it must be a project under ~/programmazione, never the root
+    itself, $HOME, or a symlink that escapes.
+    """
+    try:
+        real = path.resolve()
+        real_root = root.resolve()
+    except (OSError, RuntimeError):
+        raise PiCodingError("FORBIDDEN_PATH", f"Cannot resolve path: {path}")
+    if real == real_root or not real.is_relative_to(real_root):
+        raise PiCodingError(
+            "FORBIDDEN_PATH",
+            f"pi_task may only run inside a project under {real_root} (got {real}).")
+    return path
 
 
 def resolve_project_path(project_query: str | None = None) -> tuple[Path, str]:
@@ -58,33 +81,28 @@ def resolve_project_path(project_query: str | None = None) -> tuple[Path, str]:
             pass
 
     if not project_query or not project_query.strip():
-        # Default to current directory if valid, otherwise Jarvis-hermes
+        # Default to the current directory only if it is a project under ~/programmazione
         cwd = Path.cwd()
-        if cwd != home and programmazione_dir in cwd.parents or cwd == programmazione_dir:
-            return cwd, cwd.name
+        try:
+            return _confined(cwd, programmazione_dir), cwd.name
+        except PiCodingError:
+            pass
         default_p = programmazione_dir / "Jarvis-hermes"
         if default_p.is_dir():
-            return default_p, "Jarvis-hermes"
-        return programmazione_dir, "programmazione"
+            return _confined(default_p, programmazione_dir), "Jarvis-hermes"
+        raise PiCodingError("PROJECT_NOT_FOUND", "Specify a project under ~/programmazione.")
 
     query = project_query.strip()
     query_lower = query.lower()
 
     # Direct alias match
     if query_lower in aliases and aliases[query_lower].is_dir():
-        return aliases[query_lower], query_lower
+        return _confined(aliases[query_lower], programmazione_dir), query_lower
 
     # Absolute or home-relative path
     p = Path(os.path.expanduser(query)).resolve()
     if p.is_dir():
-        # Security check: must be inside home and not sensitive
-        if home not in p.parents and p != home:
-            raise PiCodingError("FORBIDDEN_PATH", f"Path must be within user directory: {p}")
-        sensitive = [".ssh", ".aws", ".gnupg", ".local/state/jarvis-hermes", ".hermes"]
-        for s in sensitive:
-            if str(home / s) in str(p):
-                raise PiCodingError("SENSITIVE_DIRECTORY", f"Access to sensitive directory blocked: {s}")
-        return p, p.name
+        return _confined(p, programmazione_dir), p.name
 
     # Check directly inside ~/programmazione
     if programmazione_dir.is_dir():
@@ -93,7 +111,7 @@ def resolve_project_path(project_query: str | None = None) -> tuple[Path, str]:
         # Exact name match (case-insensitive)
         for cand in candidates:
             if cand.name.lower() == query_lower:
-                return cand, cand.name
+                return _confined(cand, programmazione_dir), cand.name
 
         # Exact substring or normalized match (e.g. "hermes-jarvis" vs "Jarvis-hermes")
         def normalize(name: str) -> str:
@@ -102,7 +120,7 @@ def resolve_project_path(project_query: str | None = None) -> tuple[Path, str]:
         norm_query = normalize(query)
         for cand in candidates:
             if normalize(cand.name) == norm_query:
-                return cand, cand.name
+                return _confined(cand, programmazione_dir), cand.name
 
         # Match reversed hyphenated tokens (e.g. "hermes-jarvis" -> ["hermes", "jarvis"])
         query_tokens = set(re.findall(r'[a-z0-9]+', query_lower))
@@ -110,19 +128,19 @@ def resolve_project_path(project_query: str | None = None) -> tuple[Path, str]:
         for cand in candidates:
             cand_tokens = set(re.findall(r'[a-z0-9]+', cand.name.lower()))
             if query_tokens and query_tokens == cand_tokens:
-                return cand, cand.name
+                return _confined(cand, programmazione_dir), cand.name
             if query_tokens and query_tokens.issubset(cand_tokens):
                 best_token_matches.append(cand)
 
         if len(best_token_matches) == 1:
-            return best_token_matches[0], best_token_matches[0].name
+            return _confined(best_token_matches[0], programmazione_dir), best_token_matches[0].name
 
         # Fuzzy match with difflib
         names = [cand.name for cand in candidates]
         close = difflib.get_close_matches(query, names, n=3, cutoff=0.4)
         if close:
             matched_dir = programmazione_dir / close[0]
-            return matched_dir, close[0]
+            return _confined(matched_dir, programmazione_dir), close[0]
 
     raise PiCodingError("PROJECT_NOT_FOUND", f"Could not find project directory matching '{project_query}'")
 
@@ -237,6 +255,84 @@ def ensure_proxy_servers_running() -> dict[str, str]:
     return status
 
 
+def snapshot_repo(target_dir: Path) -> dict[str, Any]:
+    """Record the exact working-tree state in a private git ref before pi touches it.
+
+    Uses a temporary index + commit-tree, so the user's branch, index, stash and working
+    tree are left completely untouched (no `git stash push`, no commit on the branch).
+    Untracked-but-not-ignored files are included. Restore with:
+        git restore --source=<ref> --staged --worktree -- .
+    """
+    def git(*args: str, cwd: Path, env: dict[str, str] | None = None) -> subprocess.CompletedProcess:
+        return subprocess.run(["git", *args], cwd=str(cwd), capture_output=True, text=True,
+                              timeout=30, env=env)
+
+    try:
+        top = git("rev-parse", "--show-toplevel", cwd=target_dir)
+        if top.returncode != 0 or not (top.stdout or "").strip().startswith("/"):
+            return {"ref": None, "reason": "not_a_git_repository"}
+        toplevel = Path(top.stdout.strip())
+        with tempfile.TemporaryDirectory() as tmp:
+            env = {
+                **os.environ,
+                "GIT_INDEX_FILE": str(Path(tmp) / "index"),
+                "GIT_AUTHOR_NAME": "jarvis-pi", "GIT_AUTHOR_EMAIL": "jarvis-pi@localhost",
+                "GIT_COMMITTER_NAME": "jarvis-pi", "GIT_COMMITTER_EMAIL": "jarvis-pi@localhost",
+            }
+            parent_args: list[str] = []
+            head = git("rev-parse", "--verify", "-q", "HEAD", cwd=toplevel)
+            if head.returncode == 0:
+                parent_args = ["-p", head.stdout.strip()]
+                git("read-tree", "HEAD", cwd=toplevel, env=env)
+            if git("add", "-A", cwd=toplevel, env=env).returncode != 0:
+                return {"ref": None, "reason": "git_add_failed"}
+            tree = git("write-tree", cwd=toplevel, env=env)
+            if tree.returncode != 0:
+                return {"ref": None, "reason": "write_tree_failed"}
+            commit = git("commit-tree", tree.stdout.strip(), *parent_args,
+                         "-m", "jarvis pi_task pre-run snapshot", cwd=toplevel, env=env)
+            if commit.returncode != 0:
+                return {"ref": None, "reason": "commit_tree_failed"}
+            ref = f"refs/jarvis/pi-snapshots/{int(time.time())}-{os.getpid()}"
+            if git("update-ref", ref, commit.stdout.strip(), cwd=toplevel).returncode != 0:
+                return {"ref": None, "reason": "update_ref_failed"}
+        return {"ref": ref, "restore_hint": f"git restore --source={ref} --staged --worktree -- ."}
+    except Exception as exc:  # snapshot is best-effort: never block the task, but report it
+        return {"ref": None, "reason": f"snapshot_error: {exc}"}
+
+
+def _run_pi_process(cmd: list[str], cwd: str, timeout: int,
+                    job_store: JobStore | None, job_id: str | None) -> subprocess.CompletedProcess:
+    """Run pi. With a JobStore the process gets its own session and is registered so
+    job_cancel can kill the whole process group; without one, behave like subprocess.run."""
+    if job_store is None or job_id is None:
+        return subprocess.run(cmd, cwd=cwd, capture_output=True, text=True, timeout=timeout)
+
+    job_store.check_not_cancelled(job_id)
+    proc = subprocess.Popen(cmd, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                            text=True, start_new_session=(os.name != "nt"))
+    try:
+        pgid = os.getpgid(proc.pid) if os.name != "nt" else None
+        job_store.register_process(job_id, proc.pid, pgid)
+    except Exception:
+        proc.kill()
+        proc.wait()
+        raise
+    try:
+        out, err = proc.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        try:
+            if os.name != "nt":
+                os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+            else:
+                proc.kill()
+        except (ProcessLookupError, PermissionError):
+            pass
+        proc.communicate()
+        raise
+    return subprocess.CompletedProcess(cmd, proc.returncode, out, err)
+
+
 def run_pi_task(
     prompt: str,
     project_query: str | None = None,
@@ -246,11 +342,13 @@ def run_pi_task(
     max_inline_chars: int = 3500,
     async_mode: bool = False,
     notify_telegram: bool = True,
+    job_store: JobStore | None = None,
+    actor_id: int = 0,
 ) -> dict[str, Any]:
     """Execute a coding task via pi CLI and return output or file path for large outputs."""
     pi_bin = shutil.which("pi")
     if not pi_bin:
-        for candidate in ["/home/nuno/.local/bin/pi", "/home/nuno/.pnpm-global/pi"]:
+        for candidate in [str(Path.home() / ".local" / "bin" / "pi"), str(Path.home() / ".pnpm-global" / "pi")]:
             if Path(candidate).is_file():
                 pi_bin = candidate
                 break
@@ -263,6 +361,25 @@ def run_pi_task(
     # 2. Ensure background model proxies are alive
     proxy_status = ensure_proxy_servers_running()
 
+    # 2b. Pre-run snapshot (recoverable state) and job tracking (cancellable, survives restarts)
+    snapshot = snapshot_repo(target_dir)
+    job_id: str | None = None
+    if job_store is not None:
+        job = job_store.create_job(
+            actor_id, f"pi_task:{resolved_name}", prompt[:200],
+            metadata={"project_path": str(target_dir), "async": async_mode,
+                      "snapshot_ref": snapshot.get("ref")})
+        job_id = job["job_id"]
+        job_store.update_status(job_id, "running", step="pi started")
+
+    def _finish_job(status: str, warning: str | None = None, result: dict[str, Any] | None = None) -> None:
+        if job_store is None or job_id is None:
+            return
+        try:
+            job_store.update_status(job_id, status, warning=warning, result=result)
+        except (JobError, sqlite3.Error):
+            pass  # already terminal (e.g. cancelled by the owner) or job DB unavailable
+
     # 3. Assemble command: pi -p -a [--continue] [--model <model>] <prompt>
     cmd = [pi_bin, "-p", "-a"]
     if not new_session:
@@ -274,16 +391,14 @@ def run_pi_task(
     def _execute_sync() -> dict[str, Any]:
         start_time = time.time()
         try:
-            res = subprocess.run(
-                cmd,
-                cwd=str(target_dir),
-                capture_output=True,
-                text=True,
-                timeout=timeout_seconds,
-            )
+            res = _run_pi_process(cmd, str(target_dir), timeout_seconds, job_store, job_id)
         except subprocess.TimeoutExpired:
+            _finish_job("failed", warning="timeout")
             raise PiCodingError("TIMEOUT", f"pi task timed out after {timeout_seconds} seconds")
+        except JobError as e:
+            raise PiCodingError("JOB_CANCELLED" if e.code == "JOB_CANCELLED" else "JOB_ERROR", str(e))
         except Exception as e:
+            _finish_job("failed", warning=f"execution failed: {e}")
             raise PiCodingError("EXECUTION_FAILED", f"Failed to execute pi: {e}")
 
         elapsed = round(time.time() - start_time, 2)
@@ -343,12 +458,17 @@ def run_pi_task(
             "summary": summary,
             "output": clean_output if not is_long else summary,
             "git_diff_stat": git_diff_stat if git_diff_stat else None,
+            "snapshot": snapshot,
+            "job_id": job_id,
             "message": (
                 f"Task completato in {elapsed}s su '{resolved_name}'."
                 if res.returncode == 0 else
                 f"Task terminato con codice {res.returncode} in {elapsed}s."
             )
         }
+
+        _finish_job("succeeded" if res.returncode == 0 else "failed",
+                    result={"exit_code": res.returncode, "output_file": output_file_path})
 
         if notify_telegram:
             status_icon = "✅" if res.returncode == 0 else "❌"
@@ -367,7 +487,15 @@ def run_pi_task(
         return result_payload
 
     if async_mode:
-        job_thread = threading.Thread(target=_execute_sync, daemon=True)
+        def _async_runner() -> None:
+            try:
+                _execute_sync()
+            except PiCodingError as exc:
+                _finish_job("failed", warning=f"{exc.code}: {exc}")
+                if notify_telegram:
+                    send_telegram_notification(f"❌ *PI Task fallito* su `{resolved_name}`: {exc}")
+
+        job_thread = threading.Thread(target=_async_runner, daemon=True)
         job_thread.start()
         if notify_telegram:
             send_telegram_notification(
@@ -382,6 +510,8 @@ def run_pi_task(
             "status": "running_in_background",
             "project_name": resolved_name,
             "project_path": str(target_dir),
+            "job_id": job_id,
+            "snapshot": snapshot,
             "message": f"Task avviato in background su '{resolved_name}'. Riceverai una notifica al completamento.",
         }
 
