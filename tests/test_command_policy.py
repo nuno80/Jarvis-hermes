@@ -245,3 +245,100 @@ class CommandPolicyTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ReadOnlyConfinementTests(unittest.TestCase):
+    """Reads stay automatic, but protected paths and tree-walking readers are confined."""
+
+    def setUp(self):
+        self.home = Path(tempfile.mkdtemp(prefix="jarvis-home-")).resolve()
+        (self.home / ".ssh").mkdir()
+        (self.home / ".env").write_text("TOKEN_X=abcdefgh12345678\n")
+        (self.home / ".ssh" / "id_rsa").write_text("fake-key\n")
+        self.proj = self.home / "proj"
+        self.proj.mkdir()
+        (self.proj / "a.txt").write_text("hello\n")
+        proj = self.proj
+
+        class Registry:
+            def get_registered_roots(self):
+                return [proj]
+
+        self.manager = CommandPolicyManager(state_dir=self.home / "state", project_registry=Registry())
+
+    def tearDown(self):
+        shutil.rmtree(self.home, ignore_errors=True)
+
+    def test_quoted_protected_path_is_blocked(self):
+        with self.assertRaises(CommandPolicyError) as ctx:
+            self.manager.classify_command(f"cat {self.home}/.e'n'v", cwd=self.proj)
+        self.assertEqual(ctx.exception.code, "PROTECTED_TARGET_DENIED")
+
+    def test_protected_path_via_symlink_is_blocked(self):
+        link = self.proj / "innocent.txt"
+        link.symlink_to(self.home / ".env")
+        with self.assertRaises(CommandPolicyError):
+            self.manager.classify_command("cat innocent.txt", cwd=self.proj)
+
+    def test_extra_credential_locations_are_blocked(self):
+        for cmd in ("cat /proc/self/environ", "cat ~/.npmrc", "cat ~/.config/gh/hosts.yml"):
+            with self.assertRaises(CommandPolicyError, msg=cmd):
+                self.manager.classify_command(cmd, cwd=self.proj)
+
+    def test_recursive_reader_outside_root_needs_approval(self):
+        for cmd in (f"grep -r BEGIN {self.home}", f"rg BEGIN {self.home}", f"find {self.home} -name x"):
+            res = self.manager.classify_command(cmd, cwd=self.proj)
+            self.assertTrue(res.requires_approval, cmd)
+
+    def test_recursive_reader_inside_root_is_automatic(self):
+        for cmd in ("grep -rn hello .", "rg hello", "find . -name a.txt"):
+            res = self.manager.classify_command(cmd, cwd=self.proj)
+            self.assertEqual(res.category, "READONLY", cmd)
+            self.assertFalse(res.requires_approval, cmd)
+
+    def test_plain_reads_elsewhere_stay_automatic(self):
+        res = self.manager.classify_command("ls -la /var/log", cwd=self.proj)
+        self.assertFalse(res.requires_approval)
+        res = self.manager.classify_command(f"cat {self.proj}/a.txt", cwd=self.proj)
+        self.assertFalse(res.requires_approval)
+
+    def test_environment_dump_needs_approval(self):
+        for cmd in ("env", "printenv"):
+            self.assertTrue(self.manager.classify_command(cmd, cwd=self.proj).requires_approval)
+
+
+class DangerousOptionTests(unittest.TestCase):
+    """'Read-only' programs must not delete, write or execute without approval."""
+
+    def setUp(self):
+        self.home = Path(tempfile.mkdtemp(prefix="jarvis-opts-")).resolve()
+        self.proj = self.home / "proj"
+        self.proj.mkdir()
+        proj = self.proj
+
+        class Registry:
+            def get_registered_roots(self):
+                return [proj]
+
+        self.manager = CommandPolicyManager(state_dir=self.home / "state", project_registry=Registry())
+
+    def tearDown(self):
+        shutil.rmtree(self.home, ignore_errors=True)
+
+    def classify(self, command):
+        return self.manager.classify_command(command, cwd=self.proj)
+
+    def test_destructive_options_need_approval_even_inside_a_project(self):
+        for cmd in ("find . -delete", "find . -exec rm {} +", "find . -fprintf out.txt hi",
+                    "rg foo --pre 'sh evil.sh'", "rg foo --pre=evil.sh", "date -s '2000-01-01'",
+                    "hostname newname", "journalctl --vacuum-size=1M", "dmesg -c", "file -C"):
+            self.assertTrue(self.classify(cmd).requires_approval, cmd)
+
+    def test_plain_usage_stays_automatic(self):
+        for cmd in ("find . -name a.txt", "rg hello", "date", "hostname -f", "journalctl -n 20", "file a.txt"):
+            res = self.classify(cmd)
+            self.assertFalse(res.requires_approval, cmd)
+
+    def test_sudo_does_not_inherit_inspection_shortcut(self):
+        self.assertTrue(self.classify("sudo ps").requires_approval)
+        self.assertFalse(self.classify("systemctl status ssh").requires_approval)
