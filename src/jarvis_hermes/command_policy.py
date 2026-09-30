@@ -205,7 +205,8 @@ class CommandPolicyManager:
                         'Command resolves to protected secret stores, policy configuration, or system credentials.'
                     )
             if recursive and not self._is_within_registered_root(real):
-                looks_like_path = (cand.startswith(('/', '~', '.', '\\')) or '/' in cand or '\\' in cand\n                                  or bool(re.match(r'^[A-Za-z]:[\\/]', cand)) or real.exists())
+                looks_like_path = (cand.startswith(('/', '~', '.', '\\')) or '/' in cand or '\\' in cand
+                                  or bool(re.match(r'^[A-Za-z]:[\\/]', cand)) or real.exists())
                 if looks_like_path:
                     confined = False
         return confined
