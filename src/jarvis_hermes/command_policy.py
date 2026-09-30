@@ -53,6 +53,7 @@ IMMUTABLE_TARGET_PATTERNS = [
     re.compile(r'(?i)(\.hermes/config\.yaml|projects\.json|approvals\.sqlite3|jobs\.sqlite3|checkpoints\.sqlite3|policy\.json)'),
     re.compile(r'(?i)(/etc/passwd|/etc/master\.passwd|/etc/security|/etc/pam\.d)'),
     re.compile(r'(?i)(\.aws/credentials|\.kube/config|\.gnupg)'),
+    re.compile(r'(?i)(/proc/[^/\s]+/environ|\.npmrc|\.netrc|\.pypirc|\.git-credentials|\.docker/config\.json|\.config/gh/)'),
 ]
 
 READONLY_COMMANDS = {
@@ -61,8 +62,8 @@ READONLY_COMMANDS = {
     'df', 'du', 'free', 'top', 'ps', 'systemctl status', 'service status',
     'journalctl', 'dmesg', 'git status', 'git log', 'git diff', 'git branch',
     'docker ps', 'docker status', 'docker inspect', 'docker logs',
-    'pwd', 'which', 'whereis', 'env', 'printenv'
-}
+    'pwd', 'which', 'whereis',
+}  # env/printenv removed: they dump every secret in the process environment
 
 PRIVILEGED_MAINTENANCE_COMMANDS = {
     'systemctl', 'service', 'docker', 'podman', 'kill', 'pkill', 'killall',
@@ -77,6 +78,30 @@ DESTRUCTIVE_COMMANDS = {
 EXTERNAL_EFFECT_COMMANDS = {
     'curl', 'wget', 'ssh', 'scp', 'rsync', 'ftp', 'sftp', 'nc', 'netcat', 'telnet'
 }
+
+# Options that turn an otherwise read-only program into one that deletes, writes or executes.
+# Long/single-dash options match exactly or as `--opt=value`; short clusters are matched per letter.
+DANGEROUS_READONLY_OPTIONS: dict[str, frozenset[str]] = {
+    'find': frozenset({'-delete', '-exec', '-execdir', '-ok', '-okdir',
+                       '-fprint', '-fprint0', '-fprintf', '-fls'}),
+    'rg': frozenset({'--pre', '--hostname-bin'}),
+    'file': frozenset({'--compile'}),
+    'journalctl': frozenset({'--vacuum-size', '--vacuum-time', '--vacuum-files',
+                             '--rotate', '--flush', '--sync', '--relinquish-var'}),
+    'dmesg': frozenset({'--clear', '--read-clear'}),
+    'date': frozenset({'--set'}),
+}
+DANGEROUS_READONLY_SHORT_FLAGS: dict[str, frozenset[str]] = {
+    'file': frozenset('C'),
+    'dmesg': frozenset('cC'),
+    'date': frozenset('s'),
+}
+# hostname changes the machine name when given a positional argument or -F/-b.
+HOSTNAME_SAFE_FLAGS = frozenset({'-f', '-s', '-i', '-I', '-a', '-d', '-A', '-y', '--fqdn', '--short',
+                                 '--ip-address', '--all-ip-addresses', '--domain', '--alias',
+                                 '--long', '--all-fqdns', '--yp', '--nis'})
+# Sub-commands that are inspection-only, but only for programs where that is really true.
+INSPECTION_SUBCOMMAND_PROGRAMS = {'systemctl', 'service', 'docker', 'podman'}
 
 
 class CommandPolicyManager:
@@ -136,6 +161,86 @@ class CommandPolicyManager:
         except Exception:
             return False
         return False
+
+    @staticmethod
+    def _is_recursive_reader(tokens: list[str]) -> bool:
+        """Tools that walk directory trees and can reach secrets never named in the command."""
+        name = Path(tokens[0]).name
+        if name in {'rg', 'find'}:
+            return True
+        if name == 'grep':
+            return any(t in {'--recursive', '--dereference-recursive'}
+                       or (t.startswith('-') and not t.startswith('--') and ('r' in t or 'R' in t))
+                       for t in tokens[1:])
+        return False
+
+    def _check_resolved_targets(self, tokens: list[str], cwd: str | Path | None) -> bool:
+        """Path checks for auto-executed read-only commands.
+
+        The regex denylist only sees the raw string, so quoting (`.e'n'v`) defeats it.
+        1. Every path-like argument is resolved (shlex already removed quotes, symlinks are
+           followed) and checked against the protected patterns: hard block for all readers.
+        2. Recursive readers (grep -r, rg, find) must start inside a registered project root,
+           because `grep -r PRIVATE /home/me` reaches ~/.ssh without ever naming it.
+        Returns False -> caller asks for approval. Plain reads elsewhere stay automatic.
+        """
+        base = Path(cwd).resolve() if cwd else Path.cwd().resolve()
+        recursive = self._is_recursive_reader(tokens)
+        confined = self._is_within_registered_root(base) if recursive else True
+        for tok in tokens[1:]:
+            cand = tok.split('=', 1)[1] if tok.startswith('-') and '=' in tok else tok
+            if not cand or (tok.startswith('-') and '=' not in tok):
+                continue
+            path = Path(os.path.expanduser(cand))
+            if not path.is_absolute():
+                path = base / path
+            try:
+                real = path.resolve()
+            except (OSError, RuntimeError):
+                return False
+            for pat in IMMUTABLE_TARGET_PATTERNS:
+                if pat.search(str(real)):
+                    raise CommandPolicyError(
+                        'PROTECTED_TARGET_DENIED',
+                        'Command resolves to protected secret stores, policy configuration, or system credentials.'
+                    )
+            if recursive and not self._is_within_registered_root(real):
+                looks_like_path = cand.startswith(('/', '~', '.')) or '/' in cand or real.exists()
+                if looks_like_path:
+                    confined = False
+        return confined
+
+    @staticmethod
+    def _has_dangerous_option(tokens: list[str]) -> str | None:
+        """Return the offending option if a 'read-only' program is asked to write/delete/execute."""
+        name = Path(tokens[0]).name
+        args = tokens[1:]
+        if name == 'hostname':
+            for t in args:
+                if t not in HOSTNAME_SAFE_FLAGS:
+                    return t
+            return None
+        exact = DANGEROUS_READONLY_OPTIONS.get(name, frozenset())
+        letters = DANGEROUS_READONLY_SHORT_FLAGS.get(name, frozenset())
+        for t in args:
+            if any(t == o or t.startswith(o + '=') for o in exact):
+                return t
+            if letters and t.startswith('-') and not t.startswith('--') and any(c in letters for c in t[1:]):
+                return t
+        return None
+
+    def _readonly(self, tokens: list[str], digest: str, reason: str,
+                  cwd: str | Path | None) -> CommandClassification:
+        bad = self._has_dangerous_option(tokens)
+        if bad is not None:
+            return CommandClassification(
+                'PRIVILEGED_MAINTENANCE', True, False, digest, tokens,
+                f'Option {bad!r} makes {Path(tokens[0]).name} write, delete or execute: owner approval required.')
+        if self._check_resolved_targets(tokens, cwd):
+            return CommandClassification('READONLY', False, False, digest, tokens, reason)
+        return CommandClassification(
+            'PRIVILEGED_MAINTENANCE', True, False, digest, tokens,
+            'Recursive search outside registered project roots (or with an unresolved path) requires owner approval.')
 
     def classify_command(self, command: str, cwd: str | Path | None = None) -> CommandClassification:
         if not command or not command.strip():
@@ -249,15 +354,10 @@ class CommandPolicyManager:
         # Check privileged maintenance or service modification commands
         if cmd_name in PRIVILEGED_MAINTENANCE_COMMANDS:
             # Check if this is a readonly sub-operation (e.g. systemctl status, docker ps)
-            if len(tokens) > 1 and tokens[1] in {'status', 'is-active', 'is-enabled', 'ps', 'inspect', 'logs'}:
-                return CommandClassification(
-                    category='READONLY',
-                    requires_approval=False,
-                    is_unparseable_or_complex=False,
-                    command_digest=command_digest,
-                    tokens=tokens,
-                    reason=f'Inspection command ({cmd_name} {tokens[1]}) is read-only.'
-                )
+            if (cmd_name in INSPECTION_SUBCOMMAND_PROGRAMS and len(tokens) > 1
+                    and tokens[1] in {'status', 'is-active', 'is-enabled', 'ps', 'inspect', 'logs'}):
+                return self._readonly(tokens, command_digest,
+                                      f'Inspection command ({cmd_name} {tokens[1]}) is read-only.', cwd)
             return CommandClassification(
                 category='PRIVILEGED_MAINTENANCE',
                 requires_approval=True,
@@ -280,14 +380,7 @@ class CommandPolicyManager:
 
         # Check readonly commands
         if cmd_name in READONLY_COMMANDS:
-            return CommandClassification(
-                category='READONLY',
-                requires_approval=False,
-                is_unparseable_or_complex=False,
-                command_digest=command_digest,
-                tokens=tokens,
-                reason=f'Safe read-only command ({cmd_name}).'
-            )
+            return self._readonly(tokens, command_digest, f'Safe read-only command ({cmd_name}).', cwd)
 
         # Any unrecognized / new command without explicit whitelist
         # If it's a simple benign binary execution without redirection or privileges, default to confirmation
