@@ -642,6 +642,7 @@ class WebManager:
             }
 
         providers_tried: list[str] = []
+        missing_vars: list[str] = []
         last_error = None
         now_iso = datetime.now(timezone.utc).isoformat()
 
@@ -683,6 +684,8 @@ class WebManager:
                 last_error = exc
                 # Fallback to next provider if quota exceeded or provider error or not configured
                 if exc.code in ("SEARCH_QUOTA_EXCEEDED", "NOT_CONFIGURED", "PROVIDER_ERROR"):
+                    if exc.code == "NOT_CONFIGURED":
+                        missing_vars.append(provider)
                     continue
                 raise exc
             except Exception as exc:
@@ -691,25 +694,18 @@ class WebManager:
 
         # If all providers in chain failed:
         tried_str = ", ".join(providers_tried)
-        missing_vars = []
-        if "exa" in providers_tried and not os.environ.get("EXA_API_KEY"):
-            missing_vars.append("EXA_API_KEY")
-        if "tavily" in providers_tried and not os.environ.get("TAVILY_API_KEY"):
-            missing_vars.append("TAVILY_API_KEY")
-        if "brave" in providers_tried and not os.environ.get("BRAVE_API_KEY"):
-            missing_vars.append("BRAVE_API_KEY")
 
         err_msg = f"All search providers failed (tried: {tried_str})."
         if missing_vars:
-            err_msg += f" Missing environment variables: {', '.join(missing_vars)}."
+            err_msg += f" Not configured (missing key): {', '.join(dict.fromkeys(missing_vars))}."
         if last_error:
             err_msg += f" Last error: [{last_error.code}] {last_error.message}"
-        raise WebError("ALL_PROVIDERS_FAILED", redact_secrets(err_msg))
+        raise WebError("ALL_PROVIDERS_FAILED", err_msg)
 
     def _search_exa(self, query: str, max_results: int, timeout_seconds: int, now_iso: str) -> list[dict[str, Any]]:
         api_key = os.environ.get("EXA_API_KEY")
         if not api_key:
-            raise WebError("NOT_CONFIGURED", "EXA_API_KEY environment variable is not configured.")
+            raise WebError("NOT_CONFIGURED", "Search provider 'exa' is not configured (missing API key).")
 
         payload = {
             "query": query,
@@ -767,7 +763,7 @@ class WebManager:
     def _search_tavily(self, query: str, max_results: int, timeout_seconds: int, now_iso: str) -> list[dict[str, Any]]:
         api_key = os.environ.get("TAVILY_API_KEY")
         if not api_key:
-            raise WebError("NOT_CONFIGURED", "TAVILY_API_KEY environment variable is not configured.")
+            raise WebError("NOT_CONFIGURED", "Search provider 'tavily' is not configured (missing API key).")
 
         payload = {
             "query": query,
@@ -824,7 +820,7 @@ class WebManager:
     def _search_brave(self, query: str, max_results: int, timeout_seconds: int, now_iso: str) -> list[dict[str, Any]]:
         api_key = os.environ.get("BRAVE_API_KEY")
         if not api_key:
-            raise WebError("NOT_CONFIGURED", "BRAVE_API_KEY environment variable is not configured.")
+            raise WebError("NOT_CONFIGURED", "Search provider 'brave' is not configured (missing API key).")
 
         params = urllib.parse.urlencode({"q": query, "count": max_results})
         url = f"https://api.search.brave.com/res/v1/web/search?{params}"
@@ -875,7 +871,7 @@ class WebManager:
     def _search_searxng(self, query: str, max_results: int, timeout_seconds: int, now_iso: str) -> list[dict[str, Any]]:
         base_url = os.environ.get("SEARXNG_BASE_URL", "").rstrip("/")
         if not base_url:
-            raise WebError("NOT_CONFIGURED", "SEARXNG_BASE_URL environment variable is not configured.")
+            raise WebError("NOT_CONFIGURED", "Search provider 'searxng' is not configured (missing base URL).")
 
         params = urllib.parse.urlencode({"q": query, "format": "json"})
         url = f"{base_url}/search?{params}"

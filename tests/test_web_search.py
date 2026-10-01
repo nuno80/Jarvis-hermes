@@ -41,8 +41,8 @@ class ADR0009WebSearchTests(unittest.TestCase):
             with self.assertRaises(WebError) as ctx:
                 self.web_manager.web_search("python mcp tutorial")
             self.assertIn(ctx.exception.code, ["NOT_CONFIGURED", "ALL_PROVIDERS_FAILED"])
-            self.assertIn("EXA_API_KEY", ctx.exception.message)
-            self.assertIn("TAVILY_API_KEY", ctx.exception.message)
+            self.assertIn("exa", ctx.exception.message)
+            self.assertIn("tavily", ctx.exception.message)
 
     def test_exa_search_success_and_normalization(self):
         """Exa restituisce risultati normalizzati secondo il contratto ADR 0009."""
