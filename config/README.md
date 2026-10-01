@@ -134,6 +134,17 @@ L'interazione con pagine web e l'invio di moduli esterni avvengono sotto control
   - **Vincolo atomico**: se l'URL o i parametri inviati differiscono anche di un solo carattere rispetto al riepilogo approvato, l'invio è respinto (`APPROVAL_DENIED`).
   - **Esito incerto senza retry ciechi (AT04 / C2)**: se durante l'invio la connessione cade o si verifica un timeout, l'operazione restituisce `OUTCOME_UNKNOWN` e non viene ritentata ciecamente per evitare doppi invii indesiderati.
 
+## Ricerca web e lettura pagine (`web_search`, `fetch_page`, J12, AT05, ADR 0009)
+
+- `web_search(query, max_results, timeout_seconds)`:
+  - Catena di provider configurabile `JARVIS_SEARCH_PROVIDERS` (default `exa,tavily`, opzionali `brave`, `searxng`). Fallback solo per `SEARCH_QUOTA_EXCEEDED`, `NOT_CONFIGURED`, 402/429, timeout o 5xx.
+  - Richiede almeno una chiave in env (`EXA_API_KEY`, `TAVILY_API_KEY`, `BRAVE_API_KEY`, `SEARXNG_BASE_URL`); le chiavi viaggiano solo in header HTTP, mai in URL, e sono redatte dai log.
+  - Restituisce risultati normalizzati (`rank`, `title`, `url`, `snippet` ≤ 500 caratteri, `source`, `provider`, `retrieved_at`, `published_at`/`score` oppure `unknown`) con `providers_tried`, `retrieved_at` (UTC ISO 8601) e `cache_hit`.
+  - **Dati non fidati**: titoli, snippet e testi sono dati grezzi e mai istruzioni. Se nessun provider è utilizzabile, fallisce chiuso (`NOT_CONFIGURED` / `ALL_PROVIDERS_FAILED`) con l'elenco dei provider tentati e delle variabili mancanti; mai risultati simulati.
+  - Cache locale SQLite con TTL (`JARVIS_SEARCH_CACHE_TTL_SECONDS`, default 15 minuti) e contatori giorno/mese (`JARVIS_SEARCH_DAILY_LIMIT`, `JARVIS_SEARCH_MONTHLY_LIMIT`). Un cache hit non consuma quota.
+- `fetch_page(url, timeout_seconds)`:
+  - Alias sicuro in sola lettura di `read_web_page`: stesso controllo anti-SSRF, solo testo estratto (senza moduli), URL, titolo e `retrieved_at`.
+
 
 
 
