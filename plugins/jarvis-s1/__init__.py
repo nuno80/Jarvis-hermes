@@ -103,10 +103,12 @@ def pre_gateway_dispatch_hook(event: Any, gateway: Any,
                               session_store: Any, **kwargs: Any) -> Any:
     """Talker vocale + risposta diretta sicura, altrimenti None (= dispatch normale).
 
-    Vocali (issue #18): il testo e gia la trascrizione Hermes (cache Telegram ->
-    faster-whisper locale). L'ack parte entro 3 s senza esiti non verificati;
-    il lavoro prosegue come job. Mai skip sui vocali salvo risposta fast gia
-    inviata in chat (answered -> skip, come il fast-path testuale).
+    Vocali (issue #18): lo STT Hermes gira DOPO l'hook (misurato live
+    2026-10-04: text_len=0 all'hook), quindi due stadi: (1) ricevuta
+    immediata "vocale ricevuto, lo trascrivo" entro 3 s senza esiti
+    verificati, dispatch normale che prosegue; (2) hook post-STT lato
+    Hermes (follow-up B) per ack/risposta sul testo trascritto. Se il testo
+    e gia presente (caption), ack Talker diretto; answered -> skip.
     """
     if pre_turn_dispatch is None:
         return None
@@ -156,29 +158,41 @@ def _voice_duration_seconds(event: Any) -> int | None:
 
 
 def _voice_ack(event: Any, gateway: Any) -> Any:
-    """Ack Talker per un vocale: invia ack/risposta/chiarimento, ritorna skip/rewrite."""
+    """Ack Talker per un vocale: ricevuta immediata + ack/risposta/chiarimento."""
+    duration = _voice_duration_seconds(event)
     logger.info(
         "jarvis voice probe mtype=%s text_len=%s duration=%s",
         getattr(event, "message_type", None), len(_text_of(event)),
-        _voice_duration_seconds(event))
+        duration)
     adapter, chat_id = _delivery_target(gateway, event)
     if adapter is None or chat_id is None:
-        return None
-    text = _text_of(event).strip()
-    if not text:
-        # Hermes non ha ancora trascritto: niente ack inventato, dispatch normale.
         return None
     try:
         from jarvis_hermes.voice import (
             AUDIO_RETENTION_POLICY, VOICE_MAX_DURATION_SECONDS,
         )
-        duration = _voice_duration_seconds(event)
-        if duration is not None and duration > VOICE_MAX_DURATION_SECONDS:
-            _send_text(adapter, chat_id,
-                       "🎙️ Vocale troppo lungo: reinvia un vocale più breve o scrivi la richiesta.")
-            return {"action": "rewrite",
-                    "text": f"[vocale troppo lungo, utente gia avvisato; retention: {AUDIO_RETENTION_POLICY}]",
-                    "reason": "jarvis_voice_too_long"}
+    except Exception:
+        AUDIO_RETENTION_POLICY = "audio in cache Telegram Hermes, mai salvato da Jarvis"
+        VOICE_MAX_DURATION_SECONDS = 300
+    if duration is not None and duration > VOICE_MAX_DURATION_SECONDS:
+        _send_text(adapter, chat_id,
+                   "🎙️ Vocale troppo lungo: reinvia un vocale più breve o scrivi la richiesta.")
+        return {"action": "rewrite",
+                "text": f"[vocale troppo lungo, utente gia avvisato; retention: {AUDIO_RETENTION_POLICY}]",
+                "reason": "jarvis_voice_too_long"}
+    text = _text_of(event).strip()
+    if not text:
+        # Stadio 1 (live, misurato 2026-10-04): lo STT Hermes gira dopo
+        # l'hook, testo vuoto. Ricevuta immediata senza esiti verificati;
+        # None = il dispatch normale prosegue (STT + Reasoner). Mai skip qui.
+        if duration is not None:
+            receipt = (f"🎙️ Vocale ricevuto ({duration} s): lo trascrivo "
+                       "e ti aggiorno qui.")
+        else:
+            receipt = "🎙️ Vocale ricevuto: lo trascrivo e ti aggiorno qui."
+        _send_text(adapter, chat_id, receipt)
+        return None
+    try:
         handle = handle_voice_transcript
         if handle is None:
             return None

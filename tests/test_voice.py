@@ -107,6 +107,46 @@ class VoicePluginWiringTests(unittest.TestCase):
         self.assertEqual(res["action"], "skip")
         self.assertEqual(res["reason"], "jarvis_voice_answered")
 
+    def test_empty_voice_sends_receipt_and_continues_dispatch(self):
+        mod = self._import_plugin()
+        from unittest.mock import AsyncMock, MagicMock
+        adapter = MagicMock()
+        adapter.send = AsyncMock(return_value=MagicMock(success=True))
+        gateway = MagicMock()
+        gateway.adapters = {"telegram": adapter}
+        # Live 2026-10-04: testo vuoto, durata dal raw -> ricevuta, None.
+        res = mod.pre_gateway_dispatch_hook(
+            self._event("", duration=4), gateway, None)
+        self.assertIsNone(res)
+        (chat, receipt), _ = adapter.send.await_args
+        self.assertIn("Vocale ricevuto (4 s)", receipt)
+
+    def test_empty_voice_without_duration_sends_generic_receipt(self):
+        mod = self._import_plugin()
+        from unittest.mock import AsyncMock, MagicMock
+        adapter = MagicMock()
+        adapter.send = AsyncMock(return_value=MagicMock(success=True))
+        gateway = MagicMock()
+        gateway.adapters = {"telegram": adapter}
+        self.assertIsNone(mod.pre_gateway_dispatch_hook(
+            self._event(""), gateway, None))
+        (_, receipt), _ = adapter.send.await_args
+        self.assertIn("Vocale ricevuto:", receipt)
+
+    def test_too_long_voice_warns_even_without_transcript(self):
+        mod = self._import_plugin()
+        from unittest.mock import AsyncMock, MagicMock
+        adapter = MagicMock()
+        adapter.send = AsyncMock(return_value=MagicMock(success=True))
+        gateway = MagicMock()
+        gateway.adapters = {"telegram": adapter}
+        res = mod.pre_gateway_dispatch_hook(
+            self._event("", duration=9999), gateway, None)
+        self.assertEqual(res["action"], "rewrite")
+        self.assertEqual(res["reason"], "jarvis_voice_too_long")
+        (_, warning), _ = adapter.send.await_args
+        self.assertIn("troppo lungo", warning)
+
     def test_probe_log_line_is_present_but_quiet(self):
         import re
         with open("plugins/jarvis-s1/__init__.py", encoding="utf-8") as fh:
