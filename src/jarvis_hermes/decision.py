@@ -503,12 +503,33 @@ def decide(request: DecisionRequest,
     )
 
 
+def _web_search_context(query: str,
+                        web_search_fn: Callable[..., dict[str, Any]] | None) -> str | None:
+    """Recupera risultati di ricerca e li formatta come contesto turn-local.
+
+    Ritorna None su qualsiasi fallimento (provider non configurato, quota,
+    rete): il chiamante scala normalmente, mai risultati simulati (J12).
+    Contenuti sempre dati non fidati (AT05): mai istruzioni o permessi.
+    """
+    try:
+        if web_search_fn is None:
+            from .web import WebManager
+            response = WebManager().web_search(query)
+        else:
+            response = web_search_fn(query)
+        from .web import format_web_search_context
+        return format_web_search_context(response)
+    except Exception:
+        return None
+
+
 def pre_turn_dispatch(text: str,
                      job_id: str = "interactive",
                      model_call: Callable[..., tuple[str, list[dict[str, Any]], int, int]] | None = None,
                      thresholds: dict[str, float] | None = None,
                      telemetry_store: Any = None,
                      budget_tracker: Any = None,
+                     web_search_fn: Callable[..., dict[str, Any]] | None = None,
                      **decide_kwargs: Any) -> dict[str, Any]:
     """Un turno System 1 completo: decide -> policy -> risposta/skill hook-ready.
 
@@ -518,6 +539,12 @@ def pre_turn_dispatch(text: str,
     iniettare); ``llm_request`` puo leggere ``model``. Il System 1 non vede
     token di approvazione ne segreti (AT13) e non concede permessi.
     Consumo e latenza vanno in budget (#36) e telemetria (#39).
+
+    Fast-path ricerca (issue #44): se intent/handler e ``web_search``,
+    ``web_search_fn`` (default: WebManager condiviso, catena ADR 0009)
+    recupera i risultati prima del modello e li inietta in
+    ``skill_context`` come dati non fidati (AT05). Fallimento -> None,
+    cioe escalation normale, mai risultati simulati.
     """
     # ponytail: regole deterministiche note (sezione 7.1) prima del modello: gratis, zero latenza
     from .router import FAST_PATH_RULES
@@ -597,6 +624,15 @@ def pre_turn_dispatch(text: str,
             pass
     reply = direct_reply(result)
     skill = skill_suggestion(result)
+    # Fast-path ricerca (issue #44): intent web_search -> risultati pre-turno
+    # come dati non fidati (AT05). Qualsiasi fallimento -> None = escalation.
+    if (result.valid and result.path_chosen == "system_1"
+            and result.answers.get("intent") == "web_search"
+            and result.answers.get("handler") == "web_search"
+            and reply is None):
+        injected = _web_search_context(clean or text, web_search_fn)
+        if injected is not None:
+            skill = injected
     # ponytail: chiavi legacy del router per compatibilita diagnostica (test_mcp)
     target = ("clarification" if result.escalation_reason == "needs_clarification"
               else "deterministic" if reply is not None
