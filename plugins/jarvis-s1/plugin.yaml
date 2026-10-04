@@ -4,6 +4,7 @@ description: "Jarvis System 1 pre-turno: risposta diretta sicura, skill suggesti
 author: "jarvis-hermes"
 provides_hooks:
   - pre_gateway_dispatch
+  - post_stt_enrichment
   - pre_llm_call
 provides_middleware:
   - llm_request

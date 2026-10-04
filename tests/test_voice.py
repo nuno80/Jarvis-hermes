@@ -133,6 +133,45 @@ class VoicePluginWiringTests(unittest.TestCase):
         (_, receipt), _ = adapter.send.await_args
         self.assertIn("Vocale ricevuto:", receipt)
 
+    def test_poststt_answered_replaces_echo_with_single_reply(self):
+        mod = self._import_plugin()
+        res = mod.post_stt_enrichment_hook(
+            self._event("quanto spazio libero ho sul disco"), None,
+            transcripts=["quanto spazio libero ho sul disco"], source=None)
+        self.assertIn("🎙️", res["reply"])
+        self.assertNotIn("action", res)
+
+    def test_poststt_working_suppresses_echo_and_rewrites_transcript(self):
+        mod = self._import_plugin()
+        res = mod.post_stt_enrichment_hook(
+            self._event("x"), None,
+            transcripts=["cercami voli per Bali a novembre"], source=None)
+        self.assertTrue(res["suppress_echo"])
+        self.assertEqual(res["action"], "rewrite")
+        self.assertEqual(res["text"], "cercami voli per Bali a novembre")
+
+    def test_poststt_clarification_suppresses_echo_before_any_effect(self):
+        mod = self._import_plugin()
+        res = mod.post_stt_enrichment_hook(
+            self._event("x"), None,
+            transcripts=["cancella tutto dal server"], source=None)
+        self.assertTrue(res["suppress_echo"])
+        self.assertEqual(res["reason"], "jarvis_poststt_needs_clarification")
+        self.assertIn("Non ho eseguito nulla", mod.handle_voice_transcript(
+            "cancella tutto dal server", actor_id=1,
+            budget_tracker=mod._voice_budget(), job_store=mod._voice_jobs(),
+            dispatch_fn=lambda t: {"path": "system_2", "target": "x",
+                                   "intent": "ambiguous", "handler": "h",
+                                   "confidence": 0.4, "reply": None,
+                                   "escalation_reason": "needs_clarification"})["reply"])
+
+    def test_poststt_empty_transcripts_leaves_dispatch_alone(self):
+        mod = self._import_plugin()
+        self.assertIsNone(mod.post_stt_enrichment_hook(
+            self._event("x"), None, transcripts=[], source=None))
+        self.assertIsNone(mod.post_stt_enrichment_hook(
+            self._event("x"), None, transcripts=["   "], source=None))
+
     def test_too_long_voice_warns_even_without_transcript(self):
         mod = self._import_plugin()
         from unittest.mock import AsyncMock, MagicMock

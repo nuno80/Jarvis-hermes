@@ -217,6 +217,63 @@ def _voice_ack(event: Any, gateway: Any) -> Any:
     return {"action": "rewrite", "text": text, "reason": f"jarvis_voice_{status or 'ack'}"}
 
 
+def _voice_user_id(event: Any, source: Any) -> int:
+    """Actor per lo stadio 2: source.user_id del hook, fallback event.source."""
+    for obj in (source, getattr(event, "source", None)):
+        try:
+            actor = int(str(getattr(obj, "user_id", None)))
+        except (TypeError, ValueError):
+            continue
+        if actor > 0:
+            return actor
+    return 0
+
+
+def post_stt_enrichment_hook(event: Any, gateway: Any, **kwargs: Any) -> Any:
+    """Stadio 2 (issue #18): Talker Jarvis sul testo trascritto da Hermes.
+
+    Gira DOPO lo STT, PRIMA dell'echo Hermes: transcripts non vuoti qui.
+    answered -> reply+skip (un solo messaggio Talker, echo soppresso);
+    working/needs_clarification/needs_resend -> messaggio Talker + suppress_echo
+    (nessuna direttiva: il turno prosegue, l'echo Hermes resta spento per
+    evitare doppi messaggi); testo vuoto -> None (normale dispatch).
+    """
+    if handle_voice_transcript is None:
+        return None
+    transcripts = kwargs.get("transcripts") or []
+    transcript = "\n".join(t.strip() for t in transcripts if str(t).strip()).strip()
+    if not transcript:
+        return None
+    source = kwargs.get("source")
+    try:
+        out = handle_voice_transcript(
+            transcript,
+            actor_id=_voice_user_id(event, source),
+            duration_seconds=_voice_duration_seconds(event),
+            budget_tracker=_voice_budget(),
+            job_store=_voice_jobs(),
+        )
+    except Exception as exc:
+        logger.warning("jarvis post-stt talker failed: %s", exc)
+        return None
+    message = out.get("reply") or out.get("ack")
+    status = out.get("status")
+    logger.info("jarvis post-stt talker status=%s job=%s chars=%d",
+                status, out.get("job_id"), len(transcript))
+    if status == "answered" and message:
+        # Risposta verificata immediata al posto dell'echo: unico messaggio.
+        return {"reply": message}
+    _suppress = {"suppress_echo": True}
+    if status == "needs_resend" and message:
+        # Trascrizione vuota/incomprensibile: reinvio, turno droppato.
+        return {**_suppress, "reply": message}
+    if message and status in ("working", "needs_clarification"):
+        # Ack/chiarimento Talker al posto dell'echo; il turno prosegue.
+        return {**_suppress, "action": "rewrite", "text": transcript,
+                "reason": f"jarvis_poststt_{status}"}
+    return _suppress if message else None
+
+
 def _voice_state_dir() -> Any:
     from pathlib import Path
     state_home = Path(os.environ.get("XDG_STATE_HOME", Path.home() / ".local" / "state"))
@@ -269,5 +326,6 @@ def llm_request_middleware(request: Any, **kwargs: Any) -> Any:
 
 def register(ctx: Any) -> None:
     ctx.register_hook("pre_gateway_dispatch", pre_gateway_dispatch_hook)
+    ctx.register_hook("post_stt_enrichment", post_stt_enrichment_hook)
     ctx.register_hook("pre_llm_call", pre_llm_call_hook)
     ctx.register_middleware("llm_request", llm_request_middleware)
