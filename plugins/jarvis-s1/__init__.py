@@ -43,8 +43,56 @@ if _src and _src not in sys.path:
 
 try:
     from jarvis_hermes.decision import pre_turn_dispatch
+    from jarvis_hermes.voice import handle_voice_transcript
 except Exception:  # Hermes non deve rompersi se Jarvis non e installato
     pre_turn_dispatch = None  # type: ignore[assignment]
+    handle_voice_transcript = None  # type: ignore[assignment]
+
+
+def _is_voice_event(event: Any) -> bool:
+    """True per vocali/upload audio (Hermes STT li arricchisce gia in testo)."""
+    mtype = str(getattr(event, "message_type", "") or "").lower()
+    if "voice" in mtype or "audio" in mtype:
+        return True
+    urls = getattr(event, "media_urls", None) or []
+    types = getattr(event, "media_types", None) or []
+    return any("audio" in str(t).lower() or "ogg" in str(u).lower()
+               for t, u in zip(types, urls)) or any(
+        str(u).lower().endswith((".ogg", ".oga", ".mp3", ".m4a", ".wav"))
+        for u in urls)
+
+
+def _delivery_target(gateway: Any, event: Any) -> tuple[Any, Any]:
+    source = getattr(event, "source", None)
+    try:
+        adapter = gateway.adapters[source.platform] if source is not None else None
+    except Exception:
+        adapter = None
+    chat_id = getattr(source, "chat_id", None) if source is not None else None
+    return adapter, chat_id
+
+
+def _send_text(adapter: Any, chat_id: Any, text: str) -> bool:
+    """Invio sync-safe da hook: coroutine -> task, valore -> invio diretto."""
+    import asyncio
+    try:
+        send = adapter.send(chat_id, text)
+    except Exception:
+        return False
+    if not asyncio.iscoroutine(send):
+        return True
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        loop = None
+    try:
+        if loop is not None:
+            loop.create_task(send)
+        else:
+            asyncio.run(send)
+    except Exception:
+        return False
+    return True
 
 
 def _text_of(event: Any) -> str:
@@ -53,9 +101,17 @@ def _text_of(event: Any) -> str:
 
 def pre_gateway_dispatch_hook(event: Any, gateway: Any,
                               session_store: Any, **kwargs: Any) -> Any:
-    """Risposta diretta sicura, altrimenti None (= dispatch normale)."""
+    """Talker vocale + risposta diretta sicura, altrimenti None (= dispatch normale).
+
+    Vocali (issue #18): il testo e gia la trascrizione Hermes (cache Telegram ->
+    faster-whisper locale). L'ack parte entro 3 s senza esiti non verificati;
+    il lavoro prosegue come job. Mai skip sui vocali salvo risposta fast gia
+    inviata in chat (answered -> skip, come il fast-path testuale).
+    """
     if pre_turn_dispatch is None:
         return None
+    if handle_voice_transcript is not None and _is_voice_event(event):
+        return _voice_ack(event, gateway)
     try:
         result = pre_turn_dispatch(_text_of(event))
     except Exception:
@@ -66,26 +122,107 @@ def pre_gateway_dispatch_hook(event: Any, gateway: Any,
         result.get("latency_ms"), bool(result.get("reply")))
     if result.get("reply") is None:
         return None
-    try:
-        source = getattr(event, "source", None)
-        adapter = gateway.adapters[source.platform] if source is not None else None
-        chat_id = getattr(source, "chat_id", None) if source is not None else None
-        if adapter is None or chat_id is None:
-            return None
-        import asyncio
-        send = adapter.send(chat_id, result["reply"])
-        if asyncio.iscoroutine(send):
-            try:
-                loop = asyncio.get_running_loop()
-            except RuntimeError:
-                loop = None
-            if loop is not None:
-                loop.create_task(send)
-            else:
-                asyncio.run(send)
-    except Exception:
+    adapter, chat_id = _delivery_target(gateway, event)
+    if adapter is None or chat_id is None:
+        return None
+    if not _send_text(adapter, chat_id, result["reply"]):
         return None
     return {"action": "skip", "reason": "jarvis_s1_direct"}
+
+
+def _voice_actor_id(event: Any) -> int:
+    """Solo source.user_id: niente ripieghi su allowlist (attribuzione arbitraria)."""
+    source = getattr(event, "source", None)
+    raw = getattr(source, "user_id", None) if source is not None else None
+    try:
+        actor = int(str(raw))
+    except (TypeError, ValueError):
+        return 0
+    return actor if actor > 0 else 0
+
+
+def _voice_duration_seconds(event: Any) -> int | None:
+    """Durata dal raw Telegram (voice/audio.duration); MessageEvent non ha il campo."""
+    raw = getattr(event, "raw_message", None)
+    for attr in ("voice", "audio"):
+        clip = getattr(raw, attr, None) if raw is not None else None
+        try:
+            seconds = int(getattr(clip, "duration", None)) if clip is not None else None
+        except (TypeError, ValueError):
+            continue
+        if seconds is not None:
+            return seconds
+    return None
+
+
+def _voice_ack(event: Any, gateway: Any) -> Any:
+    """Ack Talker per un vocale: invia ack/risposta/chiarimento, ritorna skip/rewrite."""
+    logger.info(
+        "jarvis voice probe mtype=%s text_len=%s duration=%s",
+        getattr(event, "message_type", None), len(_text_of(event)),
+        _voice_duration_seconds(event))
+    adapter, chat_id = _delivery_target(gateway, event)
+    if adapter is None or chat_id is None:
+        return None
+    text = _text_of(event).strip()
+    if not text:
+        # Hermes non ha ancora trascritto: niente ack inventato, dispatch normale.
+        return None
+    try:
+        from jarvis_hermes.voice import (
+            AUDIO_RETENTION_POLICY, VOICE_MAX_DURATION_SECONDS,
+        )
+        duration = _voice_duration_seconds(event)
+        if duration is not None and duration > VOICE_MAX_DURATION_SECONDS:
+            _send_text(adapter, chat_id,
+                       "🎙️ Vocale troppo lungo: reinvia un vocale più breve o scrivi la richiesta.")
+            return {"action": "rewrite",
+                    "text": f"[vocale troppo lungo, utente gia avvisato; retention: {AUDIO_RETENTION_POLICY}]",
+                    "reason": "jarvis_voice_too_long"}
+        handle = handle_voice_transcript
+        if handle is None:
+            return None
+        out = handle(
+            text,
+            actor_id=_voice_actor_id(event),
+            duration_seconds=duration,
+            budget_tracker=_voice_budget(),
+            job_store=_voice_jobs(),
+        )
+    except Exception as exc:
+        logger.warning("jarvis voice ack failed: %s", exc)
+        return None
+    message = out.get("reply") or out.get("ack")
+    if message and not _send_text(adapter, chat_id, message):
+        return None
+    status = out.get("status")
+    if status == "answered":
+        # Risposta fast gia inviata in chat: nessun lavoro residuo, skip.
+        return {"action": "skip", "reason": "jarvis_voice_answered"}
+    # working / needs_clarification: il Reasoner gira sul testo trascritto.
+    return {"action": "rewrite", "text": text, "reason": f"jarvis_voice_{status or 'ack'}"}
+
+
+def _voice_state_dir() -> Any:
+    from pathlib import Path
+    state_home = Path(os.environ.get("XDG_STATE_HOME", Path.home() / ".local" / "state"))
+    state_dir = state_home / "jarvis-hermes"
+    state_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+    return state_dir
+
+
+def _voice_budget() -> Any:
+    from jarvis_hermes.llm import BudgetTracker
+    state_dir = _voice_state_dir()
+    return BudgetTracker(
+        state_dir / "llm_budget.json",
+        job_limit_usd=float(os.environ.get("JARVIS_JOB_BUDGET_USD", "0.50")),
+        daily_limit_usd=float(os.environ.get("JARVIS_DAILY_BUDGET_USD", "5.00")))
+
+
+def _voice_jobs() -> Any:
+    from jarvis_hermes.jobs import JobStore
+    return JobStore(_voice_state_dir() / "jobs.sqlite3")
 
 
 def pre_llm_call_hook(user_message: Any, **kwargs: Any) -> Any:

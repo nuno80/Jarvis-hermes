@@ -28,6 +28,7 @@ from .decision import pre_turn_dispatch as system1_pre_turn_dispatch
 from .router import JevClient, RequestRouter, RouterError
 from .travel import TravelError, TravelManager
 from .vault import Vault, VaultError
+from .voice import VoiceError
 from .web import WebError, WebManager
 
 
@@ -184,6 +185,9 @@ def build_server() -> FastMCP:
             return {**result, 'ok': False, 'data': None,
                     'error': {'code': exc.code, 'message': exc.message, 'retryable': False}}
         except RouterError as exc:
+            return {**result, 'ok': False, 'data': None,
+                    'error': {'code': exc.code, 'message': exc.message, 'retryable': False}}
+        except VoiceError as exc:
             return {**result, 'ok': False, 'data': None,
                     'error': {'code': exc.code, 'message': exc.message, 'retryable': False}}
         except TravelError as exc:
@@ -529,6 +533,27 @@ def build_server() -> FastMCP:
                 query, job_id=job_id,
                 telemetry_store=telemetry_store, budget_tracker=budget_tracker)
         return respond(_do_route, request_id)
+
+    @server.tool(annotations=readonly)
+    def transcribe_voice_message(transcript: str, actor_id: int, job_id: str = "voice-job",
+                                 duration_seconds: int | None = None,
+                                 stt_provider: str = "hermes_stt",
+                                 stt_model: str = "hermes_local",
+                                 request_id: str | None = None) -> dict[str, Any]:
+        """Handle a Telegram voice transcript (Hermes STT output, untrusted): ack/job/clarify.
+
+        Hermes owns Telegram session + STT; this tool receives only the transcript
+        text and returns the Talker ack or verified fast reply. Never grants consent.
+        """
+        from .voice import handle_voice_transcript
+        def _do_voice() -> dict[str, Any]:
+            return handle_voice_transcript(
+                transcript, actor_id=actor_id, job_id=job_id,
+                duration_seconds=duration_seconds,
+                stt_provider=stt_provider, stt_model=stt_model,
+                budget_tracker=budget_tracker, job_store=job_store,
+                telemetry_store=telemetry_store)
+        return respond(_do_voice, request_id)
 
     @server.tool(annotations=readonly)
     def get_routing_report(request_id: str | None = None) -> dict[str, Any]:

@@ -224,26 +224,40 @@ class BudgetTracker:
 
 
 class STTClient:
-    """STT (Speech-to-Text) adapter recording per-job budget usage."""
+    """STT (Speech-to-Text) adapter recording per-job budget usage.
+
+    Lo STT reale e di Hermes (voice.py: solo trascrizione in ingresso);
+    qui si registrano errore/consumo per job (#18): fail-closed su budget
+    esaurito (LLMError dal tracker), mai risultati simulati.
+    """
+    COST_USD_PER_SECOND = 0.006 / 60.0
+    TOKENS_PER_SECOND = 4
+
     def __init__(self, budget_tracker: BudgetTracker, model_id: str = "whisper-1"):
         self.budget_tracker = budget_tracker
         self.model_id = model_id
 
-    def transcribe(self, audio_bytes: bytes, job_id: str = "default-job") -> str:
-        duration_seconds = max(1, len(audio_bytes) // 32000)
-        cost_usd = duration_seconds * (0.006 / 60.0)
-        prompt_tokens = duration_seconds * 4
-
-        self.budget_tracker.check_budget_available(job_id=job_id)
-        self.budget_tracker.record_usage(
+    def record_transcription(self, job_id: str, duration_seconds: float = 0,
+                             provider: str = "stt") -> UsageRecord:
+        """Registra consumo STT per job; ritorna UsageRecord."""
+        if duration_seconds is None:
+            duration_seconds = 0
+        if duration_seconds < 0:
+            raise LLMError("STT_INVALID_DURATION", "STT duration must be >= 0.")
+        duration = max(1, int(duration_seconds) or 1)
+        return self.budget_tracker.record_usage(
             job_id=job_id,
-            provider="stt",
+            provider=provider,
             model_id=self.model_id,
-            prompt_tokens=prompt_tokens,
+            prompt_tokens=duration * self.TOKENS_PER_SECOND,
             completion_tokens=0,
-            cost_usd=cost_usd,
+            cost_usd=duration * self.COST_USD_PER_SECOND,
             is_estimated=True,
         )
+
+    def transcribe(self, audio_bytes: bytes, job_id: str = "default-job") -> str:
+        duration_seconds = max(1, len(audio_bytes) // 32000)
+        self.record_transcription(job_id, duration_seconds)
         return ""
 
 

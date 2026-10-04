@@ -57,6 +57,8 @@ def main() -> int:
     web_demo = sub.add_parser("web-demo", help="Run an isolated web page read, fill, and consent-gated submission demo")
     gemini_demo = sub.add_parser("gemini-demo", help="Run an isolated Gemini call demo recording token and cost tracking")
     routing_demo = sub.add_parser("routing-demo", help="Run an isolated routing demo testing deterministic fast-path, Jev timeout, and conservative fallback")
+    voice_demo = sub.add_parser("voice-demo", help="Run an isolated Telegram voice flow demo (STT usage, ack <=3s, clarification, no consent)")
+    voice_demo.add_argument("--json", action="store_true", dest="as_json")
     routing_report = sub.add_parser("routing-report", help="Print routing decisions telemetry report (p50/p95 latency, escalation rate, path distribution)")
     routing_report.add_argument("--json", action="store_true", dest="as_json", help="Output report in JSON format")
     routing_report.add_argument("--cleanup", action="store_true", help="Run retention cleanup before generating report")
@@ -463,6 +465,104 @@ def main() -> int:
                 "classification_cannot_authorize": True,
                 "telemetry_recorded_count": demo_report["total_decisions"],
             }))
+        return 0
+    if args.command == "voice-demo":
+        import time as _time
+        from .jobs import JobStore
+        from .llm import BudgetTracker
+        from .voice import (
+            ACK_LATENCY_BUDGET_MS, AUDIO_RETENTION_POLICY,
+            VOICE_MAX_DURATION_SECONDS, VoiceError, handle_voice_transcript,
+        )
+        with tempfile.TemporaryDirectory(prefix="jarvis-voice-demo-") as directory:
+            base = Path(directory)
+            tracker = BudgetTracker(base / "llm_budget.json",
+                                    job_limit_usd=1.00, daily_limit_usd=10.00)
+            store = JobStore(base / "jobs.sqlite3")
+
+            def _dispatch(text):
+                lowered = text.lower()
+                if "spazio libero" in lowered or "spazio" in lowered:
+                    return {"path": "system_1", "target": "deterministic",
+                            "intent": "disk_usage", "handler": "disk_usage",
+                            "confidence": 1.0, "reply": "Spazio libero: 10.0 GiB.",
+                            "escalation_reason": None}
+                if "cancella" in lowered or "elimina" in lowered:
+                    return {"path": "system_2", "target": "clarification",
+                            "intent": "ambiguous", "handler": "ask_clarification",
+                            "confidence": 0.4, "reply": None,
+                            "escalation_reason": "needs_clarification"}
+                return {"path": "system_2", "target": "reasoning_llm",
+                        "intent": "web_search", "handler": "web_search",
+                        "confidence": 0.5, "reply": None,
+                        "escalation_reason": "low_confidence"}
+
+            latencies = {}
+
+            def _run(label, transcript, **kw):
+                started = _time.perf_counter()
+                res = handle_voice_transcript(
+                    transcript, actor_id=123456, job_id=f"voice-{label}",
+                    duration_seconds=kw.get("duration_seconds", 12),
+                    budget_tracker=tracker, job_store=store, dispatch_fn=_dispatch)
+                latencies[label] = round((_time.perf_counter() - started) * 1000.0, 2)
+                return res
+
+            fast = _run("fast", "quanto spazio libero ho sul disco")
+            working = _run("system2", "cercami voli per Bali a novembre")
+            clarify = _run("clarify", "cancella tutto dal server")
+            empty = _run("empty", "   ")
+            boundary = _run("boundary", "ciao",
+                            duration_seconds=VOICE_MAX_DURATION_SECONDS)
+            try:
+                handle_voice_transcript(
+                    "vocale lunghissimo", actor_id=123456, job_id="voice-toolong",
+                    duration_seconds=VOICE_MAX_DURATION_SECONDS + 60,
+                    budget_tracker=tracker, job_store=store, dispatch_fn=_dispatch)
+                too_long = {"rejected": False}
+            except VoiceError as exc:
+                too_long = {"rejected": exc.code == "VOICE_TOO_LONG"}
+
+            usage = tracker.get_job_usage("voice-system2")
+            ack_ok = all(latencies[k] < ACK_LATENCY_BUDGET_MS
+                         for k in ("fast", "system2", "clarify"))
+            ack_no_outcome = all(w not in working["ack"].lower()
+                                 for w in ("completato", "fatto", "inviato", "eseguito"))
+            jobs = {"fast": store.get_job(fast["job_id"]),
+                    "working": store.get_job(working["job_id"]),
+                    "clarify": store.get_job(clarify["job_id"])}
+            payload = {
+                "scope": "isolated_voice_demo",
+                "fast_answered": fast["status"] == "answered" and "Spazio libero" in fast["reply"],
+                "system2_working_ack": working["status"] == "working" and working["job_id"] in working["ack"],
+                "ambiguous_clarification_no_effect": (
+                    clarify["status"] == "needs_clarification"
+                    and "Non ho eseguito nulla" in clarify["reply"]
+                    and jobs["clarify"]["effects_count"] == 0),
+                "empty_asks_resend": empty["status"] == "needs_resend" and empty["job_id"] is None,
+                "boundary_duration_accepted": boundary["status"] == "working",
+                "too_long_rejected": too_long["rejected"],
+                "ack_latency_ms": latencies,
+                "ack_within_3s": ack_ok,
+                "ack_claims_no_outcome": ack_no_outcome,
+                "stt_calls_recorded": usage["calls_count"] >= 1,
+                "stt_tokens_recorded": usage["total_tokens"] > 0,
+                "job_states": {k: v["status"] for k, v in jobs.items()},
+                "audio_retention": AUDIO_RETENTION_POLICY,
+                "no_consent_from_audio": "approval_token" not in jobs["working"]["metadata"],
+                "machine_state": {"job_db": str(base / "jobs.sqlite3"),
+                                  "fast_job": fast["job_id"],
+                                  "working_job": working["job_id"]},
+            }
+            if args.as_json:
+                print(json.dumps(payload, indent=2, ensure_ascii=False))
+            else:
+                print(f"Fast vocale: {fast['reply'][:80]}")
+                print(f"Ack System 2: {working['ack'][:100]}")
+                print(f"Chiarimento: {clarify['reply'][:100]}")
+                print(f"Latenze ack (ms): {latencies} (budget {ACK_LATENCY_BUDGET_MS})")
+                print(f"STT job voice-system2: {usage['calls_count']} chiamate, {usage['total_tokens']} token")
+                print(f"Retention: {AUDIO_RETENTION_POLICY}")
         return 0
     if args.command == "routing-report":
         from .telemetry import RoutingDecisionStore

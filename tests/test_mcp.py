@@ -485,6 +485,31 @@ class MCPTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(data_fallback["target"], "reasoning_llm")
             self.assertTrue(data_fallback["fallback_applied"])
 
+    async def test_transcribe_voice_message_via_mcp(self):
+        async with connected() as client:
+            tools = await client.list_tools()
+            self.assertIn("transcribe_voice_message", [t.name for t in tools.tools])
+            # Trascrizione chiara su fast-path: risposta verificata immediata.
+            res_fast = await client.call_tool("transcribe_voice_message", {
+                "transcript": "quanto spazio libero ho sul disco?",
+                "actor_id": 123456, "job_id": "voice-mcp-1",
+                "duration_seconds": 5,
+            })
+            self.assertTrue(res_fast.structuredContent["ok"])
+            data_fast = res_fast.structuredContent["data"]
+            self.assertEqual(data_fast["status"], "answered")
+            self.assertIn("🎙️", data_fast["reply"])
+            self.assertIn("provider", data_fast["stt_usage"])
+            # Vocale troppo lungo: errore applicativo VoiceError, mai eccezione di protocollo.
+            res_long = await client.call_tool("transcribe_voice_message", {
+                "transcript": "vocale lunghissimo",
+                "actor_id": 123456, "job_id": "voice-mcp-2",
+                "duration_seconds": 9999,
+            })
+            payload = res_long.structuredContent
+            self.assertFalse(payload["ok"])
+            self.assertEqual(payload["error"]["code"], "VOICE_TOO_LONG")
+
     async def test_workflow_and_commit_via_mcp(self):
         import subprocess
         from pathlib import Path
