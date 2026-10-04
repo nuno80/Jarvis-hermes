@@ -233,10 +233,10 @@ def post_stt_enrichment_hook(event: Any, gateway: Any, **kwargs: Any) -> Any:
     """Stadio 2 (issue #18): Talker Jarvis sul testo trascritto da Hermes.
 
     Gira DOPO lo STT, PRIMA dell'echo Hermes: transcripts non vuoti qui.
-    answered -> reply+skip (un solo messaggio Talker, echo soppresso);
-    working/needs_clarification/needs_resend -> messaggio Talker + suppress_echo
-    (nessuna direttiva: il turno prosegue, l'echo Hermes resta spento per
-    evitare doppi messaggi); testo vuoto -> None (normale dispatch).
+    answered/needs_resend -> reply (messaggio Talker al posto dell'echo,
+    turno droppato); working/needs_clarification -> ack/chiarimento inviato
+    subito + rewrite del transcript pulito (il turno prosegue sul Reasoner),
+    echo Hermes soppresso; testo vuoto -> None (normale dispatch).
     """
     if handle_voice_transcript is None:
         return None
@@ -268,7 +268,15 @@ def post_stt_enrichment_hook(event: Any, gateway: Any, **kwargs: Any) -> Any:
         # Trascrizione vuota/incomprensibile: reinvio, turno droppato.
         return {**_suppress, "reply": message}
     if message and status in ("working", "needs_clarification"):
-        # Ack/chiarimento Talker al posto dell'echo; il turno prosegue.
+        # Ack/chiarimento Talker inviato subito (al posto dell'echo); il turno
+        # prosegue sul transcript pulito (rewrite). working = ack con job_id,
+        # needs_clarification = chiarimento prima di qualsiasi effetto.
+        try:
+            _adapter, _chat = _delivery_target(gateway, event)
+            if _adapter is not None and _chat is not None:
+                _send_text(_adapter, _chat, message)
+        except Exception:
+            pass
         return {**_suppress, "action": "rewrite", "text": transcript,
                 "reason": f"jarvis_poststt_{status}"}
     return _suppress if message else None

@@ -28,8 +28,19 @@ trascritto (il Reasoner deve girare); `rewrite`/`skip` preservano
 auth/pairing e prefix cache. Troppo-lungo fail-closed anche senza
 transcript (durata da `raw_message.voice/audio.duration`).
 `transcribe_voice_message` espone lo stesso flusso come tool MCP readonly.
-Follow-up B (fuori da questo repo): hook Hermes post-STT per lo stadio 2
-sul testo trascritto (ack Talker sul contenuto + risposta verificata).
+Stadio 2 live (B-full, 2026-10-04 21:00 CEST, patch host + plugin `c22a973`):
+nuovo hook Hermes `post_stt_enrichment` (sparato dopo lo STT, prima
+dell'echo; fail-open; prima direttiva vince: `skip`/`rewrite`/`reply`/
+`suppress_echo`) + `post_stt_enrichment_hook` nel plugin che invia il Talker
+sul testo trascritto. Evidenza: `post_stt_enrichment firing transcripts=1` →
+`jarvis post-stt talker status=working job=job-bb09509c254ccdc0 chars=34` →
+`post_stt_enrichment rewrite` + ack `🎙️ Ho trascritto… (job …)` in chat prima
+della risposta Reasoner (32.1 s). Patch host (fuori repo, backup
+`*.bak-jarvis-poststt`): `plugins.py` VALID_HOOKS, `plugins_activation.py`
+transforms, `run_inbound.py` (`_hm_post_stt_apply` once-per-event +
+innesti `_enrich_inbound_voice`/`_transcribe_and_echo_pending_voice` + drop
+`None` in `_prepare_inbound_message_text`), `run_turn.py` (drain None-safe).
+`stt.local.language: 'it'` in `~/.hermes/config.yaml` (auto-detect → inglese).
 
 ## Conseguenze
 

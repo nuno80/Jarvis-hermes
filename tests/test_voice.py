@@ -141,14 +141,23 @@ class VoicePluginWiringTests(unittest.TestCase):
         self.assertIn("🎙️", res["reply"])
         self.assertNotIn("action", res)
 
-    def test_poststt_working_suppresses_echo_and_rewrites_transcript(self):
+    def test_poststt_working_sends_ack_then_rewrites_transcript(self):
         mod = self._import_plugin()
+        from unittest.mock import MagicMock
+        sent = []
+        mod._send_text = lambda _a, _c, text: sent.append(text) or True
+        event = self._event("x")
+        gateway = MagicMock()
+        gateway.adapters = {"telegram": MagicMock()}
         res = mod.post_stt_enrichment_hook(
-            self._event("x"), None,
+            event, gateway,
             transcripts=["cercami voli per Bali a novembre"], source=None)
         self.assertTrue(res["suppress_echo"])
         self.assertEqual(res["action"], "rewrite")
         self.assertEqual(res["text"], "cercami voli per Bali a novembre")
+        # L'ack Talker parte subito (al posto dell'echo), non aspetta il Reasoner.
+        self.assertEqual(len(sent), 1)
+        self.assertIn("Ho trascritto", sent[0])
 
     def test_poststt_clarification_suppresses_echo_before_any_effect(self):
         mod = self._import_plugin()
