@@ -1,5 +1,6 @@
 """Tests for pi_coding and coding session MCP integration."""
 import os
+import time
 from pathlib import Path
 import tempfile
 import unittest
@@ -99,7 +100,14 @@ class PiCodingTests(unittest.TestCase):
         with patch("pathlib.Path.home", return_value=self.base_path), \
              patch("shutil.which", return_value="/usr/local/bin/pi"), \
              patch("jarvis_hermes.pi_coding.ensure_proxy_servers_running", return_value={}), \
-             patch("jarvis_hermes.pi_coding.send_telegram_notification") as mock_tg:
+             patch("jarvis_hermes.pi_coding.send_telegram_notification") as mock_tg, \
+             patch("subprocess.run") as mock_run:
+
+            mock_res = MagicMock()
+            mock_res.returncode = 0
+            mock_res.stdout = "async task done"
+            mock_res.stderr = ""
+            mock_run.return_value = mock_res
 
             res = run_pi_task(
                 prompt="Run async background task",
@@ -112,6 +120,12 @@ class PiCodingTests(unittest.TestCase):
             self.assertTrue(res.get("async"))
             self.assertEqual(res["status"], "running_in_background")
             mock_tg.assert_called()
+            # ponytail: daemon thread outlives the mock without this; it would then
+            # call the real send_telegram_notification (real Telegram spam).
+            deadline = time.time() + 10
+            while mock_tg.call_count < 2 and time.time() < deadline:
+                time.sleep(0.05)
+            self.assertGreaterEqual(mock_tg.call_count, 2)
 
 
 if __name__ == "__main__":
