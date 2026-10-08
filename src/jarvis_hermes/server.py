@@ -10,6 +10,7 @@ from mcp.types import ToolAnnotations
 from pydantic import BaseModel
 
 from .approval import ApprovalError, ApprovalStore
+from .calendar import CalendarError, CalendarManager
 from .checkpoint import CheckpointError, CheckpointManager
 from .cli import diagnose
 from .command_policy import CommandPolicyError, CommandPolicyManager
@@ -138,6 +139,7 @@ def build_server() -> FastMCP:
     gui_manager = GuiAutomationManager(job_store=job_store)
     web_manager = WebManager(approval_store=approval_store)
     travel_manager = TravelManager()
+    calendar_manager = CalendarManager()
     budget_tracker = _budget_tracker()
     telemetry_store = _routing_store()
     command_policy_manager = CommandPolicyManager(
@@ -191,6 +193,9 @@ def build_server() -> FastMCP:
             return {**result, 'ok': False, 'data': None,
                     'error': {'code': exc.code, 'message': exc.message, 'retryable': False}}
         except TravelError as exc:
+            return {**result, 'ok': False, 'data': None,
+                    'error': {'code': exc.code, 'message': exc.message, 'retryable': exc.retryable}}
+        except CalendarError as exc:
             return {**result, 'ok': False, 'data': None,
                     'error': {'code': exc.code, 'message': exc.message, 'retryable': exc.retryable}}
         except (OSError, UnicodeError, ValueError):
@@ -591,6 +596,34 @@ def build_server() -> FastMCP:
                 "cabin_class": cabin_class,
             })
         return respond(_do_search, request_id)
+
+    @server.tool(annotations=readonly)
+    def calendar_search(calendar_id: str = 'primary', q: str | None = None,
+                          time_min: str | None = None, time_max: str | None = None,
+                          time_zone: str | None = None, max_results: int = 10,
+                          request_id: str | None = None) -> dict[str, Any]:
+        """Read events from the configured Google Calendar (readonly scope); untrusted content. Never creates events."""
+        def _do_search() -> dict[str, Any]:
+            return calendar_manager.search_events({
+                'calendar_id': calendar_id, 'q': q,
+                'time_min': time_min, 'time_max': time_max,
+                'time_zone': time_zone or None, 'max_results': max_results,
+            })
+        return respond(_do_search, request_id)
+
+    @server.tool(annotations=readonly)
+    def draft_calendar_event(summary: str, start: str, end: str,
+                              calendar_id: str = 'primary', time_zone: str | None = None,
+                              location: str | None = None, description: str = '',
+                              attendees: list[Any] | None = None,
+                              request_id: str | None = None) -> dict[str, Any]:
+        """Build a local event draft with explicit timezone/account; no network, no event created. Creation (#24) needs approval."""
+        return respond(lambda: CalendarManager.draft_event({
+            'summary': summary, 'start': start, 'end': end,
+            'calendar_id': calendar_id, 'time_zone': time_zone or None,
+            'location': location, 'description': description,
+            'attendees': attendees or [],
+        }), request_id)
 
     @server.tool(annotations=open_world_readonly)
     def read_web_page(url: str, timeout_seconds: int = 15, request_id: str | None = None) -> dict[str, Any]:

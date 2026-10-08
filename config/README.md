@@ -145,6 +145,15 @@ L'interazione con pagine web e l'invio di moduli esterni avvengono sotto control
 - `fetch_page(url, timeout_seconds)`:
   - Alias sicuro in sola lettura di `read_web_page`: stesso controllo anti-SSRF, solo testo estratto (senza moduli), URL, titolo e `retrieved_at`.
 
+## Agenda Google Calendar (`calendar_search`, `draft_calendar_event`, J16, #23, ADR 0011)
+
+- `calendar_search(calendar_id, q, time_min, time_max, time_zone, max_results)`:
+  - Lettura sola via Calendar API v3 con scope `calendar.readonly`; GET non crea eventi. Credenziali solo da env: `GOOGLE_CALENDAR_ACCESS_TOKEN` oppure tripletta `GOOGLE_CALENDAR_CLIENT_ID` / `GOOGLE_CALENDAR_CLIENT_SECRET` / `GOOGLE_CALENDAR_REFRESH_TOKEN` (rinnovo automatico). Timezone default `JARVIS_CALENDAR_TIMEZONE` (`Europe/Rome`).
+  - Restituisce eventi normalizzati (`event_id`, `summary`, `start`/`end` con offset o date all-day, `location`, `attendees`, `organizer`, `status`, `html_link`) con timezone del calendario, `observed_at` e campi ignoti espliciti (`unknown_fields`).
+  - **Dati non fidati** (AT05): contenuti marcati `untrusted_content`, mai istruzioni. Senza credenziali fallisce chiuso (`PROVIDER_NOT_CONFIGURED`) senza toccare la rete; accesso revocato → `PROVIDER_AUTH_ERROR`; calendario assente → `CALENDAR_NOT_FOUND`. Mai eventi simulati.
+- `draft_calendar_event(summary, start, end, calendar_id, time_zone, location, description, attendees)`:
+  - Bozza puramente locale, nessuna rete e nessun evento creato (`created_event: false`); valida orari RFC3339/date, timezone IANA, invitati email e segnala transizioni DST (`dst_transition`). La creazione con conferma è la #24.
+
 
 
 

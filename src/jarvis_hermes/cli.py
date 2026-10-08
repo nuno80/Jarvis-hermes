@@ -54,6 +54,9 @@ def main() -> int:
     travel_demo.add_argument("--date", default="2026-11-15", help="Departure date (YYYY-MM-DD)")
     travel_demo.add_argument("--passengers", type=int, default=1, help="Number of passengers")
     travel_demo.add_argument("--json", action="store_true", dest="as_json")
+    calendar_demo = sub.add_parser("calendar-demo", help="Run an isolated Google Calendar read + local draft demo (no event created)")
+    calendar_demo.add_argument("--query", default="", help="Free text search")
+    calendar_demo.add_argument("--json", action="store_true", dest="as_json")
     web_demo = sub.add_parser("web-demo", help="Run an isolated web page read, fill, and consent-gated submission demo")
     gemini_demo = sub.add_parser("gemini-demo", help="Run an isolated Gemini call demo recording token and cost tracking")
     routing_demo = sub.add_parser("routing-demo", help="Run an isolated routing demo testing deterministic fast-path, Jev timeout, and conservative fallback")
@@ -648,6 +651,32 @@ def main() -> int:
                 print(f"[{exc.code}] {exc.message}")
             return 1
         return 0
+    if args.command == "calendar-demo":
+        from .calendar import CalendarError, CalendarManager
+        mgr = CalendarManager()
+        try:
+            res = mgr.search_events({"q": args.query or None, "max_results": 5})
+            searched = {"events_count": res["events_count"],
+                        "provider": res["provider"],
+                        "calendar_timezone": res["calendar_timezone"]}
+        except CalendarError as exc:
+            searched = {"error": {"code": exc.code, "message": exc.message}}
+        draft = CalendarManager.draft_event({
+            "summary": "Bozza demo",
+            "start": "2026-11-01T10:00:00+01:00",
+            "end": "2026-11-01T10:30:00+01:00",
+        })
+        payload = {"scope": "isolated_calendar_demo",
+                   "search": searched,
+                   "draft": {"status": draft["status"],
+                               "created_event": draft["created_event"],
+                               "duration": draft["duration"]}}
+        if args.as_json:
+            print(json.dumps(payload, indent=2, ensure_ascii=False))
+        else:
+            print(f"Ricerca: {searched}")
+            print(f"Bozza: {draft['summary']} {draft['start']} -> {draft['end']} (creato: {draft['created_event']})")
+        return 0 if "error" not in searched or searched["error"]["code"] == "PROVIDER_NOT_CONFIGURED" else 1
     if args.command == "serve":
         from .server import main as serve
         serve()

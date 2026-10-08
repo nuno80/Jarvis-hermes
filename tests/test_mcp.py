@@ -144,6 +144,20 @@ class MCPTests(unittest.IsolatedAsyncioTestCase):
             catalog = await client.list_tools()
             names = {t.name for t in catalog.tools}
             self.assertIn('simulate_with_approval', names)
+            self.assertIn('calendar_search', names)
+            self.assertIn('draft_calendar_event', names)
+            # No credentials: calendar_search fails closed without touching the network
+            cal = (await client.call_tool('calendar_search', {'q': 'dentista'})).structuredContent
+            self.assertFalse(cal['ok'])
+            self.assertEqual(cal['error']['code'], 'PROVIDER_NOT_CONFIGURED')
+            # Draft is local: no network, no event created
+            draft = (await client.call_tool('draft_calendar_event', {
+                'summary': 'Call dentista',
+                'start': '2026-11-01T10:00:00+01:00',
+                'end': '2026-11-01T10:30:00+01:00'})).structuredContent
+            self.assertTrue(draft['ok'])
+            self.assertEqual(draft['data']['status'], 'draft')
+            self.assertFalse(draft['data']['created_event'])
             self.assertTrue(all(t.annotations.readOnlyHint for t in catalog.tools
                                 if t.name not in ('simulate_with_approval', 'git_push', 'job_cancel', 'create_checkpoint', 'write_project_file', 'restore_checkpoint', 'commit_project_changes', 'execute_gui_action', 'run_command', 'submit_web_form', 'update_preference', 'propose_memory', 'forget_memory', 'write_note', 'pi_task')))
 
