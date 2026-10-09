@@ -57,6 +57,9 @@ def main() -> int:
     calendar_demo = sub.add_parser("calendar-demo", help="Run an isolated Google Calendar read + local draft demo (no event created)")
     calendar_demo.add_argument("--query", default="", help="Free text search")
     calendar_demo.add_argument("--json", action="store_true", dest="as_json")
+    email_demo = sub.add_parser("email-demo", help="Run an isolated IMAP email read + local reply draft demo (no email sent)")
+    email_demo.add_argument("--query", default="", help="Free text or subject search")
+    email_demo.add_argument("--json", action="store_true", dest="as_json")
     web_demo = sub.add_parser("web-demo", help="Run an isolated web page read, fill, and consent-gated submission demo")
     gemini_demo = sub.add_parser("gemini-demo", help="Run an isolated Gemini call demo recording token and cost tracking")
     routing_demo = sub.add_parser("routing-demo", help="Run an isolated routing demo testing deterministic fast-path, Jev timeout, and conservative fallback")
@@ -676,6 +679,39 @@ def main() -> int:
         else:
             print(f"Ricerca: {searched}")
             print(f"Bozza: {draft['summary']} {draft['start']} -> {draft['end']} (creato: {draft['created_event']})")
+        return 0 if "error" not in searched or searched["error"]["code"] == "PROVIDER_NOT_CONFIGURED" else 1
+    if args.command == "email-demo":
+        from .email import EmailError, EmailManager
+        mgr = EmailManager()
+        try:
+            res = mgr.search_emails({"query": args.query or None, "max_results": 5})
+            searched = {"emails_count": res["emails_count"],
+                        "provider": res["provider"],
+                        "folder": res["folder"]}
+        except EmailError as exc:
+            searched = {"error": {"code": exc.code, "message": exc.message}}
+        draft = EmailManager.draft_reply({
+            "original_message": {
+                "uid": "1",
+                "message_id": "<demo@example.com>",
+                "subject": "Demo Email",
+                "from": "sender@example.com",
+                "to": ["user@example.com"],
+                "body_text": "Demo content",
+            },
+            "reply_body": "Risposta di prova locale.",
+        })
+        payload = {"scope": "isolated_email_demo",
+                   "search": searched,
+                   "draft": {"status": draft["status"],
+                             "sent": draft["sent"],
+                             "subject": draft["subject"],
+                             "to": draft["to"]}}
+        if args.as_json:
+            print(json.dumps(payload, indent=2, ensure_ascii=False))
+        else:
+            print(f"Ricerca: {searched}")
+            print(f"Bozza: {draft['subject']} -> {draft['to']} (inviato: {draft['sent']})")
         return 0 if "error" not in searched or searched["error"]["code"] == "PROVIDER_NOT_CONFIGURED" else 1
     if args.command == "serve":
         from .server import main as serve

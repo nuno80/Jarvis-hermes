@@ -910,6 +910,35 @@ class MCPTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(del_res['data']['action'], 'deleted')
                 self.assertTrue((vault_dir / del_res['data']['backup_retained']).is_file())
 
+                # Email tools via MCP (Issue #25)
+                # 1. Search fails closed without configuration
+                res_email_search = (await client.call_tool('email_search', {
+                    'folder': 'INBOX',
+                    'q': 'test'
+                })).structuredContent
+                self.assertFalse(res_email_search['ok'])
+                self.assertEqual(res_email_search['error']['code'], 'PROVIDER_NOT_CONFIGURED')
+
+                # 2. Local draft reply succeeds without network
+                res_email_draft = (await client.call_tool('draft_email_reply', {
+                    'original_message': {
+                        'uid': '123',
+                        'message_id': '<msg-abc@example.com>',
+                        'subject': 'Project Update',
+                        'from': 'alice@example.com',
+                        'to': ['me@example.com'],
+                        'body_text': 'Here is the report.'
+                    },
+                    'reply_body': 'Thanks Alice, looks good!'
+                })).structuredContent
+                self.assertTrue(res_email_draft['ok'])
+                self.assertEqual(res_email_draft['data']['status'], 'draft')
+                self.assertFalse(res_email_draft['data']['sent'])
+                self.assertEqual(res_email_draft['data']['subject'], 'Re: Project Update')
+                self.assertEqual(res_email_draft['data']['in_reply_to'], '<msg-abc@example.com>')
+                self.assertIn('Thanks Alice', res_email_draft['data']['body'])
+                self.assertIsNotNone(res_email_draft['data']['digest'])
+
 
 
 

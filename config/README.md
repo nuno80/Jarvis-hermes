@@ -154,6 +154,21 @@ L'interazione con pagine web e l'invio di moduli esterni avvengono sotto control
 - `draft_calendar_event(summary, start, end, calendar_id, time_zone, location, description, attendees)`:
   - Bozza puramente locale, nessuna rete e nessun evento creato (`created_event: false`); valida orari RFC3339/date, timezone IANA, invitati email e segnala transizioni DST (`dst_transition`). La creazione con conferma è la #24.
 
+## Email e bozze di risposta (`email_search`, `email_read`, `draft_email_reply`, J16, #25, ADR 0012)
+
+- `email_search(folder, q, from_sender, subject, max_results)`:
+  - Ricerca e lettura da account IMAP (Yahoo Mail o generico IMAP over SSL, porta 993).
+  - Credenziali lette solo da env: `YAHOO_EMAIL` (o `JARVIS_EMAIL_USER`) e `YAHOO_APP_PASSWORD` (o `JARVIS_EMAIL_PASSWORD`). Host configurabile `JARVIS_EMAIL_IMAP_HOST` (default `imap.mail.yahoo.com`).
+  - Restituisce email normalizzate (`uid`, `message_id`, `subject`, `from`, `to`, `cc`, `date`, `in_reply_to`, `references`, `body_text`).
+  - **Dati non fidati** (AT05): messaggi marcati `untrusted_content`, non possono impartire istruzioni operative fidate.
+  - Fail-closed: senza credenziali fallisce con `PROVIDER_NOT_CONFIGURED` senza dati simulati; autenticazione fallita → `PROVIDER_AUTH_ERROR`.
+- `email_read(uid, folder)`:
+  - Lettura del singolo messaggio per UID con estrazione testo/plaintext o fallback HTML.
+- `draft_email_reply(original_message, reply_body, reply_all)`:
+  - Bozza di risposta locale: nessun invio di rete (`sent: false`, `status: 'draft'`).
+  - Threading corretto (`Re: <subject>`, `In-Reply-To`, `References`, citazione automatica del testo originale).
+  - Calcolo del `digest` SHA-256 immutabile della bozza, pronto per il gate di approvazione della Issue #26.
+
 
 
 
