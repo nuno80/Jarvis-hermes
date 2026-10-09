@@ -11,7 +11,7 @@ from pydantic import BaseModel
 
 from .approval import ApprovalError, ApprovalStore
 from .calendar import CalendarError, CalendarManager
-from .email import EmailError, EmailManager
+from .email import EmailAuditLog, EmailError, EmailManager
 from .checkpoint import CheckpointError, CheckpointManager
 from .cli import diagnose
 from .command_policy import CommandPolicyError, CommandPolicyManager
@@ -125,6 +125,23 @@ def _routing_store() -> RoutingDecisionStore:
     return RoutingDecisionStore(storage_path, retention_days=retention)
 
 
+def _email_audit_log() -> EmailAuditLog:
+    state_home = Path(os.environ.get('XDG_STATE_HOME', Path.home() / '.local' / 'state'))
+    state_dir = state_home / 'jarvis-hermes'
+    state_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+    try:
+        state_dir.chmod(0o700)
+    except OSError:
+        pass
+    storage_path = state_dir / 'email_audit.sqlite3'
+    audit = EmailAuditLog(storage_path)
+    try:
+        storage_path.chmod(0o600)
+    except OSError:
+        pass
+    return audit
+
+
 def build_server() -> FastMCP:
     server = FastMCP('Jarvis', log_level='WARNING')
     device = os.environ.get('JARVIS_DEVICE_ID', 'local')
@@ -141,7 +158,8 @@ def build_server() -> FastMCP:
     web_manager = WebManager(approval_store=approval_store)
     travel_manager = TravelManager()
     calendar_manager = CalendarManager()
-    email_manager = EmailManager()
+    email_audit_log = _email_audit_log()
+    email_manager = EmailManager(approval_store=approval_store, audit_log=email_audit_log)
     budget_tracker = _budget_tracker()
     telemetry_store = _routing_store()
     command_policy_manager = CommandPolicyManager(
@@ -648,13 +666,135 @@ def build_server() -> FastMCP:
 
     @server.tool(annotations=readonly)
     def draft_email_reply(original_message: dict[str, Any], reply_body: str,
-                          reply_all: bool = False, request_id: str | None = None) -> dict[str, Any]:
+                          reply_all: bool = False,
+                          bcc: list[str] | None = None,
+                          attachments: list[dict[str, Any]] | None = None,
+                          request_id: str | None = None) -> dict[str, Any]:
         """Build a local email reply draft with subject and threading headers (In-Reply-To/References). Purely local, no send."""
         return respond(lambda: EmailManager.draft_reply({
             'original_message': original_message,
             'reply_body': reply_body,
             'reply_all': reply_all,
+            'bcc': bcc or [],
+            'attachments': attachments or [],
         }), request_id)
+
+    @server.tool(annotations=destructive)
+    async def email_send(
+        to: list[str],
+        subject: str,
+        body: str,
+        ctx: Context,
+        cc: list[str] | None = None,
+        bcc: list[str] | None = None,
+        in_reply_to: str | None = None,
+        references: list[str] | None = None,
+        attachments: list[dict[str, Any]] | None = None,
+        message_id: str | None = None,
+        request_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Send an email to recipients via SMTP strictly mediated by owner approval showing recipients, subject, body digest, and attachments."""
+        observed = {
+            'schema_version': '1.0',
+            'device_id': device,
+            'request_id': request_id,
+            'observed_at': datetime.now(timezone.utc).isoformat(),
+            'provenance': {'source': 'local_process', 'scope': 'email_send'},
+        }
+        try:
+            actor_id = _configured_approver()
+            stage = email_manager.stage_email_send(
+                to=to,
+                subject=subject,
+                body=body,
+                actor_id=actor_id,
+                cc=cc,
+                bcc=bcc,
+                in_reply_to=in_reply_to,
+                references=references,
+                attachments=attachments,
+                message_id=message_id,
+            )
+
+            prompt = (
+                f"Jarvis: autorizzi l'invio della seguente email?\n"
+                f"{stage['summary_text']}"
+            )
+
+            try:
+                choice = await asyncio.wait_for(ctx.elicit(prompt, _ApprovalResponse), timeout=305)
+            except Exception:
+                choice = None
+
+            decision = getattr(choice, 'action', None)
+            if decision != 'accept':
+                target = f"email_send:{','.join(sorted(to))}"
+                arguments = {
+                    "digest": stage["digest"],
+                    "subject": subject,
+                    "to": sorted(to),
+                    "cc": sorted(cc or []),
+                    "bcc": sorted(bcc or []),
+                }
+                approval_store.decide(
+                    token=stage['approval_token'],
+                    actor_id=actor_id,
+                    target=target,
+                    arguments=arguments,
+                    approve=False,
+                )
+                return {
+                    **observed,
+                    'ok': False,
+                    'data': None,
+                    'error': {
+                        'code': 'APPROVAL_DECLINED',
+                        'message': "L'invio dell'email è stato rifiutato dall'utente o la richiesta è scaduta.",
+                        'retryable': False,
+                    },
+                }
+
+            # Invio con token verificato
+            res = email_manager.send_email(
+                to=to,
+                subject=subject,
+                body=body,
+                approval_token=stage['approval_token'],
+                actor_id=actor_id,
+                cc=cc,
+                bcc=bcc,
+                in_reply_to=in_reply_to,
+                references=references,
+                attachments=attachments,
+                message_id=stage['message_id'],
+            )
+            return {**observed, 'ok': True, 'data': res, 'error': None}
+        except EmailError as exc:
+            return {
+                **observed,
+                'ok': False,
+                'data': None,
+                'error': {'code': exc.code, 'message': exc.message, 'retryable': exc.retryable},
+            }
+        except ApprovalError as exc:
+            return {
+                **observed,
+                'ok': False,
+                'data': None,
+                'error': {'code': exc.code, 'message': f'Approval error: {exc.code}', 'retryable': False},
+            }
+        except Exception as exc:
+            return {
+                **observed,
+                'ok': False,
+                'data': None,
+                'error': {'code': 'EMAIL_SEND_FAILED', 'message': f"Errore imprevisto invio email: {exc}", 'retryable': False},
+            }
+
+    @server.tool(annotations=readonly)
+    def reconcile_email(message_id: str, request_id: str | None = None) -> dict[str, Any]:
+        """Reconcile an email send outcome by Message-ID (AT04) without blind retries."""
+        return respond(lambda: email_manager.reconcile_email_status(message_id), request_id)
 
     @server.tool(annotations=open_world_readonly)
     def read_web_page(url: str, timeout_seconds: int = 15, request_id: str | None = None) -> dict[str, Any]:

@@ -701,17 +701,61 @@ def main() -> int:
             },
             "reply_body": "Risposta di prova locale.",
         })
+
+        # 3. Dimostrazione invio protetto con consenso monouso in ambiente isolato
+        with tempfile.TemporaryDirectory(prefix="jarvis-email-demo-") as demo_dir:
+            from .approval import ApprovalStore
+            from .email import EmailAuditLog, SmtpEmailSender
+            demo_store = ApprovalStore(Path(demo_dir) / "approvals.sqlite3")
+            demo_audit = EmailAuditLog(Path(demo_dir) / "audit.sqlite3")
+            demo_sender = SmtpEmailSender(user="tester@yahoo.com", password="app_password")
+            
+            # Simuliamo l'invio SMTP per non contattare server reali durante la demo locale
+            demo_sender.send_message = lambda **kwargs: {
+                "sent": True,
+                "status": "SENT",
+                "message_id": kwargs.get("message_id") or "<demo-sent@yahoo.com>",
+                "from": "tester@yahoo.com",
+                "to": kwargs.get("to"),
+                "cc": kwargs.get("cc", []),
+                "bcc": kwargs.get("bcc", []),
+                "subject": kwargs.get("subject"),
+                "attachments_count": len(kwargs.get("attachments", [])),
+                "sent_at": "2026-10-10T12:00:00Z",
+            }
+            email_mgr = EmailManager(sender=demo_sender, approval_store=demo_store, audit_log=demo_audit)
+            actor = 12345
+            stage = email_mgr.stage_email_send(
+                to=["recipient@example.com"],
+                subject="Test invio approvato",
+                body="Corpo della email verificata.",
+                actor_id=actor,
+            )
+            # Invio con token
+            send_res = email_mgr.send_email(
+                to=["recipient@example.com"],
+                subject="Test invio approvato",
+                body="Corpo della email verificata.",
+                approval_token=stage["approval_token"],
+                actor_id=actor,
+                message_id=stage["message_id"],
+            )
+
         payload = {"scope": "isolated_email_demo",
                    "search": searched,
                    "draft": {"status": draft["status"],
                              "sent": draft["sent"],
                              "subject": draft["subject"],
-                             "to": draft["to"]}}
+                             "to": draft["to"]},
+                   "send_demo": {"status": send_res["status"],
+                                 "message_id": send_res["message_id"],
+                                 "digest": send_res["digest"]}}
         if args.as_json:
             print(json.dumps(payload, indent=2, ensure_ascii=False))
         else:
             print(f"Ricerca: {searched}")
             print(f"Bozza: {draft['subject']} -> {draft['to']} (inviato: {draft['sent']})")
+            print(f"Invio approvato: {send_res['status']} -> {send_res['message_id']}")
         return 0 if "error" not in searched or searched["error"]["code"] == "PROVIDER_NOT_CONFIGURED" else 1
     if args.command == "serve":
         from .server import main as serve

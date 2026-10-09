@@ -159,7 +159,7 @@ class MCPTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(draft['data']['status'], 'draft')
             self.assertFalse(draft['data']['created_event'])
             self.assertTrue(all(t.annotations.readOnlyHint for t in catalog.tools
-                                if t.name not in ('simulate_with_approval', 'git_push', 'job_cancel', 'create_checkpoint', 'write_project_file', 'restore_checkpoint', 'commit_project_changes', 'execute_gui_action', 'run_command', 'submit_web_form', 'update_preference', 'propose_memory', 'forget_memory', 'write_note', 'pi_task')))
+                                if t.name not in ('simulate_with_approval', 'git_push', 'job_cancel', 'create_checkpoint', 'write_project_file', 'restore_checkpoint', 'commit_project_changes', 'execute_gui_action', 'run_command', 'submit_web_form', 'update_preference', 'propose_memory', 'forget_memory', 'write_note', 'pi_task', 'email_send')))
 
     async def test_simulated_approval_records_once_and_counts_only_this_decision(self):
         from pathlib import Path
@@ -910,7 +910,7 @@ class MCPTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(del_res['data']['action'], 'deleted')
                 self.assertTrue((vault_dir / del_res['data']['backup_retained']).is_file())
 
-                # Email tools via MCP (Issue #25)
+                # Email tools via MCP (Issue #25 & #26)
                 # 1. Search fails closed without configuration
                 res_email_search = (await client.call_tool('email_search', {
                     'folder': 'INBOX',
@@ -938,6 +938,24 @@ class MCPTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(res_email_draft['data']['in_reply_to'], '<msg-abc@example.com>')
                 self.assertIn('Thanks Alice', res_email_draft['data']['body'])
                 self.assertIsNotNone(res_email_draft['data']['digest'])
+
+                # 3. Email send via MCP declined without approval or fails closed
+                res_email_send = (await client.call_tool('email_send', {
+                    'to': ['colleague@example.com'],
+                    'subject': 'MCP Test Email',
+                    'body': 'Test content via MCP',
+                })).structuredContent
+                # In MCP context without client elicitation support or decline, it fails closed cleanly
+                self.assertFalse(res_email_send['ok'])
+                self.assertIn(res_email_send['error']['code'], ('APPROVAL_DECLINED', 'APPROVER_NOT_CONFIGURED', 'PROVIDER_NOT_CONFIGURED'))
+
+                # 4. Email reconciliation via MCP (AT04)
+                res_recon = (await client.call_tool('reconcile_email', {
+                    'message_id': '<unknown-msg@example.com>',
+                })).structuredContent
+                self.assertTrue(res_recon['ok'])
+                self.assertEqual(res_recon['data']['status'], 'NOT_FOUND')
+                self.assertFalse(res_recon['data']['reconciled'])
 
 
 

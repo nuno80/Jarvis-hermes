@@ -164,10 +164,23 @@ L'interazione con pagine web e l'invio di moduli esterni avvengono sotto control
   - Fail-closed: senza credenziali fallisce con `PROVIDER_NOT_CONFIGURED` senza dati simulati; autenticazione fallita → `PROVIDER_AUTH_ERROR`.
 - `email_read(uid, folder)`:
   - Lettura del singolo messaggio per UID con estrazione testo/plaintext o fallback HTML.
-- `draft_email_reply(original_message, reply_body, reply_all)`:
+- `draft_email_reply(original_message, reply_body, reply_all, bcc, attachments)`:
   - Bozza di risposta locale: nessun invio di rete (`sent: false`, `status: 'draft'`).
   - Threading corretto (`Re: <subject>`, `In-Reply-To`, `References`, citazione automatica del testo originale).
-  - Calcolo del `digest` SHA-256 immutabile della bozza, pronto per il gate di approvazione della Issue #26.
+  - Calcolo del `digest` SHA-256 immutabile della bozza (copre destinatari, cc, bcc, oggetto, corpo e allegati), pronto per il gate di approvazione della Issue #26.
+
+## Invio email con consenso monouso ed esito verificato (`email_send`, `reconcile_email`, J16, #26, ADR 0013)
+
+- `email_send(to, subject, body, cc, bcc, in_reply_to, references, attachments, message_id)`:
+  - Invio protetto via SMTP (Yahoo Mail su porta 465 SSL o 587 STARTTLS) mediato rigorosamente da elicitazione e consenso monouso (`ApprovalStore`).
+  - Il proprietario approva destinatario, cc/bcc, oggetto, corpo e allegati tramite il prompt con digest crittografico SHA-256.
+  - Fail-closed: se l'approvazione scade (`APPROVAL_EXPIRED`), viene rifiutata (`APPROVAL_DECLINED`) o i parametri divergono (`APPROVAL_DENIED`), nessun messaggio viene inviato.
+  - Message-ID deterministico generato e registrato in SQLite `email_audit.sqlite3`.
+  - Gestione callback duplicate / de-duplicazione: se il `message_id` è già stato inviato, restituisce `ALREADY_SENT` riconciliato senza effettuare un secondo invio di rete.
+  - In caso di timeout o disconnessione durante la trasmissione SMTP (AT04), non effettua retry cieco e registra l'esito come `OUTCOME_UNKNOWN`.
+  - Assenza di segreti in audit: le credenziali applicative e le password non vengono mai salvate nel registro di audit.
+- `reconcile_email(message_id)`:
+  - Consulta l'audit log per verificare lo stato di recapito di un `message_id` senza rischiare doppi invii esterni.
 
 
 

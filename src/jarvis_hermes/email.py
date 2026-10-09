@@ -18,15 +18,54 @@ import imaplib
 import json
 import os
 import re
+import sqlite3
+import smtplib
+from contextlib import closing
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Any
+from pathlib import Path
+from .approval import ApprovalError, ApprovalStore
 
 YAHOO_IMAP_HOST = "imap.mail.yahoo.com"
 YAHOO_IMAP_PORT = 993
 
+YAHOO_SMTP_HOST = "smtp.mail.yahoo.com"
+YAHOO_SMTP_PORT = 465
+
 FOLDER_RE = re.compile(r"^[a-zA-Z0-9_\- ]+$")
 MAX_BODY_CHARS = 10000
+
+
+def compute_email_digest(
+    *,
+    to: list[str],
+    cc: list[str],
+    bcc: list[str],
+    subject: str,
+    body: str,
+    attachments: list[dict[str, Any]],
+) -> str:
+    """Calcola il digest crittografico SHA-256 su destinatari, cc, bcc, oggetto, corpo e allegati."""
+    norm_att = [
+        {
+            "filename": a.get("filename", ""),
+            "sha256": a.get("sha256", ""),
+            "size_bytes": a.get("size_bytes", 0),
+        }
+        for a in attachments
+    ]
+    # Ordina attachments per filename/sha256 per canonicità deterministica
+    norm_att.sort(key=lambda x: (x["filename"], x["sha256"]))
+    payload = {
+        "to": sorted(to),
+        "cc": sorted(cc),
+        "bcc": sorted(bcc),
+        "subject": subject,
+        "body": body,
+        "attachments": norm_att,
+    }
+    serialized = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
 
 
 class EmailError(Exception):
@@ -212,6 +251,143 @@ class EmailSearchRequest:
         )
 
 
+class SmtpEmailSender:
+    def __init__(
+        self,
+        user: str | None = None,
+        password: str | None = None,
+        host: str | None = None,
+        port: int | None = None,
+        use_starttls: bool | None = None,
+    ):
+        self.user = user or os.environ.get("YAHOO_EMAIL") or os.environ.get("JARVIS_EMAIL_USER") or ""
+        self.password = password or os.environ.get("YAHOO_APP_PASSWORD") or os.environ.get("JARVIS_EMAIL_PASSWORD") or ""
+        self.host = host or os.environ.get("JARVIS_EMAIL_SMTP_HOST") or YAHOO_SMTP_HOST
+        port_env = os.environ.get("JARVIS_EMAIL_SMTP_PORT")
+        self.port = port or (int(port_env) if port_env and port_env.isdigit() else YAHOO_SMTP_PORT)
+        if use_starttls is not None:
+            self.use_starttls = use_starttls
+        else:
+            self.use_starttls = os.environ.get("JARVIS_EMAIL_SMTP_STARTTLS", "").lower() in ("1", "true", "yes")
+
+    def has_credentials(self) -> bool:
+        return bool(self.user.strip() and self.password.strip())
+
+    def send_message(
+        self,
+        to: list[str],
+        subject: str,
+        body: str,
+        cc: list[str] | None = None,
+        bcc: list[str] | None = None,
+        in_reply_to: str | None = None,
+        references: list[str] | None = None,
+        attachments: list[dict[str, Any]] | None = None,
+        message_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Invia un'email via SMTP over SSL o STARTTLS con Message-ID deterministico."""
+        if not self.has_credentials():
+            raise EmailError(
+                "PROVIDER_NOT_CONFIGURED",
+                "Credenziali SMTP non configurate. Imposta YAHOO_EMAIL (o JARVIS_EMAIL_USER) e YAHOO_APP_PASSWORD (o JARVIS_EMAIL_PASSWORD).",
+            )
+
+        cc = cc or []
+        bcc = bcc or []
+        attachments = attachments or []
+
+        msg = email.message.EmailMessage()
+        msg["From"] = self.user
+        msg["To"] = ", ".join(to)
+        if cc:
+            msg["Cc"] = ", ".join(cc)
+        msg["Subject"] = subject
+        msg["Date"] = email.utils.formatdate(localtime=True)
+
+        assigned_msg_id = message_id or email.utils.make_msgid(domain=self.user.split("@")[-1] if "@" in self.user else "jarvis.local")
+        msg["Message-ID"] = assigned_msg_id
+
+        if in_reply_to:
+            msg["In-Reply-To"] = in_reply_to
+        if references:
+            msg["References"] = " ".join(references)
+
+        msg.set_content(body)
+
+        for att in attachments:
+            fname = att.get("filename", "attachment")
+            raw_content = att.get("content")
+            if raw_content is None:
+                continue
+            if isinstance(raw_content, str):
+                data = raw_content.encode("utf-8")
+                maintype, subtype = "text", "plain"
+            elif isinstance(raw_content, (bytes, bytearray)):
+                data = bytes(raw_content)
+                maintype, subtype = "application", "octet-stream"
+            else:
+                continue
+
+            msg.add_attachment(
+                data,
+                maintype=maintype,
+                subtype=subtype,
+                filename=fname,
+            )
+
+        all_recipients = list(to) + list(cc) + list(bcc)
+
+        try:
+            if self.use_starttls or self.port == 587:
+                server = smtplib.SMTP(self.host, self.port, timeout=15)
+                try:
+                    server.starttls()
+                    server.login(self.user, self.password)
+                    server.send_message(msg, from_addr=self.user, to_addrs=all_recipients)
+                finally:
+                    try:
+                        server.quit()
+                    except Exception:
+                        pass
+            else:
+                server = smtplib.SMTP_SSL(self.host, self.port, timeout=15)
+                try:
+                    server.login(self.user, self.password)
+                    server.send_message(msg, from_addr=self.user, to_addrs=all_recipients)
+                finally:
+                    try:
+                        server.quit()
+                    except Exception:
+                        pass
+        except smtplib.SMTPAuthenticationError as exc:
+            raise EmailError(
+                "PROVIDER_AUTH_ERROR",
+                f"Autenticazione SMTP fallita: {exc.smtp_error.decode('utf-8', 'replace') if isinstance(exc.smtp_error, bytes) else exc}",
+                retryable=False,
+            ) from exc
+        except (smtplib.SMTPConnectError, smtplib.SMTPServerDisconnected, OSError, TimeoutError) as exc:
+            raise EmailError(
+                "OUTCOME_UNKNOWN",
+                f"Errore di connessione o timeout durante l'invio SMTP: esito non confermato, vietato retry cieco ({exc}).",
+                retryable=False,
+            ) from exc
+        except smtplib.SMTPException as exc:
+            raise EmailError("SMTP_ERROR", f"Errore SMTP durante l'invio: {exc}", retryable=False) from exc
+
+        return {
+            "sent": True,
+            "status": "SENT",
+            "message_id": assigned_msg_id,
+            "from": self.user,
+            "to": to,
+            "cc": cc,
+            "bcc": bcc,
+            "subject": subject,
+            "attachments_count": len(attachments),
+            "sent_at": datetime.now(timezone.utc).isoformat(),
+        }
+
+
 class ImapEmailProvider:
     def __init__(
         self,
@@ -336,11 +512,351 @@ class ImapEmailProvider:
                 pass
 
 
-class EmailManager:
-    """Orchestrazione lettura IMAP e bozze di risposta locali."""
+class EmailAuditLog:
+    """Registro permanente delle email inviate (senza segreti o password)."""
 
-    def __init__(self, provider: ImapEmailProvider | None = None):
+    def __init__(self, db_path: Path):
+        self.db_path = Path(db_path)
+        with self._connect() as conn:
+            conn.executescript("""
+                CREATE TABLE IF NOT EXISTS sent_emails (
+                    message_id TEXT PRIMARY KEY,
+                    sender TEXT NOT NULL,
+                    recipients TEXT NOT NULL,
+                    subject TEXT NOT NULL,
+                    digest TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    attachments_count INTEGER NOT NULL,
+                    created_at TEXT NOT NULL
+                );
+            """)
+
+    def _connect(self):
+        conn = sqlite3.connect(self.db_path, timeout=10)
+        return conn
+
+    def record_sent(
+        self,
+        *,
+        message_id: str,
+        sender: str,
+        recipients: list[str],
+        subject: str,
+        digest: str,
+        status: str,
+        attachments_count: int,
+    ) -> None:
+        created_at = datetime.now(timezone.utc).isoformat()
+        recipients_str = ", ".join(recipients)
+        with closing(self._connect()) as conn:
+            with conn:
+                conn.execute(
+                    """
+                    INSERT OR REPLACE INTO sent_emails
+                    (message_id, sender, recipients, subject, digest, status, attachments_count, created_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (message_id, sender, recipients_str, subject, digest, status, attachments_count, created_at),
+                )
+
+    def is_recorded(self, message_id: str) -> bool:
+        with closing(self._connect()) as conn:
+            row = conn.execute("SELECT status FROM sent_emails WHERE message_id = ?", (message_id,)).fetchone()
+            return row is not None
+
+    def get_record(self, message_id: str) -> dict[str, Any] | None:
+        with closing(self._connect()) as conn:
+            conn.row_factory = sqlite3.Row
+            row = conn.execute("SELECT * FROM sent_emails WHERE message_id = ?", (message_id,)).fetchone()
+            if row:
+                return dict(row)
+            return None
+
+
+class EmailManager:
+    """Orchestrazione lettura IMAP, bozze locali e invio protetto con approvazione monouso."""
+
+    def __init__(
+        self,
+        provider: ImapEmailProvider | None = None,
+        sender: SmtpEmailSender | None = None,
+        approval_store: ApprovalStore | None = None,
+        audit_log: EmailAuditLog | None = None,
+    ):
         self._provider = provider
+        self._sender = sender
+        self.approval_store = approval_store
+        self.audit_log = audit_log
+
+    def _resolve_sender(self) -> SmtpEmailSender:
+        sender = self._sender or SmtpEmailSender()
+        if not sender.has_credentials():
+            raise EmailError(
+                "PROVIDER_NOT_CONFIGURED",
+                "Nessun account email configurato per l'invio. Imposta YAHOO_EMAIL (o JARVIS_EMAIL_USER) "
+                "e YAHOO_APP_PASSWORD (o JARVIS_EMAIL_PASSWORD) nelle variabili d'ambiente. "
+                "Nessuna email fittizia verrà inviata.",
+            )
+        return sender
+
+    def send_email(
+        self,
+        *,
+        to: list[str],
+        subject: str,
+        body: str,
+        approval_token: str | None,
+        actor_id: int,
+        cc: list[str] | None = None,
+        bcc: list[str] | None = None,
+        in_reply_to: str | None = None,
+        references: list[str] | None = None,
+        attachments: list[dict[str, Any]] | None = None,
+        message_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Invia un'email previa verifica del consenso esplicito monouso su destinatari, cc, bcc, oggetto, corpo e allegati."""
+        if not approval_token:
+            raise EmailError("APPROVAL_REQUIRED", "L'invio di email richiede approvazione esplicita.")
+
+        if not self.approval_store:
+            raise EmailError("APPROVAL_UNAVAILABLE", "Approval store non configurato.")
+
+        cc = cc or []
+        bcc = bcc or []
+        attachments = attachments or []
+
+        # Normalizza allegati per il calcolo del digest (esclude il contenuto binario grezzo)
+        normalized_attachments = []
+        for att in attachments:
+            if isinstance(att, dict) and "filename" in att:
+                normalized_attachments.append({
+                    "filename": str(att.get("filename", "")),
+                    "sha256": str(att.get("sha256", "")),
+                    "size_bytes": int(att.get("size_bytes", 0)),
+                })
+
+        digest = compute_email_digest(
+            to=to,
+            cc=cc,
+            bcc=bcc,
+            subject=subject,
+            body=body,
+            attachments=normalized_attachments,
+        )
+
+        sender = self._resolve_sender()
+        assigned_msg_id = message_id or email.utils.make_msgid(domain=sender.user.split("@")[-1] if "@" in sender.user else "jarvis.local")
+
+        target = f"email_send:{','.join(sorted(to))}"
+        arguments = {
+            "digest": digest,
+            "subject": subject,
+            "to": sorted(to),
+            "cc": sorted(cc),
+            "bcc": sorted(bcc),
+        }
+
+        # 1. Verifica e consumo del consenso monouso (se token è scaduto/invalido/rifiutato solleva qui)
+        try:
+            decision = self.approval_store.decide(
+                token=approval_token,
+                actor_id=actor_id,
+                target=target,
+                arguments=arguments,
+                approve=True,
+            )
+        except ApprovalError as exc:
+            raise EmailError(exc.code, f"Verifica consenso fallita: {exc.code}")
+
+        if decision.get("status") != "executed":
+            raise EmailError("APPROVAL_DENIED", "Consenso per l'invio non concesso.")
+
+        # 2. Verifica se già inviata (callback duplicate / idempotenza su Message-ID)
+        # Nota: se un retry riusa lo stesso message_id dopo che la prima richiesta ha consumato il token,
+        # la verifica decide() solleverebbe APPROVAL_USED a meno di controllare l'audit prima con token valido.
+        # Ma poiché decide() consuma il token atomico in SQLite, se due callback concorrenti arrivano con lo stesso token,
+        # una sola ottiene 'executed' e procede; la seconda riceve APPROVAL_USED.
+        # Se invece la riconciliazione viene invocata con un token già consumato, o se l'audit_log ha già registrato
+        # l'invio per questo message_id, possiamo de-duplicare.
+        if self.audit_log and self.audit_log.is_recorded(assigned_msg_id):
+            record = self.audit_log.get_record(assigned_msg_id)
+            return {
+                "sent": record.get("status") == "SENT",
+                "status": "ALREADY_SENT" if record.get("status") == "SENT" else str(record.get("status")),
+                "message_id": assigned_msg_id,
+                "reconciled": True,
+                "audit": record,
+            }
+
+        # Esecuzione invio di rete SMTP
+        try:
+            result = sender.send_message(
+                to=to,
+                subject=subject,
+                body=body,
+                cc=cc,
+                bcc=bcc,
+                in_reply_to=in_reply_to,
+                references=references,
+                attachments=attachments,
+                message_id=assigned_msg_id,
+            )
+        except EmailError as exc:
+            if exc.code == "OUTCOME_UNKNOWN":
+                if self.audit_log:
+                    self.audit_log.record_sent(
+                        message_id=assigned_msg_id,
+                        sender=sender.user,
+                        recipients=to + cc + bcc,
+                        subject=subject,
+                        digest=digest,
+                        status="OUTCOME_UNKNOWN",
+                        attachments_count=len(attachments),
+                    )
+                return {
+                    "sent": False,
+                    "status": "OUTCOME_UNKNOWN",
+                    "message_id": assigned_msg_id,
+                    "warning": "Invio interrotto da timeout o errore di connessione. Non verrà eseguito retry cieco.",
+                }
+            raise
+
+        # Registra esito verificato nell'audit log
+        if self.audit_log:
+            self.audit_log.record_sent(
+                message_id=assigned_msg_id,
+                sender=sender.user,
+                recipients=to + cc + bcc,
+                subject=subject,
+                digest=digest,
+                status="SENT",
+                attachments_count=len(attachments),
+            )
+
+        result["digest"] = digest
+        result["reconciled"] = False
+        return result
+
+    def stage_email_send(
+        self,
+        *,
+        to: list[str],
+        subject: str,
+        body: str,
+        actor_id: int,
+        cc: list[str] | None = None,
+        bcc: list[str] | None = None,
+        in_reply_to: str | None = None,
+        references: list[str] | None = None,
+        attachments: list[dict[str, Any]] | None = None,
+        message_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Prepara una richiesta di approvazione per l'invio email e restituisce token e digest."""
+        if not self.approval_store:
+            raise EmailError("APPROVAL_UNAVAILABLE", "Approval store non configurato.")
+
+        cc = cc or []
+        bcc = bcc or []
+        attachments = attachments or []
+
+        normalized_attachments = []
+        for att in attachments:
+            if isinstance(att, dict) and "filename" in att:
+                normalized_attachments.append({
+                    "filename": str(att.get("filename", "")),
+                    "sha256": str(att.get("sha256", "")),
+                    "size_bytes": int(att.get("size_bytes", 0)),
+                })
+
+        digest = compute_email_digest(
+            to=to,
+            cc=cc,
+            bcc=bcc,
+            subject=subject,
+            body=body,
+            attachments=normalized_attachments,
+        )
+
+        sender = self._resolve_sender()
+        assigned_msg_id = message_id or email.utils.make_msgid(domain=sender.user.split("@")[-1] if "@" in sender.user else "jarvis.local")
+
+        target = f"email_send:{','.join(sorted(to))}"
+        arguments = {
+            "digest": digest,
+            "subject": subject,
+            "to": sorted(to),
+            "cc": sorted(cc),
+            "bcc": sorted(bcc),
+        }
+
+        req = self.approval_store.request(actor_id=actor_id, target=target, arguments=arguments)
+
+        summary_text = (
+            f"Invio email:\n"
+            f"- Da: {sender.user}\n"
+            f"- A: {', '.join(to)}\n"
+            + (f"- Cc: {', '.join(cc)}\n" if cc else "")
+            + (f"- Bcc: {', '.join(bcc)}\n" if bcc else "")
+            + f"- Oggetto: {subject}\n"
+            + f"- Allegati: {len(attachments)}\n"
+            + f"- SHA-256 Digest: {digest}\n"
+            + f"- Message-ID previsto: {assigned_msg_id}"
+        )
+
+        return {
+            "status": "approval_required",
+            "approval_token": req["token"],
+            "digest": digest,
+            "message_id": assigned_msg_id,
+            "summary_text": summary_text,
+            "expires_at": req["expires_at"],
+        }
+        """Riconciliazione esito per message_id (AT04): legge l'audit log senza eseguire retry cieco."""
+        if not self.audit_log:
+            return {
+                "message_id": message_id,
+                "status": "OUTCOME_UNKNOWN",
+                "reconciled": False,
+                "note": "Audit log non configurato per la riconciliazione.",
+            }
+        rec = self.audit_log.get_record(message_id)
+        if not rec:
+            return {
+                "message_id": message_id,
+                "status": "NOT_FOUND",
+                "reconciled": False,
+                "note": "Nessun tentativo registrato con questo message_id.",
+            }
+        return {
+            "message_id": message_id,
+            "status": rec["status"],
+            "reconciled": True,
+            "audit": rec,
+        }
+
+    def reconcile_email_status(self, message_id: str) -> dict[str, Any]:
+        """Riconciliazione esito per message_id (AT04): legge l'audit log senza eseguire retry cieco."""
+        if not self.audit_log:
+            return {
+                "message_id": message_id,
+                "status": "OUTCOME_UNKNOWN",
+                "reconciled": False,
+                "note": "Audit log non configurato per la riconciliazione.",
+            }
+        rec = self.audit_log.get_record(message_id)
+        if not rec:
+            return {
+                "message_id": message_id,
+                "status": "NOT_FOUND",
+                "reconciled": False,
+                "note": "Nessun tentativo registrato con questo message_id.",
+            }
+        return {
+            "message_id": message_id,
+            "status": rec["status"],
+            "reconciled": True,
+            "audit": rec,
+        }
 
     def _resolve_provider(self) -> ImapEmailProvider:
         provider = self._provider or ImapEmailProvider()
@@ -394,6 +910,20 @@ class EmailManager:
                 if addr and addr not in to_list and addr not in cc_list:
                     cc_list.append(addr)
 
+        raw_bcc = params.get("bcc", [])
+        bcc_list = [str(b).strip() for b in (raw_bcc if isinstance(raw_bcc, list) else [raw_bcc]) if str(b).strip()]
+
+        attachments = params.get("attachments", [])
+        normalized_attachments = []
+        if isinstance(attachments, list):
+            for att in attachments:
+                if isinstance(att, dict) and "filename" in att:
+                    normalized_attachments.append({
+                        "filename": str(att.get("filename", "")),
+                        "sha256": str(att.get("sha256", "")),
+                        "size_bytes": int(att.get("size_bytes", 0)),
+                    })
+
         orig_subject = original.get("subject", "")
         subject = normalize_subject(orig_subject)
 
@@ -408,23 +938,25 @@ class EmailManager:
         quoted_lines = "\n".join(f"> {line}" for line in quote_text.splitlines()) if quote_text else ""
         full_body = f"{reply_body}\n\n{quoted_lines}".strip() if quoted_lines else reply_body
 
-        digest_payload = {
-            "to": to_list,
-            "cc": cc_list,
-            "subject": subject,
-            "in_reply_to": in_reply_to,
-            "body": full_body,
-        }
-        digest = hashlib.sha256(json.dumps(digest_payload, sort_keys=True, ensure_ascii=False).encode("utf-8")).hexdigest()
+        digest = compute_email_digest(
+            to=to_list,
+            cc=cc_list,
+            bcc=bcc_list,
+            subject=subject,
+            body=full_body,
+            attachments=normalized_attachments,
+        )
 
         return {
             "status": "draft",
             "to": to_list,
             "cc": cc_list,
+            "bcc": bcc_list,
             "subject": subject,
             "in_reply_to": in_reply_to,
             "references": references,
             "body": full_body,
+            "attachments": normalized_attachments,
             "digest": digest,
             "sent": False,
             "note": "Bozza locale: nessun messaggio inviato. L'invio effettivo (#26) richiede conferma esplicita.",
