@@ -11,6 +11,7 @@ from pathlib import Path
 class DoctorTests(unittest.TestCase):
     def invoke(self, *args, vault=None):
         env = dict(os.environ)
+        env["JARVIS_TEST_MODE"] = "1"
         env.pop("JARVIS_VAULT_PATH", None)
         if vault is not None:
             env["JARVIS_VAULT_PATH"] = vault

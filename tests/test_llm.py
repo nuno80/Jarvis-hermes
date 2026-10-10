@@ -138,6 +138,7 @@ class GeminiProviderTests(unittest.TestCase):
         import subprocess
         proc = subprocess.run(
             ["uv", "run", "jarvis", "gemini-demo"],
+            env={**os.environ, "JARVIS_TEST_MODE": "1"},
             capture_output=True,
             text=True,
             check=True

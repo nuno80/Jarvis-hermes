@@ -37,6 +37,8 @@ def diagnose(disk_path: Path, vault_path: str | None) -> dict:
 
 
 def main() -> int:
+    from .server import load_dotenv_if_available
+    load_dotenv_if_available()
     parser = argparse.ArgumentParser(description="JARVIS local read-only diagnostics")
     sub = parser.add_subparsers(dest="command", required=True)
     doctor = sub.add_parser("doctor", help="Inspect only the current host, without connections")
