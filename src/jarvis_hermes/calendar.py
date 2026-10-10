@@ -26,6 +26,7 @@ from .approval import ApprovalError, ApprovalStore
 
 PROVIDER_NAME = "google"
 EVENTS_URL_TEMPLATE = "https://www.googleapis.com/calendar/v3/calendars/{calendar_id}/events"
+EVENT_URL_TEMPLATE = "https://www.googleapis.com/calendar/v3/calendars/{calendar_id}/events/{event_id}"
 TOKEN_URL = "https://oauth2.googleapis.com/token"
 READONLY_SCOPE = "https://www.googleapis.com/auth/calendar.readonly"
 EVENTS_SCOPE = "https://www.googleapis.com/auth/calendar.events"
@@ -297,6 +298,92 @@ class GoogleCalendarProvider:
             raise CalendarError("OUTCOME_UNKNOWN", f"Risposta Google Calendar non decodificabile: {exc}.") from exc
 
         return normalize_event(data).to_dict()
+
+    def update_event(self, calendar_id: str, event_id: str, event_payload: dict[str, Any]) -> dict[str, Any]:
+        token = self._access_token()
+        url = EVENT_URL_TEMPLATE.format(
+            calendar_id=urllib.parse.quote(calendar_id, safe="@."),
+            event_id=urllib.parse.quote(event_id, safe="@."),
+        )
+        body = json.dumps(event_payload).encode("utf-8")
+        req = urllib.request.Request(
+            url,
+            data=body,
+            headers={
+                "Authorization": "Bearer " + token,
+                "Content-Type": "application/json",
+                "Accept": "application/json",
+                "User-Agent": "Jarvis-Hermes/1.0",
+            },
+            method="PATCH",
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=15) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+        except urllib.error.HTTPError as exc:
+            try:
+                detail = _scrub(exc.read().decode("utf-8", errors="replace")[:300])
+            except Exception:
+                detail = ""
+            if exc.code in (401, 403):
+                raise CalendarError(
+                    "PROVIDER_AUTH_ERROR",
+                    "Accesso Google Calendar revocato o negato (401/403). Rinnova il token OAuth.",
+                    retryable=False,
+                ) from exc
+            if exc.code == 404:
+                raise CalendarError(
+                    "EVENT_NOT_FOUND",
+                    f"Evento '{event_id}' o calendario '{calendar_id}' non trovato.",
+                    retryable=False,
+                ) from exc
+            if exc.code == 429 or 500 <= exc.code < 600:
+                raise CalendarError(
+                    "OUTCOME_UNKNOWN",
+                    f"Google Calendar non disponibile durante la modifica ({exc.code}). {detail}",
+                    retryable=True,
+                ) from exc
+            raise CalendarError("PROVIDER_ERROR", f"Errore Google Calendar ({exc.code}). {detail}") from exc
+        except (urllib.error.URLError, TimeoutError, OSError) as exc:
+            raise CalendarError(
+                "OUTCOME_UNKNOWN",
+                f"Timeout o errore di connessione durante l'aggiornamento dell'evento: {exc}.",
+                retryable=True,
+            ) from exc
+        except (ValueError, json.JSONDecodeError) as exc:
+            raise CalendarError("OUTCOME_UNKNOWN", f"Risposta Google Calendar non decodificabile: {exc}.") from exc
+
+        return normalize_event(data).to_dict()
+
+    def delete_event(self, calendar_id: str, event_id: str) -> bool:
+        token = self._access_token()
+        url = EVENT_URL_TEMPLATE.format(
+            calendar_id=urllib.parse.quote(calendar_id, safe="@."),
+            event_id=urllib.parse.quote(event_id, safe="@."),
+        )
+        req = urllib.request.Request(
+            url,
+            headers={
+                "Authorization": "Bearer " + token,
+                "Accept": "application/json",
+                "User-Agent": "Jarvis-Hermes/1.0",
+            },
+            method="DELETE",
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=15) as resp:
+                pass
+            return True
+        except urllib.error.HTTPError as exc:
+            if exc.code in (401, 403):
+                raise CalendarError("PROVIDER_AUTH_ERROR", "Accesso Google Calendar revocato o negato.", retryable=False) from exc
+            if exc.code == 404:
+                return True  # Già cancellato
+            if exc.code == 429 or 500 <= exc.code < 600:
+                raise CalendarError("OUTCOME_UNKNOWN", f"Google Calendar non disponibile ({exc.code}).", retryable=True) from exc
+            raise CalendarError("PROVIDER_ERROR", f"Errore eliminazione ({exc.code}).") from exc
+        except (urllib.error.URLError, TimeoutError, OSError) as exc:
+            raise CalendarError("OUTCOME_UNKNOWN", f"Timeout durante cancellazione: {exc}.", retryable=True) from exc
 
     def search_events(self, request: CalendarSearchRequest) -> dict[str, Any]:
         token = self._access_token()
@@ -819,6 +906,228 @@ class CalendarManager:
             "event": created_data,
             "digest": digest,
             "reconciled": False,
+        }
+
+    def stage_update_event(
+        self,
+        *,
+        calendar_id: str,
+        event_id: str,
+        actor_id: int,
+        summary: str | None = None,
+        start: str | None = None,
+        end: str | None = None,
+        time_zone: str = "Europe/Rome",
+        location: str | None = None,
+        description: str | None = None,
+    ) -> dict[str, Any]:
+        """Prepara richiesta di approvazione per modifica evento."""
+        if not self.approval_store:
+            raise CalendarError("APPROVAL_UNAVAILABLE", "Approval store non configurato.")
+        if not str(event_id or "").strip():
+            raise CalendarError("MISSING_PARAMETER", "ID evento richiesto.")
+
+        tz = _resolve_zone(time_zone)
+        start_norm = None
+        end_norm = None
+        if start and end:
+            start_norm, start_dt, start_all_day = _parse_moment(start, tz)
+            end_norm, end_dt, end_all_day = _parse_moment(end, tz)
+            if start_all_day != end_all_day:
+                raise CalendarError("INVALID_TIME_RANGE", "start e end devono essere entrambi orari o entrambi date.")
+            if start_dt and end_dt and end_dt <= start_dt:
+                raise CalendarError("INVALID_TIME_RANGE", "end deve essere successiva a start.")
+
+        digest = hashlib.sha256(json.dumps({
+            "calendar_id": calendar_id,
+            "event_id": event_id,
+            "summary": summary,
+            "start": start_norm,
+            "end": end_norm,
+            "location": location,
+        }, sort_keys=True, ensure_ascii=False).encode("utf-8")).hexdigest()
+
+        target = f"calendar_update:{calendar_id}:{event_id}"
+        arguments = {
+            "digest": digest,
+            "calendar_id": calendar_id,
+            "event_id": event_id,
+            "summary": summary,
+            "start": start_norm,
+            "end": end_norm,
+            "time_zone": time_zone,
+            "location": location,
+            "description": description,
+        }
+        req = self.approval_store.request(actor_id=actor_id, target=target, arguments=arguments)
+        summary_text = (
+            f"Modifica evento '{event_id}' nel calendario '{calendar_id}':\n"
+            + (f"- Titolo: {summary}\n" if summary else "")
+            + (f"- Inizio: {start_norm}\n" if start_norm else "")
+            + (f"- Fine: {end_norm}\n" if end_norm else "")
+            + (f"- Luogo: {location}\n" if location else "")
+            + f"- SHA-256 Digest: {digest}"
+        )
+        return {
+            "status": "approval_required",
+            "approval_token": req["token"],
+            "digest": digest,
+            "calendar_id": calendar_id,
+            "event_id": event_id,
+            "summary_text": summary_text,
+            "expires_at": req["expires_at"],
+        }
+
+    def update_event(
+        self,
+        *,
+        calendar_id: str,
+        event_id: str,
+        approval_token: str | None,
+        actor_id: int,
+        summary: str | None = None,
+        start: str | None = None,
+        end: str | None = None,
+        time_zone: str = "Europe/Rome",
+        location: str | None = None,
+        description: str | None = None,
+    ) -> dict[str, Any]:
+        """Aggiorna un evento esistente previa verifica e consumo del token di approvazione."""
+        if not approval_token:
+            raise CalendarError("APPROVAL_REQUIRED", "La modifica dell'evento richiede approvazione.")
+        if not self.approval_store:
+            raise CalendarError("APPROVAL_UNAVAILABLE", "Approval store non configurato.")
+
+        tz = _resolve_zone(time_zone)
+        start_norm = None
+        end_norm = None
+        start_all_day = False
+        if start and end:
+            start_norm, start_dt, start_all_day = _parse_moment(start, tz)
+            end_norm, end_dt, end_all_day = _parse_moment(end, tz)
+            if start_all_day != end_all_day:
+                raise CalendarError("INVALID_TIME_RANGE", "start e end devono essere entrambi orari o entrambi date.")
+            if start_dt and end_dt and end_dt <= start_dt:
+                raise CalendarError("INVALID_TIME_RANGE", "end deve essere successiva a start.")
+
+        digest = hashlib.sha256(json.dumps({
+            "calendar_id": calendar_id,
+            "event_id": event_id,
+            "summary": summary,
+            "start": start_norm,
+            "end": end_norm,
+            "location": location,
+        }, sort_keys=True, ensure_ascii=False).encode("utf-8")).hexdigest()
+
+        target = f"calendar_update:{calendar_id}:{event_id}"
+        arguments = {
+            "digest": digest,
+            "calendar_id": calendar_id,
+            "event_id": event_id,
+            "summary": summary,
+            "start": start_norm,
+            "end": end_norm,
+            "time_zone": time_zone,
+            "location": location,
+            "description": description,
+        }
+        try:
+            decision = self.approval_store.decide(
+                token=approval_token,
+                actor_id=actor_id,
+                target=target,
+                arguments=arguments,
+                approve=True,
+            )
+        except ApprovalError as exc:
+            raise CalendarError(exc.code, f"Verifica consenso fallita: {exc.code}")
+
+        if decision.get("status") != "executed":
+            raise CalendarError("APPROVAL_DENIED", "Consenso per la modifica non concesso.")
+
+        payload: dict[str, Any] = {}
+        if summary is not None:
+            payload["summary"] = summary
+        if description is not None:
+            payload["description"] = description
+        if location is not None:
+            payload["location"] = location
+        if start_norm and end_norm:
+            if start_all_day:
+                payload["start"] = {"date": start_norm}
+                payload["end"] = {"date": end_norm}
+            else:
+                payload["start"] = {"dateTime": start_norm, "timeZone": time_zone}
+                payload["end"] = {"dateTime": end_norm, "timeZone": time_zone}
+
+        provider = self._resolve_provider()
+        res = provider.update_event(calendar_id, event_id, payload)
+        return {
+            "updated": True,
+            "status": "UPDATED",
+            "calendar_id": calendar_id,
+            "event_id": event_id,
+            "event": res,
+            "digest": digest,
+        }
+
+    def stage_delete_event(self, *, calendar_id: str, event_id: str, actor_id: int) -> dict[str, Any]:
+        """Prepara richiesta di approvazione per eliminazione evento."""
+        if not self.approval_store:
+            raise CalendarError("APPROVAL_UNAVAILABLE", "Approval store non configurato.")
+        if not str(event_id or "").strip():
+            raise CalendarError("MISSING_PARAMETER", "ID evento richiesto.")
+
+        digest = hashlib.sha256(f"delete:{calendar_id}:{event_id}".encode("utf-8")).hexdigest()
+        target = f"calendar_delete:{calendar_id}:{event_id}"
+        arguments = {"digest": digest, "calendar_id": calendar_id, "event_id": event_id}
+        req = self.approval_store.request(actor_id=actor_id, target=target, arguments=arguments)
+        summary_text = (
+            f"Eliminazione evento '{event_id}' dal calendario '{calendar_id}'\n"
+            f"- SHA-256 Digest: {digest}"
+        )
+        return {
+            "status": "approval_required",
+            "approval_token": req["token"],
+            "digest": digest,
+            "calendar_id": calendar_id,
+            "event_id": event_id,
+            "summary_text": summary_text,
+            "expires_at": req["expires_at"],
+        }
+
+    def delete_event(self, *, calendar_id: str, event_id: str, approval_token: str | None, actor_id: int) -> dict[str, Any]:
+        """Elimina un evento previa verifica del token di approvazione."""
+        if not approval_token:
+            raise CalendarError("APPROVAL_REQUIRED", "L'eliminazione richiede approvazione.")
+        if not self.approval_store:
+            raise CalendarError("APPROVAL_UNAVAILABLE", "Approval store non configurato.")
+
+        digest = hashlib.sha256(f"delete:{calendar_id}:{event_id}".encode("utf-8")).hexdigest()
+        target = f"calendar_delete:{calendar_id}:{event_id}"
+        arguments = {"digest": digest, "calendar_id": calendar_id, "event_id": event_id}
+        try:
+            decision = self.approval_store.decide(
+                token=approval_token,
+                actor_id=actor_id,
+                target=target,
+                arguments=arguments,
+                approve=True,
+            )
+        except ApprovalError as exc:
+            raise CalendarError(exc.code, f"Verifica consenso fallita: {exc.code}")
+
+        if decision.get("status") != "executed":
+            raise CalendarError("APPROVAL_DENIED", "Consenso per l'eliminazione non concesso.")
+
+        provider = self._resolve_provider()
+        provider.delete_event(calendar_id, event_id)
+        return {
+            "deleted": True,
+            "status": "DELETED",
+            "calendar_id": calendar_id,
+            "event_id": event_id,
+            "digest": digest,
         }
 
     def reconcile_calendar_event(self, digest: str) -> dict[str, Any]:

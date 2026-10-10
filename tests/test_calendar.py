@@ -475,6 +475,59 @@ class CalendarCreateEventTests(unittest.TestCase):
         self.assertTrue(recon["reconciled"])
         self.assertEqual(recon["status"], "OUTCOME_UNKNOWN")
 
+    def test_update_and_delete_event_with_approval(self):
+        prov = GoogleCalendarProvider(access_token="test_token")
+        mgr = CalendarManager(provider=prov, approval_store=self.approval_store, audit_log=self.audit_log)
+
+        # 1. Update test
+        stage_up = mgr.stage_update_event(
+            calendar_id="primary",
+            event_id="evt123",
+            actor_id=self.actor,
+            start="2026-10-21T08:00:00+02:00",
+            end="2026-10-21T15:00:00+02:00",
+            summary="Iml Spostato",
+        )
+        fake_resp = {
+            "id": "evt123",
+            "summary": "Iml Spostato",
+            "start": {"dateTime": "2026-10-21T08:00:00+02:00"},
+            "end": {"dateTime": "2026-10-21T15:00:00+02:00"},
+        }
+        mock_http = MagicMock()
+        mock_http.read.return_value = json.dumps(fake_resp).encode("utf-8")
+        mock_http.__enter__.return_value = mock_http
+
+        with patch("urllib.request.urlopen", return_value=mock_http):
+            res_up = mgr.update_event(
+                calendar_id="primary",
+                event_id="evt123",
+                approval_token=stage_up["approval_token"],
+                actor_id=self.actor,
+                start="2026-10-21T08:00:00+02:00",
+                end="2026-10-21T15:00:00+02:00",
+                summary="Iml Spostato",
+            )
+        self.assertTrue(res_up["updated"])
+        self.assertEqual(res_up["status"], "UPDATED")
+
+        # 2. Delete test
+        stage_del = mgr.stage_delete_event(
+            calendar_id="primary",
+            event_id="evt123",
+            actor_id=self.actor,
+        )
+        with patch("urllib.request.urlopen", return_value=mock_http):
+            res_del = mgr.delete_event(
+                calendar_id="primary",
+                event_id="evt123",
+                approval_token=stage_del["approval_token"],
+                actor_id=self.actor,
+            )
+        self.assertTrue(res_del["deleted"])
+        self.assertEqual(res_del["status"], "DELETED")
+
+
 
 
 if __name__ == "__main__":

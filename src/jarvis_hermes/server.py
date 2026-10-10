@@ -822,6 +822,136 @@ def build_server() -> FastMCP:
         return respond(lambda: calendar_manager.reconcile_calendar_event(digest), request_id)
 
     @server.tool(annotations=destructive)
+    async def calendar_update_event(
+        calendar_id: str,
+        event_id: str,
+        ctx: Context,
+        summary: str | None = None,
+        start: str | None = None,
+        end: str | None = None,
+        time_zone: str | None = 'Europe/Rome',
+        location: str | None = None,
+        description: str | None = None,
+        request_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Update or reschedule an existing event on Google Calendar strictly mediated by owner approval."""
+        observed = {
+            'schema_version': '1.0',
+            'device_id': device,
+            'request_id': request_id,
+            'observed_at': datetime.now(timezone.utc).isoformat(),
+            'provenance': {'source': 'google_calendar', 'scope': 'calendar_update'},
+        }
+        try:
+            actor_id = _configured_approver()
+            tz_name = time_zone or 'Europe/Rome'
+            stage = calendar_manager.stage_update_event(
+                calendar_id=calendar_id,
+                event_id=event_id,
+                actor_id=actor_id,
+                summary=summary,
+                start=start,
+                end=end,
+                time_zone=tz_name,
+                location=location,
+                description=description,
+            )
+            prompt = f"Jarvis: autorizzi la seguente modifica dell'evento nel calendario?\n{stage['summary_text']}"
+            try:
+                choice = await asyncio.wait_for(ctx.elicit(prompt, _ApprovalResponse), timeout=305)
+            except Exception:
+                choice = None
+
+            decision = getattr(choice, 'action', None)
+            if decision != 'accept':
+                target = f"calendar_update:{calendar_id}:{event_id}"
+                arguments = {
+                    "digest": stage["digest"],
+                    "calendar_id": calendar_id,
+                    "event_id": event_id,
+                    "summary": summary,
+                    "start": start,
+                    "end": end,
+                    "time_zone": tz_name,
+                    "location": location,
+                    "description": description,
+                }
+                try:
+                    approval_store.decide(token=stage['approval_token'], actor_id=actor_id, target=target, arguments=arguments, approve=False)
+                except Exception:
+                    pass
+                return {
+                    **observed,
+                    'ok': False,
+                    'data': None,
+                    'error': {'code': 'APPROVAL_DECLINED', 'message': "Modifica evento non autorizzata dall'utente.", 'retryable': False},
+                }
+
+            result = calendar_manager.update_event(
+                calendar_id=calendar_id,
+                event_id=event_id,
+                approval_token=stage['approval_token'],
+                actor_id=actor_id,
+                summary=summary,
+                start=start,
+                end=end,
+                time_zone=tz_name,
+                location=location,
+                description=description,
+            )
+            return {**observed, 'ok': True, 'data': result, 'error': None}
+        except (ApprovalError, CalendarError) as exc:
+            return {**observed, 'ok': False, 'data': None, 'error': {'code': getattr(exc, 'code', 'CALENDAR_ERROR'), 'message': str(exc), 'retryable': getattr(exc, 'retryable', False)}}
+        except Exception as exc:
+            return {**observed, 'ok': False, 'data': None, 'error': {'code': 'INTERNAL_ERROR', 'message': f"Errore durante l'aggiornamento dell'evento: {exc}", 'retryable': False}}
+
+    @server.tool(annotations=destructive)
+    async def calendar_delete_event(
+        calendar_id: str,
+        event_id: str,
+        ctx: Context,
+        request_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Delete an existing event from Google Calendar strictly mediated by owner approval."""
+        observed = {
+            'schema_version': '1.0',
+            'device_id': device,
+            'request_id': request_id,
+            'observed_at': datetime.now(timezone.utc).isoformat(),
+            'provenance': {'source': 'google_calendar', 'scope': 'calendar_delete'},
+        }
+        try:
+            actor_id = _configured_approver()
+            stage = calendar_manager.stage_delete_event(calendar_id=calendar_id, event_id=event_id, actor_id=actor_id)
+            prompt = f"Jarvis: autorizzi l'eliminazione dell'evento dal calendario?\n{stage['summary_text']}"
+            try:
+                choice = await asyncio.wait_for(ctx.elicit(prompt, _ApprovalResponse), timeout=305)
+            except Exception:
+                choice = None
+
+            decision = getattr(choice, 'action', None)
+            if decision != 'accept':
+                target = f"calendar_delete:{calendar_id}:{event_id}"
+                arguments = {"digest": stage["digest"], "calendar_id": calendar_id, "event_id": event_id}
+                try:
+                    approval_store.decide(token=stage['approval_token'], actor_id=actor_id, target=target, arguments=arguments, approve=False)
+                except Exception:
+                    pass
+                return {
+                    **observed,
+                    'ok': False,
+                    'data': None,
+                    'error': {'code': 'APPROVAL_DECLINED', 'message': "Eliminazione evento non autorizzata dall'utente.", 'retryable': False},
+                }
+
+            result = calendar_manager.delete_event(calendar_id=calendar_id, event_id=event_id, approval_token=stage['approval_token'], actor_id=actor_id)
+            return {**observed, 'ok': True, 'data': result, 'error': None}
+        except (ApprovalError, CalendarError) as exc:
+            return {**observed, 'ok': False, 'data': None, 'error': {'code': getattr(exc, 'code', 'CALENDAR_ERROR'), 'message': str(exc), 'retryable': getattr(exc, 'retryable', False)}}
+        except Exception as exc:
+            return {**observed, 'ok': False, 'data': None, 'error': {'code': 'INTERNAL_ERROR', 'message': f"Errore durante l'eliminazione dell'evento: {exc}", 'retryable': False}}
+
+    @server.tool(annotations=destructive)
     def create_reminder(text: str, due_at: str, timezone_str: str = 'Europe/Rome',
                         request_id: str | None = None) -> dict[str, Any]:
         """Schedule an explicit, persistent reminder with timezone and absolute UTC expiry. Consultable and cancellable."""
