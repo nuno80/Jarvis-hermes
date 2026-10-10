@@ -160,7 +160,7 @@ class MCPTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(draft['data']['status'], 'draft')
             self.assertFalse(draft['data']['created_event'])
             self.assertTrue(all(t.annotations.readOnlyHint for t in catalog.tools
-                                if t.name not in ('simulate_with_approval', 'git_push', 'job_cancel', 'create_checkpoint', 'write_project_file', 'restore_checkpoint', 'commit_project_changes', 'execute_gui_action', 'run_command', 'submit_web_form', 'update_preference', 'propose_memory', 'forget_memory', 'write_note', 'pi_task', 'email_send')))
+                                if t.name not in ('simulate_with_approval', 'git_push', 'job_cancel', 'create_checkpoint', 'write_project_file', 'restore_checkpoint', 'commit_project_changes', 'execute_gui_action', 'run_command', 'submit_web_form', 'update_preference', 'propose_memory', 'forget_memory', 'write_note', 'pi_task', 'email_send', 'create_reminder', 'cancel_reminder')))
 
     async def test_simulated_approval_records_once_and_counts_only_this_decision(self):
         from pathlib import Path
@@ -820,7 +820,7 @@ class MCPTests(unittest.IsolatedAsyncioTestCase):
             pref_file = vault_dir / "preferences.yaml"
             pref_file.write_text("travel:\n  max_budget: 800\n", encoding="utf-8")
 
-            async with connected(vault=vault_dir) as client:
+            async with connected(vault=vault_dir, approver_id=123456) as client:
                 catalog = await client.list_tools()
                 names = {t.name for t in catalog.tools}
                 self.assertIn('get_profile', names)
@@ -971,6 +971,32 @@ class MCPTests(unittest.IsolatedAsyncioTestCase):
                 self.assertTrue(res_recon['ok'])
                 self.assertEqual(res_recon['data']['status'], 'NOT_FOUND')
                 self.assertFalse(res_recon['data']['reconciled'])
+
+                # 5. Reminder tools via MCP (Issue #27, J17, AT12)
+                # Create reminder
+                res_rem_create = (await client.call_tool('create_reminder', {
+                    'text': 'Comprare i biglietti',
+                    'due_at': '2026-11-20T10:00:00',
+                    'timezone_str': 'Europe/Rome',
+                })).structuredContent
+                self.assertTrue(res_rem_create['ok'])
+                self.assertEqual(res_rem_create['data']['status'], 'scheduled')
+                self.assertEqual(res_rem_create['data']['text'], 'Comprare i biglietti')
+                rem_id = res_rem_create['data']['reminder_id']
+
+                # List reminders
+                res_rem_list = (await client.call_tool('list_reminders', {
+                    'status': 'scheduled',
+                })).structuredContent
+                self.assertTrue(res_rem_list['ok'])
+                self.assertTrue(any(r['reminder_id'] == rem_id for r in res_rem_list['data']))
+
+                # Cancel reminder
+                res_rem_cancel = (await client.call_tool('cancel_reminder', {
+                    'reminder_id': rem_id,
+                })).structuredContent
+                self.assertTrue(res_rem_cancel['ok'])
+                self.assertEqual(res_rem_cancel['data']['status'], 'cancelled')
 
 
 

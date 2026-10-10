@@ -26,6 +26,7 @@ from .pi_coding import (
     run_pi_task,
 )
 from .projects import ProjectError, ProjectRegistry
+from .reminder import ReminderError, ReminderStore
 from .decision import pre_turn_dispatch as system1_pre_turn_dispatch
 from .router import JevClient, RequestRouter, RouterError
 from .travel import TravelError, TravelManager
@@ -142,6 +143,23 @@ def _email_audit_log() -> EmailAuditLog:
     return audit
 
 
+def _reminder_store() -> ReminderStore:
+    state_home = Path(os.environ.get('XDG_STATE_HOME', Path.home() / '.local' / 'state'))
+    state_dir = state_home / 'jarvis-hermes'
+    state_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+    try:
+        state_dir.chmod(0o700)
+    except OSError:
+        pass
+    storage_path = state_dir / 'reminders.sqlite3'
+    store = ReminderStore(storage_path)
+    try:
+        storage_path.chmod(0o600)
+    except OSError:
+        pass
+    return store
+
+
 def build_server() -> FastMCP:
     server = FastMCP('Jarvis', log_level='WARNING')
     device = os.environ.get('JARVIS_DEVICE_ID', 'local')
@@ -158,6 +176,8 @@ def build_server() -> FastMCP:
     web_manager = WebManager(approval_store=approval_store)
     travel_manager = TravelManager()
     calendar_manager = CalendarManager()
+    reminder_store = _reminder_store()
+    reminder_store.reconcile_on_startup()
     email_audit_log = _email_audit_log()
     email_manager = EmailManager(approval_store=approval_store, audit_log=email_audit_log)
     budget_tracker = _budget_tracker()
@@ -647,6 +667,35 @@ def build_server() -> FastMCP:
             'location': location, 'description': description,
             'attendees': attendees or [],
         }), request_id)
+
+    @server.tool(annotations=destructive)
+    def create_reminder(text: str, due_at: str, timezone_str: str = 'Europe/Rome',
+                        request_id: str | None = None) -> dict[str, Any]:
+        """Schedule an explicit, persistent reminder with timezone and absolute UTC expiry. Consultable and cancellable."""
+        def _do_create() -> dict[str, Any]:
+            actor_id = _configured_approver()
+            return reminder_store.create(actor_id=actor_id, text=text, due_at=due_at, timezone_str=timezone_str)
+        return respond(_do_create, request_id)
+
+    @server.tool(annotations=readonly)
+    def list_reminders(status: str | None = 'scheduled', limit: int = 50,
+                       request_id: str | None = None) -> dict[str, Any]:
+        """List persistent reminders filtered by status (default: scheduled)."""
+        def _do_list() -> list[dict[str, Any]]:
+            try:
+                actor_id = _configured_approver()
+            except ApprovalError:
+                actor_id = None
+            return reminder_store.list_reminders(actor_id=actor_id, status=status, limit=limit)
+        return respond(_do_list, request_id)
+
+    @server.tool(annotations=destructive)
+    def cancel_reminder(reminder_id: str, request_id: str | None = None) -> dict[str, Any]:
+        """Cancel a scheduled persistent reminder before expiry."""
+        def _do_cancel() -> dict[str, Any]:
+            actor_id = _configured_approver()
+            return reminder_store.cancel(reminder_id=reminder_id, actor_id=actor_id)
+        return respond(_do_cancel, request_id)
 
     @server.tool(annotations=readonly)
     def email_search(folder: str = 'INBOX', q: str | None = None,

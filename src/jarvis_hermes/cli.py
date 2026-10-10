@@ -60,6 +60,8 @@ def main() -> int:
     email_demo = sub.add_parser("email-demo", help="Run an isolated IMAP email read + local reply draft demo (no email sent)")
     email_demo.add_argument("--query", default="", help="Free text or subject search")
     email_demo.add_argument("--json", action="store_true", dest="as_json")
+    reminder_demo = sub.add_parser("reminder-demo", help="Run an isolated persistent reminder demo (scheduling, DST test, restart recovery, cancellation)")
+    reminder_demo.add_argument("--json", action="store_true", dest="as_json")
     web_demo = sub.add_parser("web-demo", help="Run an isolated web page read, fill, and consent-gated submission demo")
     gemini_demo = sub.add_parser("gemini-demo", help="Run an isolated Gemini call demo recording token and cost tracking")
     routing_demo = sub.add_parser("routing-demo", help="Run an isolated routing demo testing deterministic fast-path, Jev timeout, and conservative fallback")
@@ -757,6 +759,77 @@ def main() -> int:
             print(f"Bozza: {draft['subject']} -> {draft['to']} (inviato: {draft['sent']})")
             print(f"Invio approvato: {send_res['status']} -> {send_res['message_id']}")
         return 0 if "error" not in searched or searched["error"]["code"] == "PROVIDER_NOT_CONFIGURED" else 1
+    if args.command == "reminder-demo":
+        from datetime import datetime, timezone, timedelta
+        from .reminder import ReminderStore, normalize_due_datetime
+        with tempfile.TemporaryDirectory(prefix="jarvis-reminder-demo-") as directory:
+            db_path = Path(directory) / "reminders.sqlite3"
+            store = ReminderStore(db_path)
+            actor = 123456
+
+            # 1. Programmazione reminder esplicito
+            due_future = (datetime.now(timezone.utc) + timedelta(hours=3)).isoformat()
+            scheduled = store.create(
+                actor_id=actor,
+                text="Prendere passaporto e documenti di viaggio",
+                due_at=due_future,
+                timezone_str="Europe/Rome",
+            )
+
+            # 2. Test cambio ora legale (DST)
+            utc_dst, local_dst = normalize_due_datetime("2026-03-29T08:00:00", "Europe/Rome")
+            dst_rem = store.create(
+                actor_id=actor,
+                text="Promemoria passaggio DST",
+                due_at=utc_dst.isoformat(),
+                timezone_str="Europe/Rome",
+            )
+
+            # 3. Annullamento
+            cancelled = store.cancel(reminder_id=dst_rem["reminder_id"], actor_id=actor)
+
+            # 4. Scadenza a nodo spento (riavvio)
+            past_due = (datetime.now(timezone.utc) - timedelta(minutes=10)).isoformat()
+            downtime_rem = store.create(
+                actor_id=actor,
+                text="Promemoria scaduto durante il riavvio",
+                due_at=past_due,
+                timezone_str="Europe/Rome",
+            )
+            # Riconciliazione al restart
+            reconciled = store.reconcile_on_startup()
+
+            payload = {
+                "scope": "isolated_reminder_demo",
+                "scheduled": {
+                    "reminder_id": scheduled["reminder_id"],
+                    "text": scheduled["text"],
+                    "status": scheduled["status"],
+                    "due_at_utc": scheduled["due_at_utc"],
+                    "timezone": scheduled["timezone"],
+                },
+                "dst_transition_test": {
+                    "reminder_id": cancelled["reminder_id"],
+                    "status": cancelled["status"],
+                    "due_at_utc": dst_rem["due_at_utc"],
+                    "scheduled_local": dst_rem["scheduled_local"],
+                },
+                "restart_reconciliation": {
+                    "count": len(reconciled),
+                    "reconciled_reminders": [
+                        {"reminder_id": r["reminder_id"], "status": r["status"], "warnings": r["warnings"]}
+                        for r in reconciled
+                    ],
+                },
+                "active_count": len(store.list_reminders(actor_id=actor, status="scheduled")),
+            }
+            if args.as_json:
+                print(json.dumps(payload, indent=2, ensure_ascii=False))
+            else:
+                print(f"Reminder programmato: {scheduled['reminder_id']} -> {scheduled['text']} ({scheduled['status']})")
+                print(f"Test DST: {dst_rem['scheduled_local']} -> UTC {dst_rem['due_at_utc']} (annullato: {cancelled['status']})")
+                print(f"Riconciliazione riavvio: {len(reconciled)} reminder segnati 'missed_during_downtime'")
+        return 0
     if args.command == "serve":
         from .server import main as serve
         serve()
