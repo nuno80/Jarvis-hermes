@@ -996,5 +996,26 @@ def build_server() -> FastMCP:
     return server
 
 
+def load_dotenv_if_available() -> None:
+    """Carica variabili da .env all'avvio del server MCP stdio se non già presenti,
+    ma non durante l'esecuzione di test automatici (dove l'ambiente deve rimanere controllato).
+    """
+    if os.environ.get("JARVIS_TEST_MODE") or "unittest" in sys.modules or "pytest" in sys.modules:
+        return
+    try:
+        from dotenv import load_dotenv
+        load_dotenv(override=False)
+        repo_env = Path(__file__).resolve().parents[2] / ".env"
+        if repo_env.is_file():
+            load_dotenv(repo_env, override=False)
+        hermes_env = Path.home() / ".hermes" / ".env"
+        if hermes_env.is_file():
+            load_dotenv(hermes_env, override=False)
+    except Exception:
+        pass
+
+
 def main() -> None:
+    load_dotenv_if_available()
     build_server().run(transport='stdio')
+

@@ -15,6 +15,7 @@ from mcp.types import ElicitResult
 @asynccontextmanager
 async def connected(vault=None, *, approver_id=None, approval_action='accept', state_home=None, elicit=True, projects_config=None, extra_env=None):
     env = dict(os.environ)
+    env['JARVIS_TEST_MODE'] = '1'
     env.pop('JARVIS_VAULT_PATH', None)
     env.pop('JARVIS_APPROVER_ID', None)
     env.pop('JARVIS_PROJECTS_CONFIG', None)
