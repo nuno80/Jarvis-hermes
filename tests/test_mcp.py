@@ -517,6 +517,20 @@ class MCPTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(data_fast["status"], "answered")
                 self.assertIn("🎙️", data_fast["reply"])
                 self.assertIn("provider", data_fast["stt_usage"])
+
+                # Test con override groq esplicito
+                res_groq = await client.call_tool("transcribe_voice_message", {
+                    "transcript": "quanto spazio libero ho sul disco?",
+                    "actor_id": 123456, "job_id": "voice-mcp-groq",
+                    "duration_seconds": 5,
+                    "stt_provider": "groq",
+                    "stt_model": "whisper-large-v3",
+                })
+                self.assertTrue(res_groq.structuredContent["ok"])
+                data_groq = res_groq.structuredContent["data"]
+                self.assertEqual(data_groq["stt_usage"]["provider"], "groq")
+                self.assertEqual(data_groq["stt_usage"]["model_id"], "whisper-large-v3")
+
                 # Vocale troppo lungo: errore applicativo VoiceError, mai eccezione di protocollo.
                 res_long = await client.call_tool("transcribe_voice_message", {
                     "transcript": "vocale lunghissimo",

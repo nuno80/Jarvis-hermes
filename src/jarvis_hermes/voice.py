@@ -56,6 +56,38 @@ _PLAN_IT = {
 _AMBIGUOUS_INTENTS = ("ambiguous", "dangerous_ambiguous")
 
 
+DEFAULT_GROQ_STT_MODEL = "whisper-large-v3"
+DEFAULT_LOCAL_STT_MODEL = "hermes_local"
+DEFAULT_LOCAL_STT_PROVIDER = "hermes_stt"
+
+
+def resolve_stt_backend(
+    configured_provider: str | None = None,
+    configured_model: str | None = None,
+    env: dict[str, str] | None = None,
+) -> tuple[str, str]:
+    """Risolve provider e modello STT: Groq primario se GROQ_API_KEY presente, fallback local.
+
+    Policy:
+    - Se specificati esplicitamente parametri diversi dai default, vengono rispettati.
+    - Altrimenti, se GROQ_API_KEY e' presente nell'environment, usa Groq + whisper-large-v3.
+    - Se GROQ_API_KEY e' assente o vuota, fallback sul backend locale hermes_local.
+    """
+    import os
+    environ = env if env is not None else os.environ
+
+    if configured_provider and configured_provider not in ("hermes_stt", "auto"):
+        return configured_provider, configured_model or (
+            DEFAULT_GROQ_STT_MODEL if configured_provider == "groq" else DEFAULT_LOCAL_STT_MODEL
+        )
+
+    groq_key = environ.get("GROQ_API_KEY", "").strip()
+    if groq_key:
+        return "groq", configured_model or DEFAULT_GROQ_STT_MODEL
+
+    return DEFAULT_LOCAL_STT_PROVIDER, configured_model or DEFAULT_LOCAL_STT_MODEL
+
+
 def transcript_excerpt(text: str, limit: int = VOICE_TRANSCRIPT_EXCERPT_CHARS) -> str:
     clean = " ".join((text or "").split())
     return clean if len(clean) <= limit else clean[:limit] + "…"
@@ -102,8 +134,8 @@ def handle_voice_transcript(
     actor_id: int,
     job_id: str = "voice-job",
     duration_seconds: int | None = None,
-    stt_provider: str = "hermes_stt",
-    stt_model: str = "hermes_local",
+    stt_provider: str | None = None,
+    stt_model: str | None = None,
     budget_tracker: Any,
     job_store: Any,
     telemetry_store: Any = None,
@@ -120,13 +152,15 @@ def handle_voice_transcript(
     from .decision import pre_turn_dispatch
     from .llm import STTClient
 
+    resolved_provider, resolved_model = resolve_stt_backend(stt_provider, stt_model)
+
     start = time.perf_counter()
     text = " ".join((transcript or "").split())
 
     if duration_seconds is not None and duration_seconds > VOICE_MAX_DURATION_SECONDS:
         if budget_tracker is not None:
-            STTClient(budget_tracker, model_id=stt_model).record_transcription(
-                job_id, duration_seconds, provider=stt_provider)
+            STTClient(budget_tracker, model_id=resolved_model).record_transcription(
+                job_id, duration_seconds, provider=resolved_provider)
         raise VoiceError(
             "VOICE_TOO_LONG",
             f"Vocale troppo lungo ({duration_seconds}s > {VOICE_MAX_DURATION_SECONDS}s): "
@@ -134,8 +168,8 @@ def handle_voice_transcript(
 
     stt_usage: dict[str, Any] = {}
     if budget_tracker is not None:
-        rec = STTClient(budget_tracker, model_id=stt_model).record_transcription(
-            job_id, duration_seconds or 0, provider=stt_provider)
+        rec = STTClient(budget_tracker, model_id=resolved_model).record_transcription(
+            job_id, duration_seconds or 0, provider=resolved_provider)
         stt_usage = {"provider": rec.provider, "model_id": rec.model_id,
                      "total_tokens": rec.total_tokens, "cost_usd": rec.cost_usd,
                      "is_estimated": rec.is_estimated}
@@ -151,7 +185,7 @@ def handle_voice_transcript(
     job = job_store.create_job(
         actor_id, "voice_message", text[:200],
         metadata={"transcript_source": "voice_stt_untrusted",
-                  "stt_provider": stt_provider, "stt_model": stt_model,
+                  "stt_provider": resolved_provider, "stt_model": resolved_model,
                   "duration_seconds": duration_seconds,
                   "audio_retention": AUDIO_RETENTION_POLICY,
                   "transcript_chars": len(text)})

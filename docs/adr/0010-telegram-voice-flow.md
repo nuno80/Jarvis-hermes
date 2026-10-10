@@ -52,4 +52,9 @@ innesti `_enrich_inbound_voice`/`_transcribe_and_echo_pending_voice` + drop
 - Retention esplicita: `audio_bytes_stored_by_jarvis=false`; l'audio resta
   solo nella cache Hermes, nel job solo la trascrizione.
 - Budget esaurito → `LLMError` dal tracker, mai risultati simulati.
+- Selezione Provider STT (issue #45): Groq STT (`whisper-large-v3`) come
+  primario cloud ad alta accuratezza e latenza sub-secondo con chiave
+  `GROQ_API_KEY` in env; fallback trasparente su faster-whisper locale
+  (`small`, `it`) in caso di assenza chiave o esaurimento quota. Zero-secret:
+  chiave mai esposta in telemetria o metadati dei job.
 - Demo: `uv run jarvis voice-demo` (stato macchina + latenze ack misurate).

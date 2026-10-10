@@ -355,5 +355,80 @@ class STTClientTests(unittest.TestCase):
         self.assertGreater(self.tracker.get_job_usage("j2")["calls_count"], 0)
 
 
+class STTProviderResolutionTests(unittest.TestCase):
+    """Test selezione Groq primario e fallback locale (issue #45)."""
+
+    def test_groq_primary_when_api_key_set(self):
+        from jarvis_hermes.voice import resolve_stt_backend
+        provider, model = resolve_stt_backend(env={"GROQ_API_KEY": "gsk_test12345"})
+        self.assertEqual(provider, "groq")
+        self.assertEqual(model, "whisper-large-v3")
+
+    def test_fallback_local_when_api_key_missing_or_empty(self):
+        from jarvis_hermes.voice import resolve_stt_backend
+        provider, model = resolve_stt_backend(env={})
+        self.assertEqual(provider, "hermes_stt")
+        self.assertEqual(model, "hermes_local")
+
+        provider, model = resolve_stt_backend(env={"GROQ_API_KEY": "   "})
+        self.assertEqual(provider, "hermes_stt")
+        self.assertEqual(model, "hermes_local")
+
+    def test_explicit_provider_respected(self):
+        from jarvis_hermes.voice import resolve_stt_backend
+        provider, model = resolve_stt_backend(
+            configured_provider="openai", configured_model="whisper-1",
+            env={"GROQ_API_KEY": "gsk_test12345"}
+        )
+        self.assertEqual(provider, "openai")
+        self.assertEqual(model, "whisper-1")
+
+    def test_handle_voice_transcript_records_groq_when_key_present(self):
+        import os
+        from unittest.mock import patch
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tracker = _tracker(tmpdir)
+            jobs = _jobs(tmpdir)
+            with patch.dict(os.environ, {"GROQ_API_KEY": "gsk_fake"}):
+                res = handle_voice_transcript(
+                    "trascrizione prova",
+                    actor_id=123,
+                    duration_seconds=10,
+                    budget_tracker=tracker,
+                    job_store=jobs,
+                    dispatch_fn=_reply_dispatch
+                )
+            self.assertEqual(res["stt_usage"]["provider"], "groq")
+            self.assertEqual(res["stt_usage"]["model_id"], "whisper-large-v3")
+            job = jobs.get_job(res["job_id"])
+            self.assertEqual(job["metadata"]["stt_provider"], "groq")
+            self.assertEqual(job["metadata"]["stt_model"], "whisper-large-v3")
+            # Assenza leak della chiave nei metadati del job
+            self.assertNotIn("gsk_fake", str(job["metadata"]))
+
+    def test_handle_voice_transcript_falls_back_without_key(self):
+        import os
+        from unittest.mock import patch
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tracker = _tracker(tmpdir)
+            jobs = _jobs(tmpdir)
+            env_clean = {k: v for k, v in os.environ.items() if k != "GROQ_API_KEY"}
+            with patch.dict(os.environ, env_clean, clear=True):
+                res = handle_voice_transcript(
+                    "trascrizione prova",
+                    actor_id=123,
+                    duration_seconds=10,
+                    budget_tracker=tracker,
+                    job_store=jobs,
+                    dispatch_fn=_reply_dispatch
+                )
+            self.assertEqual(res["stt_usage"]["provider"], "hermes_stt")
+            self.assertEqual(res["stt_usage"]["model_id"], "hermes_local")
+            job = jobs.get_job(res["job_id"])
+            self.assertEqual(job["metadata"]["stt_provider"], "hermes_stt")
+            self.assertEqual(job["metadata"]["stt_model"], "hermes_local")
+
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -565,8 +565,8 @@ def build_server() -> FastMCP:
     @server.tool(annotations=readonly)
     def transcribe_voice_message(transcript: str, actor_id: int, job_id: str = "voice-job",
                                  duration_seconds: int | None = None,
-                                 stt_provider: str = "hermes_stt",
-                                 stt_model: str = "hermes_local",
+                                 stt_provider: str | None = None,
+                                 stt_model: str | None = None,
                                  request_id: str | None = None) -> dict[str, Any]:
         """Handle a Telegram voice transcript (Hermes STT output, untrusted): ack/job/clarify.
 

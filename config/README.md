@@ -182,6 +182,17 @@ L'interazione con pagine web e l'invio di moduli esterni avvengono sotto control
 - `reconcile_email(message_id)`:
   - Consulta l'audit log per verificare lo stato di recapito di un `message_id` senza rischiare doppi invii esterni.
 
+## Trascrizione vocale e provider STT (Issue #45, ADR 0010)
+
+- **Provider primario cloud**: Groq STT (`whisper-large-v3` / `whisper-large-v3-turbo`) abilitato impostando `GROQ_API_KEY` in `.env` o `~/.hermes/.env` e `stt.provider: groq` in `~/.hermes/config.yaml`.
+  - Consente trascrizione ultra-rapida (<0.5s per clip) ad altissima accuratezza con modello SOTA a costo zero (free tier).
+- **Fallback automatico su faster-whisper locale**:
+  - Se `GROQ_API_KEY` non è configurata o se la quota gratuita su Groq si esaurisce (HTTP 429), il gateway Hermes e la pipeline Jarvis commutano automaticamente sulla trascrizione locale (`local` faster-whisper, modello `small`, lingua `it`).
+- **Zero-secret & Sicurezza**:
+  - `GROQ_API_KEY` non viene mai esposta nei log di audit, nella telemetria o nei metadati dei job (D07, ADR 0010).
+  - Trascrizioni trattate rigorosamente come dati non fidati (`transcript_source: voice_stt_untrusted`).
+
+
 
 
 
