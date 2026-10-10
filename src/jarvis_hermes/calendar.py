@@ -17,13 +17,18 @@ import urllib.parse
 import urllib.request
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from pathlib import Path
+import sqlite3
 from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+
+from .approval import ApprovalError, ApprovalStore
 
 PROVIDER_NAME = "google"
 EVENTS_URL_TEMPLATE = "https://www.googleapis.com/calendar/v3/calendars/{calendar_id}/events"
 TOKEN_URL = "https://oauth2.googleapis.com/token"
 READONLY_SCOPE = "https://www.googleapis.com/auth/calendar.readonly"
+EVENTS_SCOPE = "https://www.googleapis.com/auth/calendar.events"
 
 ATTENDEE_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 CONTROL_RE = re.compile(r"[\x00-\x1f\x7f]")
@@ -239,6 +244,60 @@ class GoogleCalendarProvider:
                                 retryable=False)
         return token
 
+    def create_event(self, calendar_id: str, event_payload: dict[str, Any]) -> dict[str, Any]:
+        token = self._access_token()
+        url = EVENTS_URL_TEMPLATE.format(calendar_id=urllib.parse.quote(calendar_id, safe="@."))
+        body = json.dumps(event_payload).encode("utf-8")
+        req = urllib.request.Request(
+            url,
+            data=body,
+            headers={
+                "Authorization": "Bearer " + token,
+                "Content-Type": "application/json",
+                "Accept": "application/json",
+                "User-Agent": "Jarvis-Hermes/1.0",
+            },
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=15) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+        except urllib.error.HTTPError as exc:
+            try:
+                detail = _scrub(exc.read().decode("utf-8", errors="replace")[:300])
+            except Exception:
+                detail = ""
+            if exc.code in (401, 403):
+                raise CalendarError(
+                    "PROVIDER_AUTH_ERROR",
+                    "Accesso Google Calendar revocato o negato (401/403). "
+                    "Rinnova il consenso OAuth e aggiorna il token con permessi di scrittura.",
+                    retryable=False,
+                ) from exc
+            if exc.code == 404:
+                raise CalendarError(
+                    "CALENDAR_NOT_FOUND",
+                    f"Calendario '{calendar_id}' non trovato o non scrivibile per l'account.",
+                    retryable=False,
+                ) from exc
+            if exc.code == 429 or 500 <= exc.code < 600:
+                raise CalendarError(
+                    "OUTCOME_UNKNOWN",
+                    f"Google Calendar non disponibile durante la creazione ({exc.code}). {detail}",
+                    retryable=True,
+                ) from exc
+            raise CalendarError("PROVIDER_ERROR", f"Errore Google Calendar ({exc.code}). {detail}") from exc
+        except (urllib.error.URLError, TimeoutError, OSError) as exc:
+            raise CalendarError(
+                "OUTCOME_UNKNOWN",
+                f"Timeout o errore di connessione durante la creazione dell'evento: {exc}.",
+                retryable=True,
+            ) from exc
+        except (ValueError, json.JSONDecodeError) as exc:
+            raise CalendarError("OUTCOME_UNKNOWN", f"Risposta Google Calendar non decodificabile: {exc}.") from exc
+
+        return normalize_event(data).to_dict()
+
     def search_events(self, request: CalendarSearchRequest) -> dict[str, Any]:
         token = self._access_token()
         params = {"maxResults": str(request.max_results), "singleEvents": "true",
@@ -328,11 +387,123 @@ class DraftEventRequest:
                    attendees=attendees)
 
 
-class CalendarManager:
-    """Orchestrazione: lettura via provider, bozza sempre locale senza rete."""
+def compute_calendar_digest(
+    *,
+    calendar_id: str,
+    summary: str,
+    start: str,
+    end: str,
+    time_zone: str,
+    location: str | None = None,
+    description: str = "",
+    attendees: list[str] | None = None,
+) -> str:
+    """Calcola digest SHA-256 univoco e canonico per la creazione di un evento."""
+    norm_attendees = sorted([str(a).strip().lower() for a in (attendees or []) if str(a).strip()])
+    payload = {
+        "calendar_id": str(calendar_id).strip(),
+        "summary": str(summary).strip(),
+        "start": str(start).strip(),
+        "end": str(end).strip(),
+        "time_zone": str(time_zone).strip(),
+        "location": str(location).strip() if location else "",
+        "description": str(description).strip() if description else "",
+        "attendees": norm_attendees,
+    }
+    raw = json.dumps(payload, sort_keys=True, ensure_ascii=False)
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
-    def __init__(self, provider: GoogleCalendarProvider | None = None):
+
+class CalendarAuditLog:
+    """Audit log persistente SQLite per tracciamento ed idempotenza eventi calendario (AT04)."""
+
+    def __init__(self, db_path: Path | str | None = None):
+        if db_path is None:
+            state_dir = Path(os.environ.get("XDG_STATE_HOME", Path.home() / ".local" / "state")) / "jarvis-hermes"
+            state_dir.mkdir(parents=True, exist_ok=True)
+            self.db_path = state_dir / "calendar_audit.sqlite3"
+        else:
+            self.db_path = Path(db_path)
+            self.db_path.parent.mkdir(parents=True, exist_ok=True)
+        self._init_db()
+
+    def _get_connection(self) -> sqlite3.Connection:
+        conn = sqlite3.connect(self.db_path)
+        conn.row_factory = sqlite3.Row
+        return conn
+
+    def _init_db(self) -> None:
+        with self._get_connection() as conn:
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS created_events (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    calendar_id TEXT NOT NULL,
+                    event_id TEXT,
+                    summary TEXT NOT NULL,
+                    start_time TEXT NOT NULL,
+                    end_time TEXT NOT NULL,
+                    digest TEXT UNIQUE NOT NULL,
+                    status TEXT NOT NULL,
+                    attendees_count INTEGER NOT NULL DEFAULT 0,
+                    created_at TEXT NOT NULL
+                )
+                """
+            )
+            conn.commit()
+
+    def record_created(
+        self,
+        *,
+        calendar_id: str,
+        event_id: str | None,
+        summary: str,
+        start_time: str,
+        end_time: str,
+        digest: str,
+        status: str,
+        attendees_count: int = 0,
+    ) -> None:
+        now = datetime.now(timezone.utc).isoformat()
+        with self._get_connection() as conn:
+            conn.execute(
+                """
+                INSERT INTO created_events
+                (calendar_id, event_id, summary, start_time, end_time, digest, status, attendees_count, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(digest) DO UPDATE SET
+                    status=excluded.status,
+                    event_id=COALESCE(excluded.event_id, created_events.event_id)
+                """,
+                (calendar_id, event_id, summary, start_time, end_time, digest, status, attendees_count, now),
+            )
+            conn.commit()
+
+    def is_recorded(self, digest: str) -> bool:
+        with self._get_connection() as conn:
+            row = conn.execute("SELECT id FROM created_events WHERE digest = ?", (digest,)).fetchone()
+            return row is not None
+
+    def get_record(self, digest: str) -> dict[str, Any] | None:
+        with self._get_connection() as conn:
+            row = conn.execute("SELECT * FROM created_events WHERE digest = ?", (digest,)).fetchone()
+            if row:
+                return dict(row)
+            return None
+
+
+class CalendarManager:
+    """Orchestrazione: lettura via provider, bozza locale e creazione con approvazione monouso."""
+
+    def __init__(
+        self,
+        provider: GoogleCalendarProvider | None = None,
+        approval_store: ApprovalStore | None = None,
+        audit_log: CalendarAuditLog | None = None,
+    ):
         self._provider = provider
+        self.approval_store = approval_store
+        self.audit_log = audit_log
 
     def _resolve_provider(self) -> GoogleCalendarProvider:
         provider = self._provider or GoogleCalendarProvider()
@@ -396,3 +567,281 @@ class CalendarManager:
             "created_event": False,
             "note": "Bozza locale: nessun evento creato su Google Calendar. La creazione (#24) richiederà conferma.",
         }
+
+    def stage_create_event(
+        self,
+        *,
+        calendar_id: str,
+        summary: str,
+        start: str,
+        end: str,
+        actor_id: int,
+        time_zone: str = "Europe/Rome",
+        location: str | None = None,
+        description: str = "",
+        attendees: list[str] | list[dict[str, Any]] | None = None,
+    ) -> dict[str, Any]:
+        """Prepara una richiesta di approvazione per creare un evento sul calendario (D07)."""
+        if not self.approval_store:
+            raise CalendarError("APPROVAL_UNAVAILABLE", "Approval store non configurato.")
+
+        summary = str(summary or "").strip()
+        if not summary:
+            raise CalendarError("MISSING_PARAMETER", "Titolo evento (summary) richiesto.")
+        if not str(start or "").strip() or not str(end or "").strip():
+            raise CalendarError("MISSING_PARAMETER", "Campi 'start' e 'end' richiesti.")
+
+        tz = _resolve_zone(time_zone)
+        start_norm, start_dt, start_all_day = _parse_moment(start, tz)
+        end_norm, end_dt, end_all_day = _parse_moment(end, tz)
+        if start_all_day != end_all_day:
+            raise CalendarError("INVALID_TIME_RANGE", "start e end devono essere entrambi orari o entrambi date.")
+        if start_dt is not None and end_dt is not None:
+            if end_dt <= start_dt:
+                raise CalendarError("INVALID_TIME_RANGE", "end deve essere successiva a start.")
+        elif end_norm < start_norm:
+            raise CalendarError("INVALID_TIME_RANGE", "end deve essere successiva a start.")
+
+        raw_attendees = attendees or []
+        attendee_emails = []
+        for a in raw_attendees:
+            email_val = a.get("email", "") if isinstance(a, dict) else str(a)
+            email_val = email_val.strip()
+            if not ATTENDEE_RE.match(email_val):
+                raise CalendarError("INVALID_ATTENDEE", f"Indirizzo invitato non valido '{email_val}'.")
+            attendee_emails.append(email_val)
+
+        digest = compute_calendar_digest(
+            calendar_id=calendar_id,
+            summary=summary,
+            start=start_norm,
+            end=end_norm,
+            time_zone=time_zone,
+            location=location,
+            description=description,
+            attendees=attendee_emails,
+        )
+
+        target = f"calendar_create:{calendar_id}"
+        arguments = {
+            "digest": digest,
+            "calendar_id": calendar_id,
+            "summary": summary,
+            "start": start_norm,
+            "end": end_norm,
+            "time_zone": time_zone,
+            "location": location or "",
+            "description": description or "",
+            "attendees": sorted([e.lower() for e in attendee_emails]),
+        }
+
+        req = self.approval_store.request(actor_id=actor_id, target=target, arguments=arguments)
+
+        summary_text = (
+            f"Creazione evento nel calendario '{calendar_id}':\n"
+            f"- Titolo: {summary}\n"
+            f"- Inizio: {start_norm}\n"
+            f"- Fine: {end_norm}\n"
+            f"- Timezone: {time_zone}\n"
+            + (f"- Luogo: {location}\n" if location else "")
+            + (f"- Descrizione: {description}\n" if description else "")
+            + (f"- Invitati: {', '.join(attendee_emails)}\n" if attendee_emails else "- Invitati: nessuno\n")
+            + f"- SHA-256 Digest: {digest}"
+        )
+
+        return {
+            "status": "approval_required",
+            "approval_token": req["token"],
+            "digest": digest,
+            "calendar_id": calendar_id,
+            "summary_text": summary_text,
+            "expires_at": req["expires_at"],
+        }
+
+    def create_event(
+        self,
+        *,
+        calendar_id: str,
+        summary: str,
+        start: str,
+        end: str,
+        approval_token: str | None,
+        actor_id: int,
+        time_zone: str = "Europe/Rome",
+        location: str | None = None,
+        description: str = "",
+        attendees: list[str] | list[dict[str, Any]] | None = None,
+    ) -> dict[str, Any]:
+        """Crea un evento su Google Calendar previa verifica e consumo del consenso monouso."""
+        if not approval_token:
+            raise CalendarError("APPROVAL_REQUIRED", "La creazione di eventi richiede approvazione esplicita.")
+
+        if not self.approval_store:
+            raise CalendarError("APPROVAL_UNAVAILABLE", "Approval store non configurato.")
+
+        tz = _resolve_zone(time_zone)
+        start_norm, start_dt, start_all_day = _parse_moment(start, tz)
+        end_norm, end_dt, end_all_day = _parse_moment(end, tz)
+        if start_all_day != end_all_day:
+            raise CalendarError("INVALID_TIME_RANGE", "start e end devono essere entrambi orari o entrambi date.")
+        if start_dt is not None and end_dt is not None:
+            if end_dt <= start_dt:
+                raise CalendarError("INVALID_TIME_RANGE", "end deve essere successiva a start.")
+        elif end_norm < start_norm:
+            raise CalendarError("INVALID_TIME_RANGE", "end deve essere successiva a start.")
+
+        raw_attendees = attendees or []
+        attendee_emails = []
+        payload_attendees = []
+        for a in raw_attendees:
+            email_val = a.get("email", "") if isinstance(a, dict) else str(a)
+            email_val = email_val.strip()
+            if not ATTENDEE_RE.match(email_val):
+                raise CalendarError("INVALID_ATTENDEE", f"Indirizzo invitato non valido '{email_val}'.")
+            attendee_emails.append(email_val)
+            payload_attendees.append({"email": email_val})
+
+        digest = compute_calendar_digest(
+            calendar_id=calendar_id,
+            summary=summary,
+            start=start_norm,
+            end=end_norm,
+            time_zone=time_zone,
+            location=location,
+            description=description,
+            attendees=attendee_emails,
+        )
+
+        target = f"calendar_create:{calendar_id}"
+        arguments = {
+            "digest": digest,
+            "calendar_id": calendar_id,
+            "summary": summary,
+            "start": start_norm,
+            "end": end_norm,
+            "time_zone": time_zone,
+            "location": location or "",
+            "description": description or "",
+            "attendees": sorted([e.lower() for e in attendee_emails]),
+        }
+
+        # 1. Verifica e consumo del consenso monouso
+        try:
+            decision = self.approval_store.decide(
+                token=approval_token,
+                actor_id=actor_id,
+                target=target,
+                arguments=arguments,
+                approve=True,
+            )
+        except ApprovalError as exc:
+            raise CalendarError(exc.code, f"Verifica consenso fallita: {exc.code}")
+
+        if decision.get("status") != "executed":
+            raise CalendarError("APPROVAL_DENIED", "Consenso per la creazione non concesso.")
+
+        # 2. De-duplicazione / idempotenza tramite audit log (AT04)
+        if self.audit_log and self.audit_log.is_recorded(digest):
+            rec = self.audit_log.get_record(digest)
+            if rec and rec.get("status") == "CREATED":
+                return {
+                    "created": True,
+                    "status": "ALREADY_CREATED",
+                    "event_id": rec.get("event_id"),
+                    "reconciled": True,
+                    "calendar_id": calendar_id,
+                    "digest": digest,
+                    "audit": rec,
+                }
+
+        provider = self._resolve_provider()
+
+        # Costruzione payload Google Calendar v3
+        event_payload: dict[str, Any] = {
+            "summary": summary,
+            "description": description,
+        }
+        if location:
+            event_payload["location"] = location
+        if payload_attendees:
+            event_payload["attendees"] = payload_attendees
+
+        if start_all_day:
+            event_payload["start"] = {"date": start_norm}
+            event_payload["end"] = {"date": end_norm}
+        else:
+            event_payload["start"] = {"dateTime": start_norm, "timeZone": time_zone}
+            event_payload["end"] = {"dateTime": end_norm, "timeZone": time_zone}
+
+        # 3. Chiamata API con gestione esito incerto (AT04)
+        try:
+            created_data = provider.create_event(calendar_id, event_payload)
+        except CalendarError as exc:
+            if exc.code == "OUTCOME_UNKNOWN":
+                if self.audit_log:
+                    self.audit_log.record_created(
+                        calendar_id=calendar_id,
+                        event_id=None,
+                        summary=summary,
+                        start_time=start_norm,
+                        end_time=end_norm,
+                        digest=digest,
+                        status="OUTCOME_UNKNOWN",
+                        attendees_count=len(attendee_emails),
+                    )
+                return {
+                    "created": False,
+                    "status": "OUTCOME_UNKNOWN",
+                    "calendar_id": calendar_id,
+                    "digest": digest,
+                    "warning": "Creazione interrotta da timeout o errore di connessione. Non verrà eseguito retry cieco.",
+                }
+            raise
+
+        event_id = created_data.get("event_id")
+        if self.audit_log:
+            self.audit_log.record_created(
+                calendar_id=calendar_id,
+                event_id=event_id,
+                summary=summary,
+                start_time=start_norm,
+                end_time=end_norm,
+                digest=digest,
+                status="CREATED",
+                attendees_count=len(attendee_emails),
+            )
+
+        return {
+            "created": True,
+            "status": "CREATED",
+            "calendar_id": calendar_id,
+            "event_id": event_id,
+            "event": created_data,
+            "digest": digest,
+            "reconciled": False,
+        }
+
+    def reconcile_calendar_event(self, digest: str) -> dict[str, Any]:
+        """Riconciliazione esito per digest (AT04): consulta l'audit log senza eseguire retry cieco."""
+        if not self.audit_log:
+            return {
+                "digest": digest,
+                "status": "OUTCOME_UNKNOWN",
+                "reconciled": False,
+                "note": "Audit log non configurato per la riconciliazione.",
+            }
+        rec = self.audit_log.get_record(digest)
+        if not rec:
+            return {
+                "digest": digest,
+                "status": "NOT_FOUND",
+                "reconciled": False,
+                "note": "Nessun tentativo registrato con questo digest.",
+            }
+        return {
+            "digest": digest,
+            "status": rec["status"],
+            "reconciled": True,
+            "audit": rec,
+        }
+

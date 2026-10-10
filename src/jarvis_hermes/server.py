@@ -11,7 +11,7 @@ from mcp.types import ToolAnnotations
 from pydantic import BaseModel
 
 from .approval import ApprovalError, ApprovalStore
-from .calendar import CalendarError, CalendarManager
+from .calendar import CalendarAuditLog, CalendarError, CalendarManager
 from .email import EmailAuditLog, EmailError, EmailManager
 from .checkpoint import CheckpointError, CheckpointManager
 from .cli import diagnose
@@ -127,6 +127,23 @@ def _routing_store() -> RoutingDecisionStore:
     return RoutingDecisionStore(storage_path, retention_days=retention)
 
 
+def _calendar_audit_log() -> CalendarAuditLog:
+    state_home = Path(os.environ.get('XDG_STATE_HOME', Path.home() / '.local' / 'state'))
+    state_dir = state_home / 'jarvis-hermes'
+    state_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+    try:
+        state_dir.chmod(0o700)
+    except OSError:
+        pass
+    storage_path = state_dir / 'calendar_audit.sqlite3'
+    audit = CalendarAuditLog(storage_path)
+    try:
+        storage_path.chmod(0o600)
+    except OSError:
+        pass
+    return audit
+
+
 def _email_audit_log() -> EmailAuditLog:
     state_home = Path(os.environ.get('XDG_STATE_HOME', Path.home() / '.local' / 'state'))
     state_dir = state_home / 'jarvis-hermes'
@@ -176,7 +193,8 @@ def build_server() -> FastMCP:
     gui_manager = GuiAutomationManager(job_store=job_store)
     web_manager = WebManager(approval_store=approval_store)
     travel_manager = TravelManager()
-    calendar_manager = CalendarManager()
+    calendar_audit_log = _calendar_audit_log()
+    calendar_manager = CalendarManager(approval_store=approval_store, audit_log=calendar_audit_log)
     reminder_store = _reminder_store()
     reminder_store.reconcile_on_startup()
     email_audit_log = _email_audit_log()
@@ -668,6 +686,140 @@ def build_server() -> FastMCP:
             'location': location, 'description': description,
             'attendees': attendees or [],
         }), request_id)
+
+    @server.tool(annotations=destructive)
+    async def calendar_create_event(
+        summary: str,
+        start: str,
+        end: str,
+        ctx: Context,
+        calendar_id: str = 'primary',
+        time_zone: str | None = None,
+        location: str | None = None,
+        description: str = '',
+        attendees: list[Any] | None = None,
+        request_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Create an event on Google Calendar strictly mediated by owner approval showing calendar, times, summary, and attendees."""
+        observed = {
+            'schema_version': '1.0',
+            'device_id': device,
+            'request_id': request_id,
+            'observed_at': datetime.now(timezone.utc).isoformat(),
+            'provenance': {'source': 'google_calendar', 'scope': 'calendar_create'},
+        }
+        try:
+            actor_id = _configured_approver()
+            tz_name = time_zone or 'Europe/Rome'
+            stage = calendar_manager.stage_create_event(
+                calendar_id=calendar_id,
+                summary=summary,
+                start=start,
+                end=end,
+                actor_id=actor_id,
+                time_zone=tz_name,
+                location=location,
+                description=description,
+                attendees=attendees,
+            )
+
+            prompt = (
+                f"Jarvis: autorizzi la creazione del seguente evento nel calendario?\n"
+                f"{stage['summary_text']}"
+            )
+
+            try:
+                choice = await asyncio.wait_for(ctx.elicit(prompt, _ApprovalResponse), timeout=305)
+            except Exception:
+                choice = None
+
+            decision = getattr(choice, 'action', None)
+            if decision != 'accept':
+                # Registra rifiuto esplicito in ApprovalStore
+                target = f"calendar_create:{calendar_id}"
+                norm_attendees = sorted([
+                    (a.get("email", "") if isinstance(a, dict) else str(a)).strip().lower()
+                    for a in (attendees or [])
+                    if (a.get("email", "") if isinstance(a, dict) else str(a)).strip()
+                ])
+                arguments = {
+                    "digest": stage["digest"],
+                    "calendar_id": calendar_id,
+                    "summary": summary,
+                    "start": start,
+                    "end": end,
+                    "time_zone": tz_name,
+                    "location": location or "",
+                    "description": description or "",
+                    "attendees": norm_attendees,
+                }
+                try:
+                    approval_store.decide(
+                        token=stage['approval_token'],
+                        actor_id=actor_id,
+                        target=target,
+                        arguments=arguments,
+                        approve=False,
+                    )
+                except Exception:
+                    pass
+                return {
+                    **observed,
+                    'ok': False,
+                    'data': None,
+                    'error': {
+                        'code': 'APPROVAL_DECLINED',
+                        'message': 'Creazione evento calendario rifiutata dal proprietario o non confermata.',
+                        'summary': stage['summary_text'],
+                        'retryable': False,
+                    },
+                }
+
+            result = calendar_manager.create_event(
+                calendar_id=calendar_id,
+                summary=summary,
+                start=start,
+                end=end,
+                approval_token=stage['approval_token'],
+                actor_id=actor_id,
+                time_zone=tz_name,
+                location=location,
+                description=description,
+                attendees=attendees,
+            )
+            return {
+                **observed,
+                'ok': True,
+                'data': result,
+                'error': None,
+            }
+        except (ApprovalError, CalendarError) as exc:
+            return {
+                **observed,
+                'ok': False,
+                'data': None,
+                'error': {
+                    'code': getattr(exc, 'code', 'CALENDAR_ERROR'),
+                    'message': str(exc),
+                    'retryable': getattr(exc, 'retryable', False),
+                },
+            }
+        except Exception as exc:
+            return {
+                **observed,
+                'ok': False,
+                'data': None,
+                'error': {
+                    'code': 'INTERNAL_ERROR',
+                    'message': f"Errore imprevisto durante la creazione dell'evento: {exc}",
+                    'retryable': False,
+                },
+            }
+
+    @server.tool(annotations=readonly)
+    def reconcile_calendar_event(digest: str, request_id: str | None = None) -> dict[str, Any]:
+        """Reconcile calendar event creation status by digest without blind retries (AT04)."""
+        return respond(lambda: calendar_manager.reconcile_calendar_event(digest), request_id)
 
     @server.tool(annotations=destructive)
     def create_reminder(text: str, due_at: str, timezone_str: str = 'Europe/Rome',

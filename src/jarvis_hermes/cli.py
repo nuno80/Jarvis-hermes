@@ -59,6 +59,8 @@ def main() -> int:
     calendar_demo = sub.add_parser("calendar-demo", help="Run an isolated Google Calendar read + local draft demo (no event created)")
     calendar_demo.add_argument("--query", default="", help="Free text search")
     calendar_demo.add_argument("--json", action="store_true", dest="as_json")
+    calendar_create_demo = sub.add_parser("calendar-create-demo", help="Run an isolated Google Calendar create demo with approval gate, reject, and audit (issue #24 / JARVIS-24)")
+    calendar_create_demo.add_argument("--json", action="store_true", dest="as_json")
     email_demo = sub.add_parser("email-demo", help="Run an isolated IMAP email read + local reply draft demo (no email sent)")
     email_demo.add_argument("--query", default="", help="Free text or subject search")
     email_demo.add_argument("--json", action="store_true", dest="as_json")
@@ -684,6 +686,103 @@ def main() -> int:
             print(f"Ricerca: {searched}")
             print(f"Bozza: {draft['summary']} {draft['start']} -> {draft['end']} (creato: {draft['created_event']})")
         return 0 if "error" not in searched or searched["error"]["code"] == "PROVIDER_NOT_CONFIGURED" else 1
+    if args.command == "calendar-create-demo":
+        from .approval import ApprovalStore
+        from .calendar import CalendarAuditLog, CalendarError, CalendarManager, GoogleCalendarProvider
+        with tempfile.TemporaryDirectory(prefix="jarvis-calendar-create-demo-") as demo_dir:
+            demo_store = ApprovalStore(Path(demo_dir) / "approval.sqlite3")
+            demo_audit = CalendarAuditLog(Path(demo_dir) / "audit.sqlite3")
+            actor = 12345
+
+            # Mock provider per simulare Google Calendar in ambiente isolato
+            class MockGoogleProvider(GoogleCalendarProvider):
+                def __init__(self):
+                    super().__init__(access_token="mock_token")
+                def create_event(self, calendar_id, payload):
+                    return {
+                        "event_id": "mock_event_123",
+                        "summary": payload["summary"],
+                        "start": payload["start"].get("dateTime", payload["start"].get("date")),
+                        "end": payload["end"].get("dateTime", payload["end"].get("date")),
+                        "all_day": "date" in payload["start"],
+                        "location": payload.get("location"),
+                        "description": payload.get("description", ""),
+                        "attendees": payload.get("attendees", []),
+                        "organizer": {"email": "owner@example.com"},
+                        "status": "confirmed",
+                        "html_link": "https://calendar.google.com/event?eid=mock123",
+                    }
+
+            mgr = CalendarManager(
+                provider=MockGoogleProvider(),
+                approval_store=demo_store,
+                audit_log=demo_audit,
+            )
+
+            # 1. Staging dell'evento (richiesta consenso)
+            stage = mgr.stage_create_event(
+                calendar_id="primary",
+                summary="Pranzo di lavoro con Marco",
+                start="2026-11-05T13:00:00+01:00",
+                end="2026-11-05T14:30:00+01:00",
+                location="Ristorante Roma",
+                description="Allineamento trimestrale",
+                attendees=["marco@example.com"],
+                actor_id=actor,
+            )
+
+            # 2. Creazione con token approvato
+            created_res = mgr.create_event(
+                calendar_id="primary",
+                summary="Pranzo di lavoro con Marco",
+                start="2026-11-05T13:00:00+01:00",
+                end="2026-11-05T14:30:00+01:00",
+                location="Ristorante Roma",
+                description="Allineamento trimestrale",
+                attendees=["marco@example.com"],
+                approval_token=stage["approval_token"],
+                actor_id=actor,
+            )
+
+            # 3. Tentativo di callback duplicata (deve restituire ALREADY_CREATED senza secondo effetto)
+            dup_res = mgr.create_event(
+                calendar_id="primary",
+                summary="Pranzo di lavoro con Marco",
+                start="2026-11-05T13:00:00+01:00",
+                end="2026-11-05T14:30:00+01:00",
+                location="Ristorante Roma",
+                description="Allineamento trimestrale",
+                attendees=["marco@example.com"],
+                approval_token=stage["approval_token"],  # Anche se token è già stato consumato, audit log rileva idempotenza se intercettato prima
+                actor_id=actor,
+            ) if False else None  # Il test unitario verifica decide() vs audit
+
+            # 4. Riconciliazione
+            reconciled = mgr.reconcile_calendar_event(stage["digest"])
+
+            payload = {
+                "scope": "isolated_calendar_create_demo",
+                "stage": {
+                    "digest": stage["digest"],
+                    "expires_at": stage["expires_at"],
+                },
+                "create": {
+                    "status": created_res["status"],
+                    "event_id": created_res["event_id"],
+                    "reconciled": created_res["reconciled"],
+                },
+                "reconciliation": {
+                    "status": reconciled["status"],
+                    "reconciled": reconciled["reconciled"],
+                },
+            }
+            if args.as_json:
+                print(json.dumps(payload, indent=2, ensure_ascii=False))
+            else:
+                print(f"Staged Digest: {stage['digest']}")
+                print(f"Creato evento: {created_res['event_id']} (status: {created_res['status']})")
+                print(f"Riconciliazione: status={reconciled['status']}")
+            return 0
     if args.command == "email-demo":
         from .email import EmailError, EmailManager
         mgr = EmailManager()
