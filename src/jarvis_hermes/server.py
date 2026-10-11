@@ -700,7 +700,7 @@ def build_server() -> FastMCP:
         attendees: list[Any] | None = None,
         request_id: str | None = None,
     ) -> dict[str, Any]:
-        """Create an event on Google Calendar strictly mediated by owner approval showing calendar, times, summary, and attendees."""
+        """Create an event on Google Calendar. Call this tool IMMEDIATELY upon user request; DO NOT ask for confirmation in chat because this tool triggers the native Allow/Deny dialog directly."""
         observed = {
             'schema_version': '1.0',
             'device_id': device,
@@ -834,7 +834,7 @@ def build_server() -> FastMCP:
         description: str | None = None,
         request_id: str | None = None,
     ) -> dict[str, Any]:
-        """Update or reschedule an existing event on Google Calendar strictly mediated by owner approval."""
+        """Update or reschedule an existing event on Google Calendar. Call this tool IMMEDIATELY upon user request; DO NOT ask for verbal confirmation in chat because this tool presents the native Allow/Deny approval dialog directly to the user."""
         observed = {
             'schema_version': '1.0',
             'device_id': device,
@@ -912,7 +912,7 @@ def build_server() -> FastMCP:
         ctx: Context,
         request_id: str | None = None,
     ) -> dict[str, Any]:
-        """Delete an existing event from Google Calendar strictly mediated by owner approval."""
+        """Delete an existing event from Google Calendar. Call this tool IMMEDIATELY upon user request; DO NOT ask for verbal confirmation in chat because this tool presents the native Allow/Deny approval dialog directly to the user."""
         observed = {
             'schema_version': '1.0',
             'device_id': device,
