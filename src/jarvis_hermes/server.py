@@ -647,7 +647,7 @@ def build_server() -> FastMCP:
         cabin_class: str = "economy",
         request_id: str | None = None,
     ) -> dict[str, Any]:
-        """Search flight offers using configured live travel provider (Duffel or Amadeus) with normalized schema."""
+        """Search flight offers using the configured travel provider (SerpApi or Duffel) with normalized schema."""
         def _do_search() -> dict[str, Any]:
             return travel_manager.search_flights({
                 "origin": origin,
@@ -658,6 +658,35 @@ def build_server() -> FastMCP:
                 "cabin_class": cabin_class,
             })
         return respond(_do_search, request_id)
+
+    @server.tool(annotations=readonly)
+    def search_flexible_flights(
+        origin: str,
+        destination: str,
+        departure_date: str,
+        passengers: int,
+        return_date: str | None = None,
+        cabin_class: str = "economy",
+        departure_window: int = 5,
+        stay_extra: int = 3,
+        max_searches: int = 20,
+        request_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Search flights on flexible dates with provider cache and search budget (J14/D12). Reports effective coverage."""
+        def _do_flex() -> dict[str, Any]:
+            from .travel import search_flexible_flights as _flex
+            return _flex({
+                "origin": origin,
+                "destination": destination,
+                "departure_date": departure_date,
+                "passengers": passengers,
+                "return_date": return_date,
+                "cabin_class": cabin_class,
+                "departure_window": departure_window,
+                "stay_extra": stay_extra,
+                "max_searches": max_searches,
+            })
+        return respond(_do_flex, request_id)
 
     @server.tool(annotations=readonly)
     def calendar_search(calendar_id: str = 'primary', q: str | None = None,

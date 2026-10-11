@@ -56,6 +56,16 @@ def main() -> int:
     travel_demo.add_argument("--date", default="2026-11-15", help="Departure date (YYYY-MM-DD)")
     travel_demo.add_argument("--passengers", type=int, default=1, help="Number of passengers")
     travel_demo.add_argument("--json", action="store_true", dest="as_json")
+    flex_demo = sub.add_parser("travel-flex-demo", help="Run a flexible-date travel search demo with cache and budget (J14/D12)")
+    flex_demo.add_argument("--origin", default="FCO", help="Origin IATA code")
+    flex_demo.add_argument("--destination", default="DPS", help="Destination IATA code")
+    flex_demo.add_argument("--date", default="2026-10-10", help="Base departure date (YYYY-MM-DD)")
+    flex_demo.add_argument("--return-date", default="2026-10-20", help="Base return date (YYYY-MM-DD)")
+    flex_demo.add_argument("--passengers", type=int, default=1, help="Number of passengers")
+    flex_demo.add_argument("--window", type=int, default=5, help="Departure shift window in days")
+    flex_demo.add_argument("--stay-extra", type=int, default=3, help="Max extra stay days")
+    flex_demo.add_argument("--max-searches", type=int, default=20, help="Max provider calls")
+    flex_demo.add_argument("--json", action="store_true", dest="as_json")
     calendar_demo = sub.add_parser("calendar-demo", help="Run an isolated Google Calendar read + local draft demo (no event created)")
     calendar_demo.add_argument("--query", default="", help="Free text search")
     calendar_demo.add_argument("--json", action="store_true", dest="as_json")
@@ -652,6 +662,38 @@ def main() -> int:
                     print(f"  - Offerta {off['offer_id']}: {off['total_amount']} {off['currency']} (per pax: {off['price_per_passenger']})")
                     for s in off["slices"]:
                         print(f"    Tratta {s['origin']} -> {s['destination']} ({s['duration']}), scali: {s['stops_count']}")
+        except TravelError as exc:
+            payload = {"error": {"code": exc.code, "message": exc.message, "retryable": exc.retryable}}
+            if args.as_json:
+                print(json.dumps(payload, indent=2, ensure_ascii=False))
+            else:
+                print(f"[{exc.code}] {exc.message}")
+            return 1
+        return 0
+    if args.command == "travel-flex-demo":
+        from .travel import TravelError, search_flexible_flights
+        try:
+            res = search_flexible_flights({
+                "origin": args.origin,
+                "destination": args.destination,
+                "departure_date": args.date,
+                "return_date": args.return_date,
+                "passengers": args.passengers,
+                "departure_window": args.window,
+                "stay_extra": args.stay_extra,
+                "max_searches": args.max_searches,
+            })
+            if args.as_json:
+                print(json.dumps(res, indent=2, ensure_ascii=False))
+            else:
+                cov = res["coverage"]
+                print(f"Provider: {res['provider']} | Offerte: {res['offers_count']} (scartate: {res['discarded_count']})")
+                print(f"Copertura: live={cov['searched_live']} cache={cov['from_cache']} scadute={cov['cache_expired']} su {cov['planned']} pianificate (valide: {cov['valid_combinations']})")
+                if cov["partial"]:
+                    print(f"Parziale: {cov['partial_reason']}")
+                for off in res["offers"]:
+                    qd = off.get("query_dates", {})
+                    print(f"  - {off['total_amount']} {off['currency']} {qd.get('departure_date')} -> {qd.get('return_date')} (id {off['offer_id']})")
         except TravelError as exc:
             payload = {"error": {"code": exc.code, "message": exc.message, "retryable": exc.retryable}}
             if args.as_json:
