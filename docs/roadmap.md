@@ -1,46 +1,48 @@
 # Roadmap JARVIS V1
 
-30 issue pubblicate da `to-tickets`, dopo approvazione dell’utente. Questo indice non duplica lo stato corrente: leggere le issue su GitHub.
+Issue pubblicate da `to-tickets`, dopo approvazione dell’utente. Questo indice riflette lo stato architetturale e la tracciabilità delle capacità. Consultare GitHub Issues per lo stato di assegnazione live (`gh issue list`).
 
-La label `ready-for-agent` indica task revisionato; iniziare soltanto quando i blocker sono conclusi. Dipendenze in testo nelle issue, perché il connettore disponibile non espone relazioni native di blocco.
+La label `ready-for-agent` indica task revisionato.
+Gran parte dei componenti cardine dell'Onda 1 e dell'Onda 2 (MCP, approvazioni monouso, workflow di progetto, git push con elicitation, GUI Windows, web scraping/form, vault/memoria, routing e Jev pre-turn, Telegram voice STT, calendar, email, travel e reminder) risultano implementati ed integrati su `main` con test completi.
 
-Subito avviabili: #1 (diagnostica, parzialmente predisposta) e #20 (verifica provider travel). La prova completa sul PC non è stata eseguita; nessuna issue è stata chiusa automaticamente.
+Per il catalogo completo e aggiornato dei 50 tool disponibili e le rispettive politiche di conferma, fare riferimento a **[`docs/tools-inventory.md`](tools-inventory.md)**.
 
-| Task | Issue | Bloccato da |
-|---|---|---|
-| JARVIS-01 | [Diagnostica locale riproducibile](https://github.com/nuno80/Jarvis-hermes/issues/1) | Nessuno |
-| JARVIS-02 | [Stato disco da Telegram attraverso MCP](https://github.com/nuno80/Jarvis-hermes/issues/2) | [#1](https://github.com/nuno80/Jarvis-hermes/issues/1) |
-| JARVIS-03 | [Conferma monouso di una azione simulata](https://github.com/nuno80/Jarvis-hermes/issues/3) | [#2](https://github.com/nuno80/Jarvis-hermes/issues/2) |
-| JARVIS-04 | [Consultare e annullare un lavoro lungo](https://github.com/nuno80/Jarvis-hermes/issues/4) | [#3](https://github.com/nuno80/Jarvis-hermes/issues/3) |
-| JARVIS-05 | [Leggere log e progetti Windows o WSL](https://github.com/nuno80/Jarvis-hermes/issues/5) | [#2](https://github.com/nuno80/Jarvis-hermes/issues/2) |
-| JARVIS-06 | [Modificare e ripristinare un file senza perdere lavoro](https://github.com/nuno80/Jarvis-hermes/issues/6) | [#3](https://github.com/nuno80/Jarvis-hermes/issues/3), [#5](https://github.com/nuno80/Jarvis-hermes/issues/5) |
-| JARVIS-07 | [Eseguire un workflow di progetto e creare un commit](https://github.com/nuno80/Jarvis-hermes/issues/7) | [#4](https://github.com/nuno80/Jarvis-hermes/issues/4), [#6](https://github.com/nuno80/Jarvis-hermes/issues/6) |
-| JARVIS-08 | [Push del commit esatto approvato da telefono](https://github.com/nuno80/Jarvis-hermes/issues/8) | [#7](https://github.com/nuno80/Jarvis-hermes/issues/7) |
-| JARVIS-09 | [Comando amministrativo avanzato con policy sugli effetti](https://github.com/nuno80/Jarvis-hermes/issues/9) | [#4](https://github.com/nuno80/Jarvis-hermes/issues/4), [#6](https://github.com/nuno80/Jarvis-hermes/issues/6) |
-| JARVIS-10 | [Usare una applicazione Windows tramite GUI](https://github.com/nuno80/Jarvis-hermes/issues/10) | [#3](https://github.com/nuno80/Jarvis-hermes/issues/3), [#5](https://github.com/nuno80/Jarvis-hermes/issues/5) |
-| JARVIS-11 | [Interagire con una pagina web con consenso sugli invii](https://github.com/nuno80/Jarvis-hermes/issues/11) | [#3](https://github.com/nuno80/Jarvis-hermes/issues/3) |
-| JARVIS-12 | [Cercare e leggere note nel vault configurato](https://github.com/nuno80/Jarvis-hermes/issues/12) | [#2](https://github.com/nuno80/Jarvis-hermes/issues/2) |
-| JARVIS-13 | [Applicare subito una preferenza esplicita modificata](https://github.com/nuno80/Jarvis-hermes/issues/13) | [#12](https://github.com/nuno80/Jarvis-hermes/issues/12) |
-| JARVIS-14 | [Imparare e correggere una memoria con evidenza](https://github.com/nuno80/Jarvis-hermes/issues/14) | [#6](https://github.com/nuno80/Jarvis-hermes/issues/6), [#13](https://github.com/nuno80/Jarvis-hermes/issues/13) |
-| JARVIS-15 | [Usare Gemini configurato e registrare consumo per job](https://github.com/nuno80/Jarvis-hermes/issues/15) | [#2](https://github.com/nuno80/Jarvis-hermes/issues/2) |
-| JARVIS-16 | [Instradare con Jev e fallback conservativo](https://github.com/nuno80/Jarvis-hermes/issues/16) | [#15](https://github.com/nuno80/Jarvis-hermes/issues/15) |
-| JARVIS-17 | [Eseguire un task semplice su modello locale](https://github.com/nuno80/Jarvis-hermes/issues/17) | [#15](https://github.com/nuno80/Jarvis-hermes/issues/15) |
-| JARVIS-18 | [Inviare un vocale Telegram e ottenere il risultato](https://github.com/nuno80/Jarvis-hermes/issues/18) | [#15](https://github.com/nuno80/Jarvis-hermes/issues/15) |
-| JARVIS-19 | [Rispondere a una ricerca web con fonti verificabili](https://github.com/nuno80/Jarvis-hermes/issues/19) | [#15](https://github.com/nuno80/Jarvis-hermes/issues/15) |
-| JARVIS-20 | [Validare un provider travel con una offerta live](https://github.com/nuno80/Jarvis-hermes/issues/20) | Nessuno |
-| JARVIS-21 | [Cercare date flessibili con budget e cache](https://github.com/nuno80/Jarvis-hermes/issues/21) | [#4](https://github.com/nuno80/Jarvis-hermes/issues/4), [#13](https://github.com/nuno80/Jarvis-hermes/issues/13), [#20](https://github.com/nuno80/Jarvis-hermes/issues/20) |
-| JARVIS-22 | [Confrontare offerte e spiegare le alternative](https://github.com/nuno80/Jarvis-hermes/issues/22) | [#15](https://github.com/nuno80/Jarvis-hermes/issues/15), [#21](https://github.com/nuno80/Jarvis-hermes/issues/21) |
-| JARVIS-23 | [Leggere agenda e preparare un evento](https://github.com/nuno80/Jarvis-hermes/issues/23) | [#2](https://github.com/nuno80/Jarvis-hermes/issues/2) |
-| JARVIS-24 | [Creare un evento approvato senza duplicati](https://github.com/nuno80/Jarvis-hermes/issues/24) | [#3](https://github.com/nuno80/Jarvis-hermes/issues/3), [#4](https://github.com/nuno80/Jarvis-hermes/issues/4), [#23](https://github.com/nuno80/Jarvis-hermes/issues/23) |
-| JARVIS-25 | [Leggere email e preparare una risposta](https://github.com/nuno80/Jarvis-hermes/issues/25) | [#2](https://github.com/nuno80/Jarvis-hermes/issues/2) |
-| JARVIS-26 | [Inviare la risposta email approvata](https://github.com/nuno80/Jarvis-hermes/issues/26) | [#3](https://github.com/nuno80/Jarvis-hermes/issues/3), [#4](https://github.com/nuno80/Jarvis-hermes/issues/4), [#25](https://github.com/nuno80/Jarvis-hermes/issues/25) |
-| JARVIS-27 | [Consegnare un reminder esplicito dopo un riavvio](https://github.com/nuno80/Jarvis-hermes/issues/27) | [#4](https://github.com/nuno80/Jarvis-hermes/issues/4) |
-| JARVIS-28 | [Ripartire automaticamente e verificare lo stato del nodo](https://github.com/nuno80/Jarvis-hermes/issues/28) | [#4](https://github.com/nuno80/Jarvis-hermes/issues/4), [#9](https://github.com/nuno80/Jarvis-hermes/issues/9), [#10](https://github.com/nuno80/Jarvis-hermes/issues/10) |
-| JARVIS-29 | [Ripristinare dati operativi e vault da backup](https://github.com/nuno80/Jarvis-hermes/issues/29) | [#4](https://github.com/nuno80/Jarvis-hermes/issues/4), [#14](https://github.com/nuno80/Jarvis-hermes/issues/14) |
-| JARVIS-30 | [Verificare il rilascio V1 completo](https://github.com/nuno80/Jarvis-hermes/issues/30) | [#8](https://github.com/nuno80/Jarvis-hermes/issues/8), [#11](https://github.com/nuno80/Jarvis-hermes/issues/11), [#14](https://github.com/nuno80/Jarvis-hermes/issues/14), [#16](https://github.com/nuno80/Jarvis-hermes/issues/16), [#17](https://github.com/nuno80/Jarvis-hermes/issues/17), [#18](https://github.com/nuno80/Jarvis-hermes/issues/18), [#19](https://github.com/nuno80/Jarvis-hermes/issues/19), [#22](https://github.com/nuno80/Jarvis-hermes/issues/22), [#24](https://github.com/nuno80/Jarvis-hermes/issues/24), [#26](https://github.com/nuno80/Jarvis-hermes/issues/26), [#27](https://github.com/nuno80/Jarvis-hermes/issues/27), [#28](https://github.com/nuno80/Jarvis-hermes/issues/28), [#29](https://github.com/nuno80/Jarvis-hermes/issues/29) |
-| JARVIS-31 | [Installare, configurare ed iniettare Jev in Hermes](https://github.com/nuno80/Jarvis-hermes/issues/31) | [#16](https://github.com/nuno80/Jarvis-hermes/issues/16), [#17](https://github.com/nuno80/Jarvis-hermes/issues/17) |
-| JARVIS-35 | [run_command senza shell=True e scritture confinate](https://github.com/nuno80/Jarvis-hermes/issues/37) | Nessuno |
-| JARVIS-37 | [Punti di estensione Hermes e pre-turn injection](https://github.com/nuno80/Jarvis-hermes/issues/35) | Nessuno |
+| Task | Issue | Bloccato da | Stato Implementativo Core |
+|---|---|---|---|
+| JARVIS-01 | [Diagnostica locale riproducibile](https://github.com/nuno80/Jarvis-hermes/issues/1) | Nessuno | Implementato & Testato |
+| JARVIS-02 | [Stato disco da Telegram attraverso MCP](https://github.com/nuno80/Jarvis-hermes/issues/2) | [#1](https://github.com/nuno80/Jarvis-hermes/issues/1) | Implementato & Testato |
+| JARVIS-03 | [Conferma monouso di una azione simulata](https://github.com/nuno80/Jarvis-hermes/issues/3) | [#2](https://github.com/nuno80/Jarvis-hermes/issues/2) | Implementato & Testato (ApprovalStore / Elicitation) |
+| JARVIS-04 | [Consultare e annullare un lavoro lungo](https://github.com/nuno80/Jarvis-hermes/issues/4) | [#3](https://github.com/nuno80/Jarvis-hermes/issues/3) | Implementato & Testato (`job_status`, `job_cancel`) |
+| JARVIS-05 | [Leggere log e progetti Windows o WSL](https://github.com/nuno80/Jarvis-hermes/issues/5) | [#2](https://github.com/nuno80/Jarvis-hermes/issues/2) | Implementato & Testato (`read_project_file`) |
+| JARVIS-06 | [Modificare e ripristinare un file senza perdere lavoro](https://github.com/nuno80/Jarvis-hermes/issues/6) | [#3](https://github.com/nuno80/Jarvis-hermes/issues/3), [#5](https://github.com/nuno80/Jarvis-hermes/issues/5) | Implementato & Testato (`write_project_file`, `restore_checkpoint`) |
+| JARVIS-07 | [Eseguire un workflow di progetto e creare un commit](https://github.com/nuno80/Jarvis-hermes/issues/7) | [#4](https://github.com/nuno80/Jarvis-hermes/issues/4), [#6](https://github.com/nuno80/Jarvis-hermes/issues/6) | Implementato & Testato (`run_project_workflow`, `commit_project_changes`) |
+| JARVIS-08 | [Push del commit esatto approvato da telefono](https://github.com/nuno80/Jarvis-hermes/issues/8) | [#7](https://github.com/nuno80/Jarvis-hermes/issues/7) | Implementato & Testato (`git_push` con elicitation) |
+| JARVIS-09 | [Comando amministrativo avanzato con policy sugli effetti](https://github.com/nuno80/Jarvis-hermes/issues/9) | [#4](https://github.com/nuno80/Jarvis-hermes/issues/4), [#6](https://github.com/nuno80/Jarvis-hermes/issues/6) | Implementato & Testato (`run_command` deterministic policy) |
+| JARVIS-10 | [Usare una applicazione Windows tramite GUI](https://github.com/nuno80/Jarvis-hermes/issues/10) | [#3](https://github.com/nuno80/Jarvis-hermes/issues/3), [#5](https://github.com/nuno80/Jarvis-hermes/issues/5) | Implementato & Testato (`gui_status`, `execute_gui_action`) |
+| JARVIS-11 | [Interagire con una pagina web con consenso sugli invii](https://github.com/nuno80/Jarvis-hermes/issues/11) | [#3](https://github.com/nuno80/Jarvis-hermes/issues/3) | Implementato & Testato (`read_web_page`, `submit_web_form`) |
+| JARVIS-12 | [Cercare e leggere note nel vault configurato](https://github.com/nuno80/Jarvis-hermes/issues/12) | [#2](https://github.com/nuno80/Jarvis-hermes/issues/2) | Implementato & Testato (`search_notes`, `read_note`) |
+| JARVIS-13 | [Applicare subito una preferenza esplicita modificata](https://github.com/nuno80/Jarvis-hermes/issues/13) | [#12](https://github.com/nuno80/Jarvis-hermes/issues/12) | Implementato & Testato (`update_preference`, `get_profile`) |
+| JARVIS-14 | [Imparare e correggere una memoria con evidenza](https://github.com/nuno80/Jarvis-hermes/issues/14) | [#6](https://github.com/nuno80/Jarvis-hermes/issues/6), [#13](https://github.com/nuno80/Jarvis-hermes/issues/13) | Implementato & Testato (`propose_memory`, `forget_memory`) |
+| JARVIS-15 | [Usare Gemini configurato e registrare consumo per job](https://github.com/nuno80/Jarvis-hermes/issues/15) | [#2](https://github.com/nuno80/Jarvis-hermes/issues/2) | Implementato & Testato (`ask_gemini`, `get_job_budget_usage`) |
+| JARVIS-16 | [Instradare con Jev e fallback conservativo](https://github.com/nuno80/Jarvis-hermes/issues/16) | [#15](https://github.com/nuno80/Jarvis-hermes/issues/15) | Implementato & Testato (`router.py`, `route_request`) |
+| JARVIS-17 | [Eseguire un task semplice su modello locale](https://github.com/nuno80/Jarvis-hermes/issues/17) | [#15](https://github.com/nuno80/Jarvis-hermes/issues/15) | Implementato & Testato (System 1 Ollama/Fast path) |
+| JARVIS-18 | [Inviare un vocale Telegram e ottenere il risultato](https://github.com/nuno80/Jarvis-hermes/issues/18) | [#15](https://github.com/nuno80/Jarvis-hermes/issues/15) | Implementato & Testato (`transcribe_voice_message`, Groq STT) |
+| JARVIS-19 | [Rispondere a una ricerca web con fonti verificabili](https://github.com/nuno80/Jarvis-hermes/issues/19) | [#15](https://github.com/nuno80/Jarvis-hermes/issues/15) | Implementato & Testato (`web_search`, `fetch_page`) |
+| JARVIS-20 | [Validare un provider travel con una offerta live](https://github.com/nuno80/Jarvis-hermes/issues/20) | Nessuno | Implementato & Testato (Duffel / SerpApi manager) |
+| JARVIS-21 | [Cercare date flessibili con budget e cache](https://github.com/nuno80/Jarvis-hermes/issues/21) | [#4](https://github.com/nuno80/Jarvis-hermes/issues/4), [#13](https://github.com/nuno80/Jarvis-hermes/issues/13), [#20](https://github.com/nuno80/Jarvis-hermes/issues/20) | Implementato & Testato (`search_flexible_flights`) |
+| JARVIS-22 | [Confrontare offerte e spiegare le alternative](https://github.com/nuno80/Jarvis-hermes/issues/22) | [#15](https://github.com/nuno80/Jarvis-hermes/issues/15), [#21](https://github.com/nuno80/Jarvis-hermes/issues/21) | In corso / pronto per finalizzazione |
+| JARVIS-23 | [Leggere agenda e preparare un evento](https://github.com/nuno80/Jarvis-hermes/issues/23) | [#2](https://github.com/nuno80/Jarvis-hermes/issues/2) | Implementato & Testato (`calendar_search`, `draft_calendar_event`) |
+| JARVIS-24 | [Creare un evento approvato senza duplicati](https://github.com/nuno80/Jarvis-hermes/issues/24) | [#3](https://github.com/nuno80/Jarvis-hermes/issues/3), [#4](https://github.com/nuno80/Jarvis-hermes/issues/4), [#23](https://github.com/nuno80/Jarvis-hermes/issues/23) | Implementato & Testato (`calendar_create_event`, dedup & audit) |
+| JARVIS-25 | [Leggere email e preparare una risposta](https://github.com/nuno80/Jarvis-hermes/issues/25) | [#2](https://github.com/nuno80/Jarvis-hermes/issues/2) | Implementato & Testato (`email_search`, `email_read`, `draft_email_reply`) |
+| JARVIS-26 | [Inviare la risposta email approvata](https://github.com/nuno80/Jarvis-hermes/issues/26) | [#3](https://github.com/nuno80/Jarvis-hermes/issues/3), [#4](https://github.com/nuno80/Jarvis-hermes/issues/4), [#25](https://github.com/nuno80/Jarvis-hermes/issues/25) | Implementato & Testato (`email_send`, `reconcile_email`) |
+| JARVIS-27 | [Consegnare un reminder esplicito dopo un riavvio](https://github.com/nuno80/Jarvis-hermes/issues/27) | [#4](https://github.com/nuno80/Jarvis-hermes/issues/4) | Implementato & Testato (`create_reminder`, `list_reminders`, `cancel_reminder`) |
+| JARVIS-28 | [Ripartire automaticamente e verificare lo stato del nodo](https://github.com/nuno80/Jarvis-hermes/issues/28) | [#4](https://github.com/nuno80/Jarvis-hermes/issues/4), [#9](https://github.com/nuno80/Jarvis-hermes/issues/9), [#10](https://github.com/nuno80/Jarvis-hermes/issues/10) | In corso |
+| JARVIS-29 | [Ripristinare dati operativi e vault da backup](https://github.com/nuno80/Jarvis-hermes/issues/29) | [#4](https://github.com/nuno80/Jarvis-hermes/issues/4), [#14](https://github.com/nuno80/Jarvis-hermes/issues/14) | In corso |
+| JARVIS-30 | [Verificare il rilascio V1 completo](https://github.com/nuno80/Jarvis-hermes/issues/30) | [Tutti i task precedenti] | Traguardo finale |
+| JARVIS-31 | [Installare, configurare ed iniettare Jev in Hermes](https://github.com/nuno80/Jarvis-hermes/issues/31) | [#16](https://github.com/nuno80/Jarvis-hermes/issues/16), [#17](https://github.com/nuno80/Jarvis-hermes/issues/17) | Implementato & Testato |
+| JARVIS-35 | [run_command senza shell=True e scritture confinate](https://github.com/nuno80/Jarvis-hermes/issues/37) | Nessuno | Implementato & Testato |
+| JARVIS-37 | [Punti di estensione Hermes e pre-turn injection](https://github.com/nuno80/Jarvis-hermes/issues/35) | Nessuno | Implementato & Testato |
+| JARVIS-39 | [Allineamento documentazione e inventario tool](https://github.com/nuno80/Jarvis-hermes/issues/39) | Nessuno | In completamento |
 
 ## Sequenza utile
 

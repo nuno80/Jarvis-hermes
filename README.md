@@ -2,16 +2,17 @@
 
 Assistente personale MCP-first basato su Hermes, controllabile da Telegram, con memoria Obsidian e strumenti per Windows/WSL, sviluppo e viaggi.
 
-**Stato:** disponibili documentazione, issue, diagnostica e un server MCP con quattro tool in sola lettura più la conferma monouso di un effetto simulato. La causa della prova Telegram negativa è stata accertata: la stessa azione era stata confermata più volte, non aggirata; il conteggio degli effetti è ora per decisione. Il tool resta limitato a effetti simulati e non va collegato a effetti esterni reali.
+**Stato:** server MCP integrato con **50 tool registrati** (ispezione sistema, gestione file/checkpoint, workflow e commit atomici, push autorizzato, automazione GUI Windows, navigazione web protetta, vault/preferenze Obsidian, Gemini/routing LLM, vocale Telegram con Groq STT, Google Calendar, Yahoo IMAP/SMTP, ricerca voli e reminder persistenti). Suite automatizzata con oltre **340 test** unitari e di integrazione MCP. I tool con effetti collaterali reali sono rigorosamente vincolati a gate di approvazione esplicita (MCP elicitation Telegram) e a policy di confinamento deterministiche lato server.
 
-Bot esistente da riutilizzare: **@nuno_agent_bot**. La presenza del bot è confermata dall'utente; connessione al gateway e host devono ancora essere verificati.
+Bot Telegram collegato: **@nuno_agent_bot**.
 
 ## Documenti
 
 - [Specifica V1](docs/specs/jarvis-v1.md)
-- [Server MCP e collegamento locale](docs/mcp-readonly.md)
-- [Confine delle conferme simulate](docs/adr/0004-simulated-approval-gate.md)
-- [Roadmap e 30 issue](docs/roadmap.md)
+- [Inventario Completo Tool MCP (50 tool)](docs/tools-inventory.md)
+- [Server MCP: contratti iniziali e confini](docs/mcp-readonly.md)
+- [Guida alla configurazione](config/README.md)
+- [Roadmap e avanzamento issue](docs/roadmap.md)
 - [Cosa verificare al ritorno al PC](docs/return-to-pc.md)
 - [Decisioni architetturali](docs/adr/)
 - [Glossario](CONTEXT.md)
@@ -42,6 +43,12 @@ Le skill si installano nell'agente locale secondo il catalogo mattpocock/skills;
 
 Nessuna issue host-dependent va chiusa senza prova sul dispositivo reale. Le prove cloud della CLI non validano GUI, GPU, gateway esistente o accesso al vault dell'utente.
 
-## Incremento MCP
+## Incremento e Architettura MCP
 
-`uv run jarvis serve` espone quattro tool in sola lettura (stato macchina, spazio disco, ricerca e lettura note) e `simulate_with_approval`, che registra soltanto effetti simulati dopo una conferma monouso. Configurare il percorso del vault nel processo che lo avvia; i test usano solo directory temporanee. Nessuna nota del vault personale è stata letta o modificata. Vedere [contratti e limiti](docs/mcp-readonly.md).
+`uv run jarvis serve` avvia il server FastMCP esponendo 50 strumenti tipizzati per Hermes e il client MCP.
+L'architettura segue il principio del *fail-closed* e della separazione dei poteri:
+- **Operazioni di sola lettura / bozza**: operano senza mutazioni, trattando tutti i contenuti esterni (note, pagine web, email, output di ricerca) come dati grezzi non fidati (`untrusted_content`).
+- **Operazioni mutative protette**: modifiche a file di progetto (`write_project_file`, `restore_checkpoint`) sono vincolate a snapshot creati con `create_checkpoint`.
+- **Operazioni ad alto impatto / esterne**: comandi distruttivi (`run_command`), invio email (`email_send`), modifiche calendario (`calendar_create_event`, `calendar_update_event`, `calendar_delete_event`), compilazione form (`submit_web_form`) e push Git (`git_push`) richiedono immancabilmente approvazione monouso tramite MCP elicitation inoltrata su Telegram all'utente autorizzato (`JARVIS_APPROVER_ID`), vincolata al digest esatto dei parametri.
+
+Vedere [l'inventario completo dei tool](docs/tools-inventory.md) e i [contratti e limiti](docs/mcp-readonly.md).
