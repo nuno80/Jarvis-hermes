@@ -20,5 +20,9 @@ jobs:
           python-version: '3.12'
       - run: python -m pip install uv==0.8.22
       - run: uv sync --locked
+      - name: Syntax and compile check
+        run: uv run python -m py_compile src/jarvis_hermes/*.py tests/*.py scripts/*.py
+      - name: Test inventory tools script
+        run: uv run ./scripts/inventory_tools.py
       - run: uv run python -m unittest discover -s tests -v
       - run: uv run jarvis doctor --json

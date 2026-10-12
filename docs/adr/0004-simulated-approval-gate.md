@@ -45,3 +45,18 @@ Due chiamate reali identiche (`target=prova-rifiuto`, `arguments={"nota":"test d
 Il digest è identico (`6f4669187f74…`) in entrambe le risposte, a conferma che la seconda chiamata era davvero la stessa richiesta. Il registro contiene una sola riga con quel target; lo stato delle richieste è 5 `executed`, 1 `cancelled`, nessuna `pending`. Il log del gateway registra `choice=deny` per la prima volta in tutto il suo storico (una occorrenza), a riprova che il rifiuto non era mai stato premuto prima della diagnosi.
 
 Questa prova copre il criterio che era rimasto aperto nella issue: il rifiuto reale annulla l'azione senza registrare alcun effetto, e l'accettazione reale registra un solo effetto descritto dalla propria decisione.
+
+## Riconciliazione dello storico e transizione a effetti reali
+
+In origine (Issue #3), `simulate_with_approval` è stato introdotto come prototipo di sicurezza per validare l'elicitation di Hermes su Telegram prima di collegare qualsiasi mutazione reale al computer dell'utente. Lo storico mostrava due interpretazioni contrastanti:
+1. Chi considerava il gate imperfetto a causa del tap multiplo dell'utente sui messaggi Telegram.
+2. Chi considerava il gate funzionante perché lato server l'atomicità di `ApprovalStore` (token monouso, digest crittografico dei parametri, consumazione atomica della transazione) è invariata e matematicamente garantita.
+
+La riconciliazione architetturale adottata per tutte le issue successive (J06/J07/J11/J16/J24/J26) è la seguente:
+- **`simulate_with_approval`** resta un tool di diagnostica/test per validare la connettività di elicitation senza impatto.
+- **Tutti i tool ad effetto reale** (`git_push`, `submit_web_form`, `email_send`, `calendar_create_event`, `calendar_update_event`, `calendar_delete_event`, `run_command` per comandi con privilegi/distruttivi):
+  1. Calcolano deterministicamente il digest SHA-256 dei parametri esatti.
+  2. Invocano l'elicitation su Telegram mostrando target, digest e parametri human-readable.
+  3. Al tap `Allow Once`, consumano il consenso atomicamente per quell'esatto digest e registrano l'audit log (es. `email_audit.sqlite3`, `approvals.sqlite3`).
+  4. Al tap `Deny` o timeout, falliscono *closed* (`APPROVAL_DECLINED`, `APPROVAL_EXPIRED`) senza toccare la rete o il disco.
+  5. In caso di interruzioni di rete a metà operazione, non effettuano retry ciechi ma registrano `OUTCOME_UNKNOWN` per successiva riconciliazione esplicita (`reconcile_email`, `reconcile_calendar_event`).
