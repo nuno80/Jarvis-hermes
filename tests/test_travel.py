@@ -427,6 +427,23 @@ class ValidationStrictnessTests(unittest.TestCase):
             })
         self.assertEqual(ctx.exception.code, "INVALID_CABIN_CLASS")
 
+    def test_float_passengers_rejected(self):
+        with self.assertRaises(TravelError) as ctx:
+            TravelRequest.from_params({
+                "origin": "MXP", "destination": "JFK",
+                "departure_date": "2026-11-01", "passengers": 2.5,
+            })
+        self.assertEqual(ctx.exception.code, "INVALID_PASSENGER_COUNT")
+
+    def test_cache_db_permissions(self):
+        import stat
+        import tempfile
+        from jarvis_hermes.travel import TravelCacheAndBudget
+        db_file = os.path.join(tempfile.mkdtemp(), "test_perm.sqlite3")
+        TravelCacheAndBudget(db_path=db_file)
+        mode = stat.S_IMODE(os.stat(db_file).st_mode)
+        self.assertEqual(mode, 0o600)
+
 
 class ErrorClassificationTests(unittest.TestCase):
     def test_no_credential_leak_in_http_errors(self):
@@ -552,6 +569,37 @@ class FlexibleSearchTests(unittest.TestCase):
         self.assertIn("max_searches=2", res["coverage"]["partial_reason"])
         self.assertEqual(res["coverage"]["valid_combinations"], 6)
         self.assertEqual(res["offers_count"], 2)
+        # La coppia base (distanza 0) deve essere la prima ad essere pianificata ed eseguita
+        self.assertEqual(prov.calls[0], ("2026-10-10", "2026-10-20"))
+
+    def test_plan_prioritizes_requested_dates_over_chronological(self):
+        from jarvis_hermes.travel import search_flexible_flights
+        prov = _ComboStubProvider()
+        # Con departure_window=5 e stay_extra=3 ci sono 44 combinazioni.
+        # Con max_searches=1, senza ordinamento per distanza verrebbe cercato 2026-10-05 anziché la base.
+        res = search_flexible_flights(
+            self._params(departure_window=5, stay_extra=3, max_searches=1),
+            provider=prov,
+            cache=self.cache,
+        )
+        self.assertEqual(len(prov.calls), 1)
+        self.assertEqual(prov.calls[0], ("2026-10-10", "2026-10-20"))
+
+    def test_transient_error_mid_run_keeps_collected_offers(self):
+        from jarvis_hermes.travel import TravelError, search_flexible_flights
+
+        class _TransientProvider(_ComboStubProvider):
+            def search_offers(self, request):
+                if len(self.calls) >= 1:
+                    raise TravelError("PROVIDER_UNAVAILABLE", "timeout di rete", retryable=True)
+                return super().search_offers(request)
+
+        prov = _TransientProvider()
+        res = search_flexible_flights(self._params(max_searches=3), provider=prov, cache=self.cache)
+        self.assertEqual(res["coverage"]["searched_live"], 1)
+        self.assertTrue(res["coverage"]["partial"])
+        self.assertIn("PROVIDER_UNAVAILABLE", res["coverage"]["partial_reason"])
+        self.assertEqual(res["offers_count"], 1)
 
     def test_second_run_is_full_cache_hit_no_new_calls(self):
         from jarvis_hermes.travel import search_flexible_flights
@@ -683,6 +731,18 @@ class SerpApiFallbackKeyTests(unittest.TestCase):
         with patch.dict(os.environ, env):
             prov = SerpApiProvider()
             self.assertEqual(prov.api_key_fallback, "")
+
+    def test_only_key2_promoted_to_primary(self):
+        with patch.dict(os.environ, {"SERPAPI_API_KEY": "", "SERPAPI_API_KEY2": "only-second", "TRAVEL_PROVIDER": "serpapi"}):
+            mgr = TravelManager()
+            with patch("urllib.request.urlopen") as mock_url:
+                mock_url.return_value = self._ok_response()
+                res = mgr.search_flights({
+                    "origin": "FCO", "destination": "DPS",
+                    "departure_date": "2026-11-10", "passengers": 1,
+                })
+                self.assertEqual(res["offers_count"], 1)
+                self.assertEqual(mock_url.call_count, 1)
 
     def test_fallback_on_quota_in_json_200(self):
         quota_body = MagicMock()

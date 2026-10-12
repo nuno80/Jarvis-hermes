@@ -340,9 +340,9 @@ class TravelRequest:
 
         # --- 4.4 Passeggeri: intero positivo entro il limite -----------------
         # `bool` è sottoclasse di `int` in Python: True verrebbe letto come 1.
-        # Lo escludiamo esplicitamente perché quasi sicuramente è un errore.
+        # Escludiamo float e bool per non troncare silenziosamente 2.5 a 2.
         try:
-            if isinstance(passengers_raw, bool):
+            if isinstance(passengers_raw, (bool, float)):
                 raise ValueError()
             passengers = int(passengers_raw)
             if passengers <= 0:
@@ -652,12 +652,17 @@ class SerpApiProvider:
         hl: str | None = None,
         deep_search: bool = False,
     ):
-        # Priorità: argomento esplicito, poi SERPAPI_API_KEY, poi SERPAPI_API_KEY2
-        # (secondo account gratuito, usato SOLO se il primo esaurisce la quota).
-        self.api_key = api_key or os.environ.get("SERPAPI_API_KEY", "").strip()
-        self.api_key_fallback = "" if api_key else os.environ.get("SERPAPI_API_KEY2", "").strip()
-        if self.api_key_fallback and self.api_key_fallback == self.api_key:
-            self.api_key_fallback = ""  # stessa chiave due volte: nessun fallback reale
+        # Priorità: argomento esplicito, poi SERPAPI_API_KEY, poi SERPAPI_API_KEY2.
+        # Se la primaria manca ma c'è la secondaria, la secondaria diventa primaria.
+        key1 = api_key or os.environ.get("SERPAPI_API_KEY", "").strip()
+        key2 = "" if api_key else os.environ.get("SERPAPI_API_KEY2", "").strip()
+        if not key1 and key2:
+            self.api_key = key2
+            self.api_key_fallback = ""
+        else:
+            self.api_key = key1
+            self.api_key_fallback = key2 if key2 != key1 else ""
+        self._primary_exhausted = False
 
         cur = _valid_currency(currency or os.environ.get("SERPAPI_CURRENCY") or SERPAPI_DEFAULT_CURRENCY)
         if cur is None:
@@ -720,15 +725,17 @@ class SerpApiProvider:
             self._raise_if_error_payload(raw_data)
             return raw_data
 
+        active_key = self.api_key_fallback if (self._primary_exhausted and self.api_key_fallback) else self.api_key
         try:
-            raw_data = _fetch(self.api_key)
+            raw_data = _fetch(active_key)
         except TravelError as exc:
             # Quota esaurita sulla chiave primaria -> un solo retry con la
             # chiave secondaria (se configurata e diversa). Qualunque altro
             # errore, o il fallimento anche del fallback, passa al chiamante.
             # NB: mai includere le chiavi nei log/messaggi (sono nell'URL).
-            if exc.code != "PROVIDER_QUOTA_EXHAUSTED" or not self.api_key_fallback:
+            if exc.code != "PROVIDER_QUOTA_EXHAUSTED" or active_key != self.api_key or not self.api_key_fallback:
                 raise
+            self._primary_exhausted = True
             logger.warning("SerpApi: quota chiave primaria esaurita, passo alla chiave secondaria")
             raw_data = _fetch(self.api_key_fallback)
         return self.normalize_response(raw_data, request.passengers, self.currency)
@@ -1237,7 +1244,7 @@ class FlexibleTravelRequest:
         def _non_negative_int(raw: Any, name: str, default: int) -> int:
             if raw is None or (isinstance(raw, str) and not raw.strip()):
                 return default
-            if isinstance(raw, bool):
+            if isinstance(raw, (bool, float)):
                 raise_value_error = True
             else:
                 try:
@@ -1336,9 +1343,21 @@ class TravelCacheAndBudget:
             state_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
             db_path = state_dir / TRAVEL_DB_FILENAME
         self.db_path = Path(db_path)
-        self.daily_limit = int(os.environ.get("JARVIS_TRAVEL_DAILY_LIMIT", daily_limit if daily_limit is not None else DEFAULT_TRAVEL_DAILY_LIMIT))
-        self.monthly_limit = int(os.environ.get("JARVIS_TRAVEL_MONTHLY_LIMIT", monthly_limit if monthly_limit is not None else DEFAULT_TRAVEL_MONTHLY_LIMIT))
-        self.ttl_seconds = int(os.environ.get("JARVIS_TRAVEL_CACHE_TTL_SECONDS", ttl_seconds if ttl_seconds is not None else DEFAULT_TRAVEL_CACHE_TTL_SECONDS))
+        self.daily_limit = (
+            daily_limit
+            if daily_limit is not None
+            else int(os.environ.get("JARVIS_TRAVEL_DAILY_LIMIT", DEFAULT_TRAVEL_DAILY_LIMIT))
+        )
+        self.monthly_limit = (
+            monthly_limit
+            if monthly_limit is not None
+            else int(os.environ.get("JARVIS_TRAVEL_MONTHLY_LIMIT", DEFAULT_TRAVEL_MONTHLY_LIMIT))
+        )
+        self.ttl_seconds = (
+            ttl_seconds
+            if ttl_seconds is not None
+            else int(os.environ.get("JARVIS_TRAVEL_CACHE_TTL_SECONDS", DEFAULT_TRAVEL_CACHE_TTL_SECONDS))
+        )
         self._init_db()
 
     def _get_conn(self) -> sqlite3.Connection:
@@ -1349,11 +1368,15 @@ class TravelCacheAndBudget:
 
     def _init_db(self) -> None:
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
+        # Assicura permessi 0o600 prima o subito dopo la creazione del file.
         try:
+            fd = os.open(str(self.db_path), os.O_CREAT | os.O_RDWR, 0o600)
+            os.close(fd)
             self.db_path.chmod(0o600)
         except OSError:
             pass
-        with self._get_conn() as conn:
+        conn = self._get_conn()
+        try:
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS travel_usage (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1375,10 +1398,13 @@ class TravelCacheAndBudget:
                     retrieved_at_iso TEXT NOT NULL
                 )
             """)
+        finally:
+            conn.close()
 
     def get_stats(self, provider: str) -> dict[str, Any]:
         now = datetime.now(timezone.utc)
-        with self._get_conn() as conn:
+        conn = self._get_conn()
+        try:
             row_day = conn.execute(
                 "SELECT COUNT(*) as cnt FROM travel_usage WHERE provider = ? AND day_utc = ?",
                 (provider, now.strftime("%Y-%m-%d")),
@@ -1393,6 +1419,8 @@ class TravelCacheAndBudget:
                 "daily_limit": self.daily_limit,
                 "monthly_limit": self.monthly_limit,
             }
+        finally:
+            conn.close()
 
     def ensure_budget(self, provider: str, needed: int = 1) -> None:
         """Verifica il budget PRIMA di consumare (E2). Solleva se insufficiente."""
@@ -1411,21 +1439,27 @@ class TravelCacheAndBudget:
     def record_usage(self, provider: str, count: int = 1) -> None:
         now = datetime.now(timezone.utc)
         rows = [(provider, now.strftime("%Y-%m-%d"), now.strftime("%Y-%m"), now.isoformat())] * count
-        with self._get_conn() as conn:
+        conn = self._get_conn()
+        try:
             conn.executemany(
                 "INSERT INTO travel_usage (provider, day_utc, month_utc, retrieved_at) VALUES (?, ?, ?, ?)",
                 rows,
             )
+        finally:
+            conn.close()
 
     def lookup(self, cache_key: str) -> tuple[str, dict[str, Any] | None]:
         """Restituisce ("hit"|"stale"|"miss", payload). Stale = TTL scaduto."""
         if self.ttl_seconds <= 0:
             return ("miss", None)
-        with self._get_conn() as conn:
+        conn = self._get_conn()
+        try:
             row = conn.execute(
                 "SELECT results_json, created_at FROM travel_cache WHERE cache_key = ?",
                 (cache_key,),
             ).fetchone()
+        finally:
+            conn.close()
         if row is None:
             return ("miss", None)
         payload = json.loads(row["results_json"])
@@ -1436,11 +1470,14 @@ class TravelCacheAndBudget:
     def store(self, cache_key: str, provider: str, query: str, payload: dict[str, Any]) -> None:
         if self.ttl_seconds <= 0:
             return
-        with self._get_conn() as conn:
+        conn = self._get_conn()
+        try:
             conn.execute(
                 "INSERT OR REPLACE INTO travel_cache (cache_key, provider, query, results_json, created_at, retrieved_at_iso) VALUES (?, ?, ?, ?, ?, ?)",
                 (cache_key, provider, query, json.dumps(payload), time.time(), datetime.now(timezone.utc).isoformat()),
             )
+        finally:
+            conn.close()
 
 
 def search_flexible_flights(
@@ -1461,7 +1498,17 @@ def search_flexible_flights(
     store = cache or TravelCacheAndBudget()
 
     combos = flex.valid_combinations()
-    planned = combos[: flex.max_searches]
+    # Ordina per vicinanza alla data base richiesta (J14): la coppia base
+    # (distanza 0) non deve mai essere esclusa dal taglio max_searches.
+    base_dep = date.fromisoformat(flex.departure_date)
+    base_ret = date.fromisoformat(flex.return_date) if flex.return_date else None
+
+    def _distance(c: tuple[str, str | None]) -> tuple[int, str]:
+        d = abs((date.fromisoformat(c[0]) - base_dep).days)
+        r = abs((date.fromisoformat(c[1]) - base_ret).days) if c[1] and base_ret else 0
+        return (d + r, c[0])
+
+    planned = sorted(combos, key=_distance)[: flex.max_searches]
     partial = len(planned) < len(combos)
     partial_reason = (
         f"Piano limitato a max_searches={flex.max_searches}: {len(planned)} su {len(combos)} combinazioni valide."
@@ -1473,8 +1520,23 @@ def search_flexible_flights(
     discarded = 0
     searched_live = cache_hits = cache_expired = searches_used = 0
 
+    prov_currency = getattr(prov, "currency", "")
+    prov_gl = getattr(prov, "gl", "")
+    prov_hl = getattr(prov, "hl", "")
+
     for dep, ret in planned:
-        cache_key = "|".join([prov.name, flex.origin, flex.destination, dep, ret or "", str(flex.passengers), flex.cabin_class])
+        cache_key = "|".join([
+            prov.name,
+            flex.origin,
+            flex.destination,
+            dep,
+            ret or "",
+            str(flex.passengers),
+            flex.cabin_class,
+            prov_currency,
+            prov_gl,
+            prov_hl,
+        ])
         status, payload = store.lookup(cache_key)
         if status == "hit" and payload is not None:
             cache_hits += 1
@@ -1507,6 +1569,15 @@ def search_flexible_flights(
                     partial = True
                     partial_reason = (
                         f"Quota provider esaurita dopo {searched_live} ricerche live "
+                        f"({searched_live + cache_hits} su {len(planned)} combinazioni pianificate)."
+                    )
+                    break
+                # Se abbiamo già raccolto dati utili e l'errore è transitorio/ritentabile,
+                # fermiamo il piano mantenendo i dati raccolti anziché perdere tutto.
+                if (searched_live > 0 or cache_hits > 0) and exc.retryable:
+                    partial = True
+                    partial_reason = (
+                        f"Interruzione per errore transitorio provider ({exc.code}) dopo {searched_live} ricerche live "
                         f"({searched_live + cache_hits} su {len(planned)} combinazioni pianificate)."
                     )
                     break
