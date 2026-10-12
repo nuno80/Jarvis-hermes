@@ -104,6 +104,18 @@ SERPAPI_DEFAULT_HL = "en"
 QUOTA_EXHAUSTED_MARKERS = ("run out of searches", "out of searches")
 
 
+def _env_int(key: str, default: int) -> int:
+    """Legge un intero da ambiente con fallback robusto se non numerico."""
+    raw = os.environ.get(key)
+    if raw is None or not raw.strip():
+        return default
+    try:
+        return int(raw.strip())
+    except ValueError:
+        return default
+
+
+
 # =============================================================================
 # BLOCCO 2 - ERRORI
 # =============================================================================
@@ -545,6 +557,11 @@ def _build_slice(
     if not origin or not destination:
         return None
 
+    # Valida che nessun segmento intermedio abbia aeroporto o orario vuoto
+    for s in segments:
+        if not s.origin_airport or not s.destination_airport or not s.departing_at or not s.arriving_at:
+            return None
+
     first_departure = segments[0].departing_at
     departure_date = first_departure[:10] if len(first_departure) >= 10 else ""
 
@@ -681,6 +698,12 @@ class SerpApiProvider:
     @property
     def name(self) -> str:
         return "serpapi"
+
+    def cache_fingerprint(self) -> str:
+        """Parametri di localizzazione ed esecuzione che variano il risultato."""
+        return f"cur={self.currency}:gl={self.gl}:hl={self.hl}:deep={int(self.deep_search)}"
+
+
 
     # --- 7.1 Ricerca ---------------------------------------------------------
     def search_offers(self, request: TravelRequest) -> tuple[list[Offer], int]:
@@ -821,6 +844,10 @@ class SerpApiProvider:
         seen_ids: set[str] = set()
 
         for raw in groups:
+            if not isinstance(raw, dict):
+                discarded += 1
+                continue
+
             # --- Prezzo: obbligatorio, senza default ---
             amount = _parse_amount(raw.get("price"))
             if amount is None:
@@ -935,6 +962,11 @@ class DuffelProvider:
     def name(self) -> str:
         return "duffel"
 
+    def cache_fingerprint(self) -> str:
+        return f"env={self.environment}"
+
+
+
     @property
     def environment(self) -> str:
         # I token di test iniziano con "duffel_test_": i dati sono di sandbox
@@ -1017,6 +1049,9 @@ class DuffelProvider:
         normalized: list[Offer] = []
         discarded = 0
         for raw in offers_raw:
+            if not isinstance(raw, dict):
+                discarded += 1
+                continue
             offer_id = raw.get("id", "")
 
             # --- Prezzo e valuta: obbligatori, senza default ---
@@ -1118,7 +1153,7 @@ class TravelManager:
     def __init__(self, provider: TravelProvider | None = None):
         self._provider = provider
 
-    def _resolve_provider(self) -> TravelProvider:
+    def resolve_provider(self) -> TravelProvider:
         """Sceglie il provider in base alla configurazione dell'ambiente."""
         if self._provider is not None:
             return self._provider
@@ -1150,6 +1185,8 @@ class TravelManager:
             "Nessun provider viaggi configurato. Imposta SERPAPI_API_KEY (ricerca e confronto prezzi) oppure DUFFEL_ACCESS_TOKEN (ricerca e prenotazione). Non verranno generati dati fittizi.",
         )
 
+    _resolve_provider = resolve_provider
+
     def search_flights(self, params: dict[str, Any]) -> dict[str, Any]:
         """Valida i parametri, interroga il provider e restituisce la risposta.
 
@@ -1163,7 +1200,7 @@ class TravelManager:
         (copertura effettiva, J14/AT08).
         """
         request = TravelRequest.from_params(params)
-        provider = self._resolve_provider()
+        provider = self.resolve_provider()
         offers, discarded = provider.search_offers(request)
 
         # Ordinamento per prezzo totale crescente e limite uniforme tra
@@ -1293,30 +1330,38 @@ class FlexibleTravelRequest:
             max_searches=max_searches,
         )
 
-    def valid_combinations(self) -> list[tuple[str, str | None]]:
+    def valid_combinations(self, today: date | None = None) -> list[tuple[str, str | None]]:
         """Elenca le coppie (andata, ritorno) valide, in ordine di data.
 
         Partenza in [D-w, D+w]; ritorno in [R, R+stay_extra] con ritorno non
-        precedente alla partenza. Con solo andata, una coppia per partenza.
-        La coppia base (D, R) è sempre inclusa, quindi la lista non è vuota.
-        Pura (niente rete, niente orologio): testabile senza provider.
+        precedente alla partenza. Date nel passato rispetto a `today` vengono
+        escluse (se today è None, non si applica filtro orologio per purezza/test).
+        Con solo andata, una coppia per partenza.
         """
         base_dep = date.fromisoformat(self.departure_date)
         departures = [
             (base_dep + timedelta(days=delta)).isoformat()
             for delta in range(-self.departure_window, self.departure_window + 1)
+            if today is None or (base_dep + timedelta(days=delta)) >= today
         ]
+        if not departures:
+            raise TravelError(
+                "INVALID_DATE_RANGE",
+                "Tutte le date di partenza calcolate cadono nel passato rispetto a oggi.",
+            )
         if self.return_date is None:
             return [(d, None) for d in departures]
         base_ret = date.fromisoformat(self.return_date)
         returns = [
-            (base_ret + timedelta(days=extra)).isoformat() for extra in range(0, self.stay_extra + 1)
+            (base_ret + timedelta(days=extra)).isoformat()
+            for extra in range(0, self.stay_extra + 1)
+            if today is None or (base_ret + timedelta(days=extra)) >= today
         ]
         combos = [(d, r) for d in departures for r in returns if r >= d]
-        if not combos:  # non dovrebbe accadere (la coppia base è valida)
+        if not combos:
             raise TravelError(
                 "INVALID_DATE_RANGE",
-                "Nessuna combinazione andata/ritorno valida con questi parametri.",
+                "Nessuna combinazione andata/ritorno valida con questi parametri (tutte nel passato o ritorno prima dell'andata).",
             )
         return combos
 
@@ -1346,17 +1391,17 @@ class TravelCacheAndBudget:
         self.daily_limit = (
             daily_limit
             if daily_limit is not None
-            else int(os.environ.get("JARVIS_TRAVEL_DAILY_LIMIT", DEFAULT_TRAVEL_DAILY_LIMIT))
+            else _env_int("JARVIS_TRAVEL_DAILY_LIMIT", DEFAULT_TRAVEL_DAILY_LIMIT)
         )
         self.monthly_limit = (
             monthly_limit
             if monthly_limit is not None
-            else int(os.environ.get("JARVIS_TRAVEL_MONTHLY_LIMIT", DEFAULT_TRAVEL_MONTHLY_LIMIT))
+            else _env_int("JARVIS_TRAVEL_MONTHLY_LIMIT", DEFAULT_TRAVEL_MONTHLY_LIMIT)
         )
         self.ttl_seconds = (
             ttl_seconds
             if ttl_seconds is not None
-            else int(os.environ.get("JARVIS_TRAVEL_CACHE_TTL_SECONDS", DEFAULT_TRAVEL_CACHE_TTL_SECONDS))
+            else _env_int("JARVIS_TRAVEL_CACHE_TTL_SECONDS", DEFAULT_TRAVEL_CACHE_TTL_SECONDS)
         )
         self._init_db()
 
@@ -1494,8 +1539,12 @@ def search_flexible_flights(
     raccolti restano un risultato valido, non un errore.
     """
     flex = FlexibleTravelRequest.from_params(params)
-    prov = TravelManager(provider=provider)._resolve_provider()
+    prov = TravelManager(provider=provider).resolve_provider()
     store = cache or TravelCacheAndBudget()
+
+    # Se Duffel (TTL breve / offerte deperibili), azzera il TTL per non servire offerte scadute
+    if prov.name == "duffel" and cache is None:
+        store.ttl_seconds = 0
 
     combos = flex.valid_combinations()
     # Ordina per vicinanza alla data base richiesta (J14): la coppia base
@@ -1520,9 +1569,7 @@ def search_flexible_flights(
     discarded = 0
     searched_live = cache_hits = cache_expired = searches_used = 0
 
-    prov_currency = getattr(prov, "currency", "")
-    prov_gl = getattr(prov, "gl", "")
-    prov_hl = getattr(prov, "hl", "")
+    prov_fingerprint = getattr(prov, "cache_fingerprint", lambda: "")()
 
     for dep, ret in planned:
         cache_key = "|".join([
@@ -1533,27 +1580,29 @@ def search_flexible_flights(
             ret or "",
             str(flex.passengers),
             flex.cabin_class,
-            prov_currency,
-            prov_gl,
-            prov_hl,
+            prov_fingerprint,
         ])
         status, payload = store.lookup(cache_key)
         if status == "hit" and payload is not None:
             cache_hits += 1
             discarded += int(payload.get("discarded", 0))
             combo_offers = payload.get("offers", [])
+            for o in combo_offers:
+                o["from_cache"] = True
         else:
             if status == "stale":
                 cache_expired += 1  # AT08: prezzo vecchio distinto da offerta verificata
             try:
                 store.ensure_budget(prov.name, 1)
-            except TravelError:
-                partial = True
-                partial_reason = (
-                    f"Budget viaggi esaurito dopo {searched_live} ricerche live "
-                    f"({searched_live + cache_hits} su {len(planned)} combinazioni pianificate)."
-                )
-                break
+            except TravelError as exc:
+                if exc.code == "SEARCH_QUOTA_EXCEEDED":
+                    partial = True
+                    partial_reason = (
+                        f"Budget viaggi esaurito dopo {searched_live} ricerche live "
+                        f"({searched_live + cache_hits} su {len(planned)} combinazioni pianificate)."
+                    )
+                    break
+                raise
             single = TravelRequest(
                 origin=flex.origin,
                 destination=flex.destination,
@@ -1572,12 +1621,12 @@ def search_flexible_flights(
                         f"({searched_live + cache_hits} su {len(planned)} combinazioni pianificate)."
                     )
                     break
-                # Se abbiamo già raccolto dati utili e l'errore è transitorio/ritentabile,
-                # fermiamo il piano mantenendo i dati raccolti anziché perdere tutto.
-                if (searched_live > 0 or cache_hits > 0) and exc.retryable:
+                # Se abbiamo già raccolto dati utili e l'errore è transitorio o un errore 4xx del provider
+                # su questa singola combinazione (es. rotta non servita o 400), non perdiamo tutto
+                if (searched_live > 0 or cache_hits > 0) and (exc.retryable or exc.code == "PROVIDER_API_ERROR"):
                     partial = True
                     partial_reason = (
-                        f"Interruzione per errore transitorio provider ({exc.code}) dopo {searched_live} ricerche live "
+                        f"Interruzione per errore provider ({exc.code}) dopo {searched_live} ricerche live "
                         f"({searched_live + cache_hits} su {len(planned)} combinazioni pianificate)."
                     )
                     break

@@ -762,3 +762,36 @@ class SerpApiFallbackKeyTests(unittest.TestCase):
                 })
             self.assertEqual(mock_url.call_count, 2)
             self.assertEqual(res["offers_count"], 1)
+
+    def test_cache_fingerprint_includes_deep_and_env(self):
+        p1 = SerpApiProvider(api_key="k", deep_search=False)
+        p2 = SerpApiProvider(api_key="k", deep_search=True)
+        self.assertNotEqual(p1.cache_fingerprint(), p2.cache_fingerprint())
+        self.assertIn("deep=1", p2.cache_fingerprint())
+
+    def test_normalize_response_skips_non_dict(self):
+        offers, disc = SerpApiProvider.normalize_response(
+            {"best_flights": ["not-a-dict", None, {"price": 100, "flights": []}]},
+            passengers_count=1,
+            currency="EUR",
+        )
+        self.assertGreater(disc, 0)
+        self.assertEqual(len(offers), 0)
+
+    def test_flexible_search_marks_from_cache_on_cached_offers(self):
+        from jarvis_hermes.travel import search_flexible_flights, TravelCacheAndBudget
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            cache = TravelCacheAndBudget(db_path=os.path.join(tmp, "t.sqlite3"))
+            prov = _ComboStubProvider()
+            params = {
+                "origin": "FCO", "destination": "DPS",
+                "departure_date": "2026-10-10", "return_date": "2026-10-20",
+                "passengers": 1, "departure_window": 0, "stay_extra": 0,
+            }
+            res1 = search_flexible_flights(params, provider=prov, cache=cache)
+            self.assertFalse(res1["offers"][0].get("from_cache", False))
+            res2 = search_flexible_flights(params, provider=prov, cache=cache)
+            self.assertTrue(res2["offers"][0].get("from_cache", False))
+
+
