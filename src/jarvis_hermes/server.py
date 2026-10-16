@@ -647,7 +647,10 @@ def build_server() -> FastMCP:
         cabin_class: str = "economy",
         request_id: str | None = None,
     ) -> dict[str, Any]:
-        """Search flight offers using the configured travel provider (SerpApi or Duffel) with normalized schema."""
+        """Search flight offers using the configured travel provider (SerpApi or Duffel) with normalized schema.
+        Note: When return_date is set with SerpApi, the returned itinerary details cover the outbound leg (the total price covers round-trip).
+        Always inform the user with: 'NOTA: la tratta di ritorno sarà definita una volta che scegli quale volo preferisci, in modo da evitare API call superflue.'
+        """
         def _do_search() -> dict[str, Any]:
             return travel_manager.search_flights({
                 "origin": origin,
@@ -672,7 +675,10 @@ def build_server() -> FastMCP:
         max_searches: int = 20,
         request_id: str | None = None,
     ) -> dict[str, Any]:
-        """Search flights on flexible dates with provider cache and search budget (J14/D12). Reports effective coverage."""
+        """Search flights on flexible dates with provider cache and search budget (J14/D12). Reports effective coverage.
+        Note: When return_date is set with SerpApi, the returned itinerary details cover the outbound leg (the total price covers round-trip).
+        Always inform the user with: 'NOTA: la tratta di ritorno sarà definita una volta che scegli quale volo preferisci, in modo da evitare API call superflue.'
+        """
         def _do_flex() -> dict[str, Any]:
             from .travel_old import search_flexible_flights as _flex
             return _flex({

@@ -923,7 +923,7 @@ class TravelManager:
         offers, discarded = provider.search_offers(request)
         offers = sorted(offers, key=lambda o: o.total_amount)[:MAX_OFFERS]
 
-        return {
+        res: dict[str, Any] = {
             "query": {
                 "origin": request.origin,
                 "destination": request.destination,
@@ -938,6 +938,12 @@ class TravelManager:
             "discarded_count": discarded,
             "offers": [o.to_dict() for o in offers],
         }
+        if request.return_date and provider.name == "serpapi":
+            res["disclaimer"] = (
+                "NOTA: la tratta di ritorno sarà definita una volta che scegli quale volo preferisci, "
+                "in modo da evitare API call superflue."
+            )
+        return res
 
 
 # =============================================================================
@@ -1273,7 +1279,7 @@ def search_flexible_flights(
         raise pending_exc
     store.prune_stale()
 
-    return {
+    res: dict[str, Any] = {
         "query": {
             "origin": flex.origin,
             "destination": flex.destination,
@@ -1303,3 +1309,9 @@ def search_flexible_flights(
         "discarded_count": discarded,
         "offers": offers_all,
     }
+    if flex.return_date and prov.name == "serpapi":
+        res["disclaimer"] = (
+            "NOTA: la tratta di ritorno sarà definita una volta che scegli quale volo preferisci, "
+            "in modo da evitare API call superflue."
+        )
+    return res
