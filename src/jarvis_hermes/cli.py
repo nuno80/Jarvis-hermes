@@ -644,7 +644,7 @@ def main() -> int:
                 print(f"  • {cls}: {thr}")
         return 0
     if args.command == "travel-demo":
-        from .travel import TravelError, TravelManager
+        from .travel_old import TravelError, TravelManager
         mgr = TravelManager()
         try:
             res = mgr.search_flights({
@@ -671,7 +671,7 @@ def main() -> int:
             return 1
         return 0
     if args.command == "travel-flex-demo":
-        from .travel import TravelError, search_flexible_flights
+        from .travel_old import TravelError, search_flexible_flights
         try:
             res = search_flexible_flights({
                 "origin": args.origin,
@@ -854,7 +854,7 @@ def main() -> int:
             demo_store = ApprovalStore(Path(demo_dir) / "approvals.sqlite3")
             demo_audit = EmailAuditLog(Path(demo_dir) / "audit.sqlite3")
             demo_sender = SmtpEmailSender(user="tester@yahoo.com", password="app_password")
-            
+
             # Simuliamo l'invio SMTP per non contattare server reali durante la demo locale
             demo_sender.send_message = lambda **kwargs: {
                 "sent": True,

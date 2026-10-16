@@ -30,7 +30,7 @@ from .projects import ProjectError, ProjectRegistry
 from .reminder import ReminderError, ReminderStore
 from .decision import pre_turn_dispatch as system1_pre_turn_dispatch
 from .router import JevClient, RequestRouter, RouterError
-from .travel import TravelError, TravelManager
+from .travel_old import TravelError, TravelManager
 from .vault import Vault, VaultError
 from .voice import VoiceError
 from .web import WebError, WebManager
@@ -674,7 +674,7 @@ def build_server() -> FastMCP:
     ) -> dict[str, Any]:
         """Search flights on flexible dates with provider cache and search budget (J14/D12). Reports effective coverage."""
         def _do_flex() -> dict[str, Any]:
-            from .travel import search_flexible_flights as _flex
+            from .travel_old import search_flexible_flights as _flex
             return _flex({
                 "origin": origin,
                 "destination": destination,
@@ -1376,4 +1376,3 @@ def load_dotenv_if_available() -> None:
 def main() -> None:
     load_dotenv_if_available()
     build_server().run(transport='stdio')
-
