@@ -135,6 +135,23 @@ def main() -> int:
     calibrate.add_argument("--thresholds", default=None, help="Path to the thresholds config JSON (default: config/routing_thresholds.json)")
     calibrate.add_argument("--seed", type=int, default=42, help="Deterministic split seed")
     calibrate.add_argument("--json", action="store_true", dest="as_json", help="Output report in JSON format")
+
+    backup_parser = sub.add_parser("backup", help="Create a consistent backup of runtime state and vault")
+    backup_parser.add_argument("--label", default="manual", help="Backup label tag")
+    backup_parser.add_argument("--retention-days", type=int, default=14, help="Retention period in days")
+    backup_parser.add_argument("--dest", type=Path, default=None, help="Backup destination folder")
+    backup_parser.add_argument("--json", action="store_true", dest="as_json")
+
+    restore_parser = sub.add_parser("restore", help="Restore runtime state and vault from a backup archive")
+    restore_parser.add_argument("archive", type=Path, help="Path to the backup .tar.gz archive")
+    restore_parser.add_argument("--target-vault", type=Path, required=True, help="Target clean vault directory")
+    restore_parser.add_argument("--target-state", type=Path, default=None, help="Target state directory (default: current user state dir)")
+    restore_parser.add_argument("--allow-existing", action="store_true", help="Allow restore into non-empty vault directory")
+    restore_parser.add_argument("--json", action="store_true", dest="as_json")
+
+    backup_demo = sub.add_parser("backup-demo", help="Run an isolated end-to-end backup, restore to clean environment, and reconciliation demo")
+    backup_demo.add_argument("--json", action="store_true", dest="as_json")
+
     args = parser.parse_args()
     if args.command == "approval-demo":
         from .approval import ApprovalError, ApprovalStore
@@ -1019,6 +1036,169 @@ def main() -> int:
                 print(f"Test DST: {dst_rem['scheduled_local']} -> UTC {dst_rem['due_at_utc']} (annullato: {cancelled['status']})")
                 print(f"Riconciliazione riavvio: {len(reconciled)} reminder segnati 'missed_during_downtime'")
         return 0
+    if args.command == "backup":
+        from .backup import BackupManager, BackupError
+        state_home = Path(os.environ.get("XDG_STATE_HOME", Path.home() / ".local" / "state"))
+        state_dir = state_home / "jarvis-hermes"
+        vault_dir = os.environ.get("JARVIS_VAULT_PATH")
+        dest_dir = args.dest or (state_dir / "backups")
+
+        mgr = BackupManager(
+            state_dir=state_dir,
+            vault_dir=vault_dir,
+            backup_root=dest_dir,
+            retention_days=args.retention_days,
+        )
+        try:
+            res = mgr.create_backup(label=args.label)
+            if args.as_json:
+                print(json.dumps(res, indent=2))
+            else:
+                print(f"Backup created: {res['backup_id']}")
+                print(f"Archive: {res['archive_path']}")
+                print(f"Manifest: {res['manifest_path']}")
+                print(f"Files archived: {res['files_count']} (secrets excluded: {res['excluded_secrets_count']})")
+            return 0
+        except BackupError as exc:
+            if args.as_json:
+                print(json.dumps({"error": exc.code, "message": exc.message}))
+            else:
+                print(f"Backup failed [{exc.code}]: {exc.message}", file=sys.stderr)
+            return 1
+
+    if args.command == "restore":
+        from .backup import BackupManager, BackupError
+        state_home = Path(os.environ.get("XDG_STATE_HOME", Path.home() / ".local" / "state"))
+        default_state = state_home / "jarvis-hermes"
+        target_state = args.target_state or default_state
+
+        mgr = BackupManager(
+            state_dir=target_state,
+            vault_dir=args.target_vault,
+            backup_root=target_state / "backups",
+        )
+        try:
+            res = mgr.restore(
+                archive_path=args.archive,
+                target_state_dir=target_state,
+                target_vault_dir=args.target_vault,
+                allow_existing=args.allow_existing,
+            )
+            if args.as_json:
+                print(json.dumps(res, indent=2))
+            else:
+                print("Restore completed successfully.")
+                print(f"Target vault: {res['target_vault_dir']} (notes indexed: {res['notes_indexed_count']})")
+                print(f"Target state: {res['target_state_dir']}")
+                print(f"Neutralized approvals: {res['neutralized_approvals_count']}")
+                print(f"Reconciled jobs: {res['reconciled_jobs_count']}")
+                print(f"Note: {res['note']}")
+            return 0
+        except BackupError as exc:
+            if args.as_json:
+                print(json.dumps({"error": exc.code, "message": exc.message}))
+            else:
+                print(f"Restore failed [{exc.code}]: {exc.message}", file=sys.stderr)
+            return 1
+
+    if args.command == "backup-demo":
+        from .backup import BackupManager
+        from .jobs import JobStore
+        from .approval import ApprovalStore
+        from .vault import Vault
+
+        with tempfile.TemporaryDirectory(prefix="jarvis-backup-demo-") as demo_dir:
+            demo_path = Path(demo_dir)
+            source_state = demo_path / "live_state"
+            source_vault = demo_path / "live_vault"
+            backup_storage = demo_path / "backups"
+            clean_restore_state = demo_path / "clean_state"
+            clean_restore_vault = demo_path / "clean_vault"
+
+            source_state.mkdir()
+            source_vault.mkdir()
+            backup_storage.mkdir()
+
+            # 1. Popola un ambiente runtime fittizio con note, preferenze, job e approvazioni
+            (source_vault / "preferences.yaml").write_text("travel:\n  airline: StarAlliance\n  max_stops: 1\n", encoding="utf-8")
+            (source_vault / "00-System").mkdir()
+            (source_vault / "00-System" / "Profile.md").write_text("# Profilo Utente\nPreferenze generali.", encoding="utf-8")
+            (source_vault / "Knowledge").mkdir()
+            (source_vault / "Knowledge" / "Preferences.md").write_text("---\ntype: candidate_preference\ndomain: travel\n---\nSoft preference note.", encoding="utf-8")
+
+            # Segreto che deve essere escluso tassativamente
+            (source_vault / ".env").write_text("API_SECRET=leak_should_not_happen\n", encoding="utf-8")
+            (source_state / ".env").write_text("DATABASE_PASS=password123\n", encoding="utf-8")
+
+            job_store = JobStore(source_state / "jobs.sqlite3")
+            j_succ = job_store.create_job(actor_id=1, target="demo", description="Completed job")
+            job_store.update_status(j_succ["job_id"], "succeeded", step="done")
+
+            j_running = job_store.create_job(actor_id=1, target="demo", description="Interrupted job")
+            job_store.update_status(j_running["job_id"], "running", step="step 2")
+
+            app_store = ApprovalStore(source_state / "approvals.sqlite3")
+            app_pending = app_store.request(actor_id=1, target="cmd", arguments={"run": "reboot"})
+            app_done = app_store.request(actor_id=1, target="cmd", arguments={"run": "echo"})
+            app_store.decide(token=app_done["token"], actor_id=1, target="cmd", arguments={"run": "echo"}, approve=True)
+
+            mgr = BackupManager(
+                state_dir=source_state,
+                vault_dir=source_vault,
+                backup_root=backup_storage,
+                retention_days=14,
+            )
+
+            # Esegui Backup
+            backup_info = mgr.create_backup(label="demo-checkpoint")
+
+            # Esegui Restore in ambiente pulito
+            restore_info = mgr.restore(
+                archive_path=backup_info["archive_path"],
+                target_state_dir=clean_restore_state,
+                target_vault_dir=clean_restore_vault,
+            )
+
+            # Verifica Vault ricostruito
+            restored_vault_obj = Vault(str(clean_restore_vault))
+            profile = restored_vault_obj.get_profile()
+
+            payload = {
+                "scope": "isolated_backup_restore_demo",
+                "backup": {
+                    "backup_id": backup_info["backup_id"],
+                    "archive_sha256": backup_info["archive_sha256"],
+                    "files_count": backup_info["files_count"],
+                    "excluded_secrets_count": backup_info["excluded_secrets_count"],
+                },
+                "restore": {
+                    "success": restore_info["success"],
+                    "reconciled_jobs_count": restore_info["reconciled_jobs_count"],
+                    "neutralized_approvals_count": restore_info["neutralized_approvals_count"],
+                    "notes_indexed_count": restore_info["notes_indexed_count"],
+                    "explicit_preferences_restored": restore_info["explicit_preferences_restored"],
+                },
+                "vault_verification": {
+                    "explicit_preferences": profile["explicit_preferences"],
+                    "frontmatter_notes_count": len(profile["frontmatter_notes"]),
+                    "secret_env_present": (clean_restore_vault / ".env").exists() or (clean_restore_state / ".env").exists(),
+                },
+            }
+
+            if args.as_json:
+                print(json.dumps(payload, indent=2, ensure_ascii=False))
+            else:
+                print("=== Demo Backup & Restore in Ambiente Pulito (JARVIS-29) ===")
+                print(f"Backup ID: {backup_info['backup_id']} (Archivio: {backup_info['files_count']} file)")
+                print(f"Segreti esclusi: {backup_info['excluded_secrets_count']} (.env, chiavi non archiviati)")
+                print(f"Restore eseguito in directory pulite isolate.")
+                print(f"Job interrotti riconciliati (outcome_unknown): {restore_info['reconciled_jobs_count']}")
+                print(f"Approvazioni pendenti neutralizzate (cancelled): {restore_info['neutralized_approvals_count']}")
+                print(f"Note vault indicizzate: {restore_info['notes_indexed_count']}")
+                print(f"Preferenze esplicite verificate: {profile['explicit_preferences']}")
+                print(f"Controllo segreti post-restore: {'NESSUN SEGRETO TRAPELATO' if not payload['vault_verification']['secret_env_present'] else 'ERRORE'}")
+            return 0
+
     if args.command == "serve":
         from .server import main as serve
         serve()
