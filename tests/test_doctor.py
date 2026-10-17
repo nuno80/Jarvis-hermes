@@ -30,7 +30,14 @@ class DoctorTests(unittest.TestCase):
         self.assertEqual(report["scope"], "current_host_only")
         self.assertEqual(report["integrations"]["telegram"], "not_verified")
         self.assertEqual(report["integrations"]["mcp"], "stdio_available")
+        self.assertIn("windows_gui", report["integrations"])
         self.assertEqual(report["vault"]["status"], "not_configured")
+        self.assertIn("jobs", report)
+        self.assertIn("pending_count", report["jobs"])
+        self.assertIn("outcome_unknown_count", report["jobs"])
+        self.assertIn("providers", report)
+        self.assertIn("travel_duffel", report["providers"])
+        self.assertIn("email_smtp", report["providers"])
 
     def test_vault_presence_without_leaking_path_or_reading_note(self):
         with tempfile.TemporaryDirectory(prefix="private-vault-") as directory:

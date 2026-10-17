@@ -17,6 +17,50 @@ def diagnose(disk_path: Path, vault_path: str | None) -> dict:
     if vault_path:
         vault = Path(vault_path).expanduser()
         vault_status = "available" if vault.is_absolute() and vault.is_dir() else "unavailable"
+
+    # Pending jobs / restart reconciliation
+    jobs_summary = {"pending_count": 0, "outcome_unknown_count": 0}
+    try:
+        from .server import _job_store
+        store = _job_store()
+        with store._connection() as conn:
+            row = conn.execute(
+                """SELECT
+                    COUNT(CASE WHEN status NOT IN ('succeeded', 'failed', 'cancelled', 'interrupted', 'outcome_unknown') THEN 1 END) as pending_cnt,
+                    COUNT(CASE WHEN status = 'outcome_unknown' THEN 1 END) as unknown_cnt
+                FROM jobs"""
+            ).fetchone()
+            if row:
+                jobs_summary = {
+                    "pending_count": row["pending_cnt"],
+                    "outcome_unknown_count": row["unknown_cnt"],
+                }
+    except Exception:
+        pass
+
+    # Windows GUI desktop availability
+    gui_status = "not_verified"
+    try:
+        from .gui import GuiAutomationManager
+        mgr = GuiAutomationManager()
+        interactive, detail = mgr.check_desktop_interactive()
+        gui_status = "interactive" if interactive else f"unavailable ({detail})"
+    except Exception:
+        pass
+
+    # Providers inspection (checks presence of credentials without leaking secrets)
+    providers = {
+        "travel_duffel": "configured" if bool(os.environ.get("DUFFEL_API_TOKEN")) else "missing",
+        "travel_serpapi": "configured" if bool(os.environ.get("SERPAPI_API_KEY")) else "missing",
+        "email_smtp": "configured" if bool((os.environ.get("YAHOO_EMAIL") or os.environ.get("JARVIS_EMAIL_USER")) and (os.environ.get("YAHOO_APP_PASSWORD") or os.environ.get("JARVIS_EMAIL_PASSWORD"))) else "missing",
+        "email_imap": "configured" if bool((os.environ.get("YAHOO_EMAIL") or os.environ.get("JARVIS_EMAIL_USER")) and (os.environ.get("YAHOO_APP_PASSWORD") or os.environ.get("JARVIS_EMAIL_PASSWORD"))) else "missing",
+        "calendar_google": "configured" if bool(os.environ.get("GOOGLE_CALENDAR_CREDENTIALS") or os.environ.get("GOOGLE_APPLICATION_CREDENTIALS")) else "missing",
+        "llm_gemini": "configured" if bool(os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")) else "missing",
+        "llm_groq_stt": "configured" if bool(os.environ.get("GROQ_API_KEY")) else "missing",
+        "web_search_tavily": "configured" if bool(os.environ.get("TAVILY_API_KEY")) else "missing",
+        "web_search_exa": "configured" if bool(os.environ.get("EXA_API_KEY")) else "missing",
+    }
+
     return {
         "schema_version": "1.0",
         "scope": "current_host_only",
@@ -30,9 +74,11 @@ def diagnose(disk_path: Path, vault_path: str | None) -> dict:
         "integrations": {
             "hermes": "not_verified",
             "telegram": "not_verified",
-            "windows_gui": "not_verified",
+            "windows_gui": gui_status,
             "mcp": "stdio_available",
         },
+        "jobs": jobs_summary,
+        "providers": providers,
     }
 
 
@@ -988,6 +1034,11 @@ def main() -> int:
         print(f"Host: {report['host']['system']}; Python: {report['host']['python']}")
         print(f"Free disk: {report['disk']['free_bytes'] / (1024**3):.1f} GiB")
         print(f"Vault: {report['vault']['status']}")
-        print("Hermes, Telegram and Windows GUI: not verified. MCP: local stdio server available; host connection not verified.")
+        print(f"Windows GUI: {report['integrations']['windows_gui']}")
+        print(f"Pending jobs: {report['jobs']['pending_count']} (outcome unknown: {report['jobs']['outcome_unknown_count']})")
+        missing_p = [k for k, v in report['providers'].items() if v == 'missing']
+        if missing_p:
+            print(f"Missing providers: {', '.join(missing_p)}")
+        print("Hermes and Telegram: not verified. MCP: local stdio server available; host connection not verified.")
         print("This report describes the current host only.")
     return 0
