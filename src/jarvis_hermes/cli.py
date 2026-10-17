@@ -644,7 +644,7 @@ def main() -> int:
                 print(f"  • {cls}: {thr}")
         return 0
     if args.command == "travel-demo":
-        from .travel_old import TravelError, TravelManager
+        from .travel import TravelError, TravelManager
         mgr = TravelManager()
         try:
             res = mgr.search_flights({
@@ -671,7 +671,7 @@ def main() -> int:
             return 1
         return 0
     if args.command == "travel-flex-demo":
-        from .travel_old import TravelError, search_flexible_flights
+        from .travel import TravelError, search_flexible_flights
         try:
             res = search_flexible_flights({
                 "origin": args.origin,

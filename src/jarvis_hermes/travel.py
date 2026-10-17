@@ -1315,3 +1315,273 @@ def search_flexible_flights(
             "in modo da evitare API call superflue."
         )
     return res
+
+
+# =============================================================================
+# BLOCCO 11 - OTTIMIZZATORE, RANKING PARETO E CONFRONTO ALTERNATIVE (J15/E1)
+# =============================================================================
+def _parse_iso_duration_minutes(iso_str: str | None) -> int:
+    """Estrae i minuti totali da una durata ISO 8601 (es. 'PT2H15M' -> 135, 'PT45M' -> 45)."""
+    if not iso_str or not isinstance(iso_str, str):
+        return 0
+    m = re.match(r"^PT(?:(\d+)H)?(?:(\d+)M)?$", iso_str.strip())
+    if not m:
+        return 0
+    hours = int(m.group(1) or 0)
+    minutes = int(m.group(2) or 0)
+    return hours * 60 + minutes
+
+
+def _extract_offer_metrics(offer_dict: dict[str, Any]) -> dict[str, Any]:
+    """Estrae metriche oggettive da una offerta normalizzata per il calcolo Pareto e vincoli."""
+    price = float(offer_dict.get("total_amount", 0.0))
+    slices = offer_dict.get("slices", [])
+
+    total_duration_minutes = 0
+    total_stops = 0
+    has_airport_change = False
+    has_tight_connection = False
+    has_overnight_layover = False
+
+    for s in slices:
+        dur = s.get("duration")
+        total_duration_minutes += _parse_iso_duration_minutes(dur)
+        total_stops += int(s.get("stops_count", 0))
+        if s.get("has_airport_change"):
+            has_airport_change = True
+        if s.get("has_tight_connection"):
+            has_tight_connection = True
+        if s.get("has_overnight_layover"):
+            has_overnight_layover = True
+
+    # Punteggio di rischio oggettivo (non una probabilità inventata!):
+    # Fattori: scali (1 p.to ciascuno), coincidenza stretta (+3), cambio aeroporto (+5), pernottamento (+2)
+    risk_score = (
+        total_stops * 1.0
+        + (3.0 if has_tight_connection else 0.0)
+        + (5.0 if has_airport_change else 0.0)
+        + (2.0 if has_overnight_layover else 0.0)
+    )
+
+    risk_factors = []
+    if total_stops > 0:
+        risk_factors.append(f"{total_stops} scalo/i")
+    if has_tight_connection:
+        risk_factors.append("coincidenza stretta")
+    if has_airport_change:
+        risk_factors.append("cambio aeroporto durante lo scalo")
+    if has_overnight_layover:
+        risk_factors.append("scalo notturno")
+
+    return {
+        "price": price,
+        "duration_minutes": total_duration_minutes,
+        "stops": total_stops,
+        "risk_score": risk_score,
+        "risk_factors": risk_factors,
+        "has_airport_change": has_airport_change,
+        "has_tight_connection": has_tight_connection,
+        "has_overnight_layover": has_overnight_layover,
+    }
+
+
+def compare_flight_offers(
+    offers: list[dict[str, Any] | Offer],
+    constraints: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Confronta offerte di viaggio, applica filtri hard, calcola la frontiera di Pareto
+    e restituisce fino a tre alternative distinte (miglior prezzo, compromesso, più rapido).
+    """
+    raw_list: list[dict[str, Any]] = [
+        o.to_dict() if isinstance(o, Offer) else dict(o) for o in offers
+    ]
+
+    constraints = constraints or {}
+    max_budget = constraints.get("max_budget")
+    max_stops = constraints.get("max_stops")
+    max_duration_minutes = constraints.get("max_duration_minutes")
+    allow_airport_change = constraints.get("allow_airport_change", True)
+    allow_tight_connection = constraints.get("allow_tight_connection", True)
+
+    filtered: list[tuple[dict[str, Any], dict[str, Any]]] = []
+    discarded_count = 0
+
+    for o in raw_list:
+        m = _extract_offer_metrics(o)
+        # Filtri hard prima di Pareto
+        if max_budget is not None and m["price"] > float(max_budget):
+            discarded_count += 1
+            continue
+        if max_stops is not None and m["stops"] > int(max_stops):
+            discarded_count += 1
+            continue
+        if max_duration_minutes is not None and m["duration_minutes"] > int(max_duration_minutes):
+            discarded_count += 1
+            continue
+        if not allow_airport_change and m["has_airport_change"]:
+            discarded_count += 1
+            continue
+        if not allow_tight_connection and m["has_tight_connection"]:
+            discarded_count += 1
+            continue
+
+        filtered.append((o, m))
+
+    decorated = filtered
+
+    # Calcolo frontiera di Pareto sulle 3 dimensioni: price, duration_minutes, risk_score
+    pareto_candidates: list[tuple[dict[str, Any], dict[str, Any]]] = []
+    for i, (o_a, m_a) in enumerate(decorated):
+        dominated = False
+        for j, (o_b, m_b) in enumerate(decorated):
+            if i == j:
+                continue
+            better_or_equal = (
+                m_b["price"] <= m_a["price"]
+                and m_b["duration_minutes"] <= m_a["duration_minutes"]
+                and m_b["risk_score"] <= m_a["risk_score"]
+            )
+            strictly_better = (
+                m_b["price"] < m_a["price"]
+                or m_b["duration_minutes"] < m_a["duration_minutes"]
+                or m_b["risk_score"] < m_a["risk_score"]
+            )
+            if better_or_equal and strictly_better:
+                dominated = True
+                break
+        if not dominated:
+            pareto_candidates.append((o_a, m_a))
+
+    pareto_frontier = [o for o, _ in pareto_candidates]
+
+    if not pareto_candidates:
+        return {
+            "total_candidates": len(raw_list),
+            "discarded_by_constraints_count": discarded_count,
+            "pareto_frontier": [],
+            "alternatives": {},
+        }
+
+
+    # Selezione alternative:
+    # 1. cheapest: minimo prezzo nella frontiera (o parità, durata minima)
+    cheapest_item = min(
+        pareto_candidates, key=lambda item: (item[1]["price"], item[1]["duration_minutes"])
+    )
+
+    # 2. fastest: minima durata nella frontiera (o parità, prezzo minimo)
+    fastest_item = min(
+        pareto_candidates, key=lambda item: (item[1]["duration_minutes"], item[1]["price"])
+    )
+
+    # 3. best_compromise:
+    # Seleziona il punto di equilibrio sulla frontiera di Pareto normalizzando i range [min, max]
+    # di prezzo e durata, minimizzando la distanza euclidea dal punto ideale (0, 0).
+    min_p = min(m["price"] for _, m in pareto_candidates)
+    max_p = max(m["price"] for _, m in pareto_candidates)
+    min_d = min(m["duration_minutes"] for _, m in pareto_candidates)
+    max_d = max(m["duration_minutes"] for _, m in pareto_candidates)
+
+    span_p = (max_p - min_p) if max_p > min_p else 1.0
+    span_d = (max_d - min_d) if max_d > min_d else 1.0
+
+    # Punteggio di bilanciamento (distanza euclidea dal punto ideale normalizzato)
+    def _compromise_score(item: tuple[dict[str, Any], dict[str, Any]]) -> float:
+        _, m = item
+        norm_p = (m["price"] - min_p) / span_p
+        norm_d = (m["duration_minutes"] - min_d) / span_d
+        return (norm_p**2 + norm_d**2) ** 0.5
+
+    best_compromise_item = min(pareto_candidates, key=_compromise_score)
+
+    def _build_alt_dict(
+        item: tuple[dict[str, Any], dict[str, Any]],
+        role: str,
+        baseline_m: dict[str, Any],
+    ) -> dict[str, Any]:
+        o, m = item
+        p_delta = round(m["price"] - baseline_m["price"], 2)
+        d_delta = m["duration_minutes"] - baseline_m["duration_minutes"]
+        s_delta = m["stops"] - baseline_m["stops"]
+
+        unknown_fields = o.get("unknown_fields") or {}
+        # ponytail: campi non noti su bagagli/tasse richiedono segnalazione esplicita
+        unverified_fields = [k for k, v in unknown_fields.items() if "bag" in k.lower() or "tax" in k.lower() or v == "unknown"]
+        pricing_incomplete = len(unverified_fields) > 0
+        warning = None
+        if pricing_incomplete:
+            warning = "tasse o bagagli non verificati: potrebbero esserci costi aggiuntivi"
+
+        return {
+            "offer_id": o.get("offer_id"),
+            "role": role,
+            "provider": o.get("provider"),
+            "observed_at": o.get("observed_at"),
+            "total_amount": m["price"],
+            "currency": o.get("currency", "EUR"),
+            "duration_minutes": m["duration_minutes"],
+            "stops": m["stops"],
+            "risk_factors": m["risk_factors"],
+            "pricing_incomplete": pricing_incomplete,
+            "unverified_fields": unverified_fields,
+            "warning": warning,
+            "diff_vs_cheapest": {
+                "price_delta": p_delta,
+                "duration_minutes_delta": d_delta,
+                "stops_delta": s_delta,
+            },
+            "offer": o,
+        }
+
+    alts: dict[str, Any] = {}
+    baseline_metrics = cheapest_item[1]
+
+    # Non duplicare: aggiungi le opzioni distinte
+    selected_map: dict[str, tuple[tuple[dict[str, Any], dict[str, Any]], str]] = {}
+
+    cheapest_id = cheapest_item[0].get("offer_id", "")
+    fastest_id = fastest_item[0].get("offer_id", "")
+    compromise_id = best_compromise_item[0].get("offer_id", "")
+
+    alts["cheapest"] = _build_alt_dict(cheapest_item, "cheapest", baseline_metrics)
+    if fastest_id != cheapest_id:
+        alts["fastest"] = _build_alt_dict(fastest_item, "fastest", baseline_metrics)
+    if compromise_id != cheapest_id and compromise_id != fastest_id:
+        alts["best_compromise"] = _build_alt_dict(
+            best_compromise_item, "best_compromise", baseline_metrics
+        )
+
+    # ponytail: sintesi spiegazione verificabile basata esclusivamente sui dati estratti
+    explanation_lines = []
+    ch_info = alts["cheapest"]
+    explanation_lines.append(
+        f"Miglior prezzo: {ch_info['offer_id']} ({ch_info['total_amount']} {ch_info['currency']}, {ch_info['duration_minutes']} min, {ch_info['stops']} scali)."
+    )
+    if "fastest" in alts:
+        fa_info = alts["fastest"]
+        diff = fa_info["diff_vs_cheapest"]
+        delta_p = f"+{diff['price_delta']}" if diff['price_delta'] >= 0 else str(diff['price_delta'])
+        saved_min = abs(diff['duration_minutes_delta'])
+        explanation_lines.append(
+            f"Più rapido: {fa_info['offer_id']} ({fa_info['total_amount']} {fa_info['currency']}, {delta_p} {fa_info['currency']} rispetto al più economico, risparmiando {saved_min} minuti)."
+        )
+    if "best_compromise" in alts:
+        co_info = alts["best_compromise"]
+        diff = co_info["diff_vs_cheapest"]
+        delta_p = f"+{diff['price_delta']}" if diff['price_delta'] >= 0 else str(diff['price_delta'])
+        saved_min = abs(diff['duration_minutes_delta'])
+        explanation_lines.append(
+            f"Compromesso migliore: {co_info['offer_id']} ({co_info['total_amount']} {co_info['currency']}, {delta_p} {co_info['currency']} per {saved_min} minuti in meno)."
+        )
+
+    summary_explanation = " ".join(explanation_lines)
+
+    return {
+        "total_candidates": len(raw_list),
+        "discarded_by_constraints_count": discarded_count,
+        "pareto_frontier": pareto_frontier,
+        "alternatives": alts,
+        "summary_explanation": summary_explanation,
+    }
+
+

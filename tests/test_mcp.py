@@ -1002,6 +1002,34 @@ class MCPTests(unittest.IsolatedAsyncioTestCase):
                 self.assertTrue(res_rem_cancel['ok'])
                 self.assertEqual(res_rem_cancel['data']['status'], 'cancelled')
 
+                # 6. Compare flight offers via MCP (Issue #22, J15)
+                res_comp = (await client.call_tool('compare_flights', {
+                    'offers': [
+                        {
+                            'offer_id': 'O1',
+                            'provider': 'serpapi',
+                            'observed_at': '2026-10-15T10:00:00Z',
+                            'total_amount': 200.0,
+                            'currency': 'EUR',
+                            'slices': [{'duration': 'PT5H', 'stops_count': 0}],
+                        },
+                        {
+                            'offer_id': 'O2',
+                            'provider': 'serpapi',
+                            'observed_at': '2026-10-15T10:00:00Z',
+                            'total_amount': 400.0,
+                            'currency': 'EUR',
+                            'slices': [{'duration': 'PT3H', 'stops_count': 0}],
+                        },
+                    ]
+                })).structuredContent
+                self.assertTrue(res_comp['ok'])
+                data = res_comp['data']
+                self.assertIn('alternatives', data)
+                self.assertEqual(data['alternatives']['cheapest']['offer_id'], 'O1')
+                self.assertEqual(data['alternatives']['fastest']['offer_id'], 'O2')
+
+
 
 
 

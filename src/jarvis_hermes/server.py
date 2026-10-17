@@ -30,7 +30,7 @@ from .projects import ProjectError, ProjectRegistry
 from .reminder import ReminderError, ReminderStore
 from .decision import pre_turn_dispatch as system1_pre_turn_dispatch
 from .router import JevClient, RequestRouter, RouterError
-from .travel_old import TravelError, TravelManager
+from .travel import TravelError, TravelManager, compare_flight_offers
 from .vault import Vault, VaultError
 from .voice import VoiceError
 from .web import WebError, WebManager
@@ -680,7 +680,7 @@ def build_server() -> FastMCP:
         Always inform the user with: 'NOTA: la tratta di ritorno sarà definita una volta che scegli quale volo preferisci, in modo da evitare API call superflue.'
         """
         def _do_flex() -> dict[str, Any]:
-            from .travel_old import search_flexible_flights as _flex
+            from .travel import search_flexible_flights as _flex
             return _flex({
                 "origin": origin,
                 "destination": destination,
@@ -693,6 +693,29 @@ def build_server() -> FastMCP:
                 "max_searches": max_searches,
             })
         return respond(_do_flex, request_id)
+
+    @server.tool(annotations=readonly)
+    def compare_flights(
+        offers: list[dict[str, Any]],
+        max_budget: float | None = None,
+        max_stops: int | None = None,
+        max_duration_minutes: int | None = None,
+        allow_airport_change: bool = True,
+        allow_tight_connection: bool = True,
+        request_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Compare flight offers using Pareto ranking across cost, duration and risk factors.
+        Returns up to three distinct alternatives (cheapest, fastest, best compromise) with
+        verifiable numerical differences and transparent provider/freshness metadata (J15/E1).
+        """
+        constraints = {
+            "max_budget": max_budget,
+            "max_stops": max_stops,
+            "max_duration_minutes": max_duration_minutes,
+            "allow_airport_change": allow_airport_change,
+            "allow_tight_connection": allow_tight_connection,
+        }
+        return respond(lambda: compare_flight_offers(offers, constraints=constraints), request_id)
 
     @server.tool(annotations=readonly)
     def calendar_search(calendar_id: str = 'primary', q: str | None = None,
