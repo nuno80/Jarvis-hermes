@@ -10,6 +10,7 @@ Enforces:
 """
 from __future__ import annotations
 
+from contextlib import contextmanager
 import hashlib
 import http.client
 import ipaddress
@@ -26,7 +27,7 @@ from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from html.parser import HTMLParser
 from pathlib import Path
-from typing import Any, Iterable, Tuple
+from typing import Any, Iterable, Iterator, Tuple
 
 from jarvis_hermes.approval import ApprovalError, ApprovalStore
 from jarvis_hermes.projects import redact_secrets
@@ -69,18 +70,18 @@ class SearchBudgetTracker:
         self.ttl_seconds = int(os.environ.get("JARVIS_SEARCH_CACHE_TTL_SECONDS", 900))  # default 15m
         self._init_db()
 
-    def _get_conn(self) -> sqlite3.Connection:
+    @contextmanager
+    def _get_conn(self) -> Iterator[sqlite3.Connection]:
         conn = sqlite3.connect(str(self.db_path), timeout=30.0, isolation_level=None)
-        conn.row_factory = sqlite3.Row
-        conn.execute("PRAGMA journal_mode=WAL")
-        return conn
+        try:
+            conn.row_factory = sqlite3.Row
+            conn.execute("PRAGMA journal_mode=WAL")
+            yield conn
+        finally:
+            conn.close()
 
     def _init_db(self) -> None:
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
-        try:
-            self.db_path.chmod(0o600)
-        except OSError:
-            pass
         with self._get_conn() as conn:
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS search_usage (
@@ -103,6 +104,21 @@ class SearchBudgetTracker:
                     retrieved_at_iso TEXT NOT NULL
                 )
             """)
+        try:
+            self.db_path.chmod(0o600)
+        except OSError:
+            pass
+
+    def _query_counts(self, conn: sqlite3.Connection, provider: str, day_utc: str, month_utc: str) -> tuple[int, int]:
+        row_day = conn.execute(
+            "SELECT COUNT(*) as cnt FROM search_usage WHERE provider = ? AND day_utc = ?",
+            (provider, day_utc),
+        ).fetchone()
+        row_month = conn.execute(
+            "SELECT COUNT(*) as cnt FROM search_usage WHERE provider = ? AND month_utc = ?",
+            (provider, month_utc),
+        ).fetchone()
+        return (row_day["cnt"] if row_day else 0), (row_month["cnt"] if row_month else 0)
 
     def ensure_budget_available(self, provider: str) -> None:
         stats = self.get_budget_stats(provider)
@@ -126,17 +142,10 @@ class SearchBudgetTracker:
         day_utc = now.strftime("%Y-%m-%d")
         month_utc = now.strftime("%Y-%m")
         with self._get_conn() as conn:
-            row_day = conn.execute(
-                "SELECT COUNT(*) as cnt FROM search_usage WHERE provider = ? AND day_utc = ?",
-                (provider, day_utc)
-            ).fetchone()
-            row_month = conn.execute(
-                "SELECT COUNT(*) as cnt FROM search_usage WHERE provider = ? AND month_utc = ?",
-                (provider, month_utc)
-            ).fetchone()
+            used_today, used_month = self._query_counts(conn, provider, day_utc, month_utc)
             return {
-                "used_today": row_day["cnt"] if row_day else 0,
-                "used_month": row_month["cnt"] if row_month else 0,
+                "used_today": used_today,
+                "used_month": used_month,
                 "daily_limit": self.daily_limit,
                 "monthly_limit": self.monthly_limit
             }
