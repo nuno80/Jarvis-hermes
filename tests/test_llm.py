@@ -129,9 +129,11 @@ class GeminiProviderTests(unittest.TestCase):
             self.assertEqual(job_usage["total_tokens"], 165)
             self.assertAlmostEqual(job_usage["total_cost_usd"], usage["cost_usd"])
             
-            # Verify no secret leaked in tracker audit logs
-            tracker_data = json.loads(self.budget_file.read_text(encoding="utf-8"))
-            self.assertNotIn("secret-key-12345", json.dumps(tracker_data))
+            # Verify no secret leaked in tracker store (SQLite, no legacy JSON mirror)
+            import sqlite3
+            with sqlite3.connect(self.tracker.db_path) as conn:
+                rows = conn.execute("SELECT * FROM budget_records").fetchall()
+            self.assertNotIn("secret-key-12345", json.dumps([list(r) for r in rows]))
 
     def test_cli_gemini_demo(self):
         """CLI gemini-demo executes cleanly and demonstrates credentials check, model validation, and tracking."""

@@ -16,23 +16,68 @@ from jarvis_hermes.approval import ApprovalStore, ApprovalError
 MAX_PROJECT_FILE_BYTES = 524288  # 512 KiB
 DEFAULT_PAGE_SIZE = 8000
 
+# 1. Multiline PEM private keys
+_PEM_PRIVATE_KEY_RE = re.compile(
+    r"-----BEGIN [A-Z0-9 _-]*PRIVATE KEY-----[\s\S]*?-----END [A-Z0-9 _-]*PRIVATE KEY-----"
+)
+
+# 2. URL Basic Auth: scheme://user:password@host -> scheme://user:[REDACTED]@host
+_URL_BASIC_AUTH_RE = re.compile(
+    r"(\b[a-zA-Z][a-zA-Z0-9+.-]*://[^/\s:@]+:)([^@\s/]+)(@)"
+)
+
+# 3. Explicit Bearer / Basic authorization headers
+_AUTH_BEARER_RE = re.compile(
+    r"(?i)(\b(?:authorization[\'\"]?\s*[:=]\s*[\'\"]?)?(?:bearer|basic)\s+)([a-zA-Z0-9_\-\.\+/=~!@#$%^&*]{8,})"
+)
+
+# 4. Quoted key=value secrets (supports any special char inside quotes)
+_QUOTED_SECRET_KV_RE = re.compile(
+    r"(?i)([\'\"]?(?:api[_-]?key|secret|password|passwd|pwd|token|bearer|auth|authorization|credential|client[_-]?secret)[\'\"]?\s*[:=]\s*)([\'\"])([^\r\n]{4,}?)\2"
+)
+
+# 5. Unquoted key=value secrets (supports special chars like !@#$%^&* up to delimiter/whitespace)
+_UNQUOTED_SECRET_KV_RE = re.compile(
+    r"(?i)([\'\"]?(?:api[_-]?key|secret|password|passwd|pwd|token|bearer|auth|authorization|credential|client[_-]?secret)[\'\"]?[\s:=]+)([^\s\'\",;&\}\}]{6,})"
+)
+
 SECRET_PATTERNS = [
-    re.compile(r'(?i)[\'"]?(api[_-]?key|secret|password|token|bearer|auth|authorization|credential)[\'"]?[\s:=]+([\'"]?)([a-zA-Z0-9_\-\.\+/]{8,})\2'),
     re.compile(r'ghp_[a-zA-Z0-9]{36}'),
     re.compile(r'github_pat_[a-zA-Z0-9]{22}_[a-zA-Z0-9]{59}'),
     re.compile(r'xox[baprs]-[a-zA-Z0-9]{10,48}'),
     re.compile(r'ey[a-zA-Z0-9_-]{10,}\.[a-zA-Z0-9_-]{10,}\.[a-zA-Z0-9_-]{10,}'),
+    re.compile(r'AIza[0-9A-Za-z_-]{35}'),
+    re.compile(r'gsk_[a-zA-Z0-9]{20,}'),
+    re.compile(r'sk-(?:proj-|ant-)?[a-zA-Z0-9_-]{20,}'),
 ]
 
 
 def redact_secrets(text: str) -> str:
+    if not text:
+        return text
     redacted = text
+    # Step 1: Redact PEM blocks
+    redacted = _PEM_PRIVATE_KEY_RE.sub("-----BEGIN PRIVATE KEY-----[REDACTED]-----END PRIVATE KEY-----", redacted)
+    # Step 2: Redact URL basic auth credentials
+    redacted = _URL_BASIC_AUTH_RE.sub(r"\1[REDACTED]\3", redacted)
+    # Step 3: Redact Bearer / Basic tokens
+    redacted = _AUTH_BEARER_RE.sub(r"\1[REDACTED]", redacted)
+    # Step 4: Redact quoted key-value secrets preserving quote style and separator
+    redacted = _QUOTED_SECRET_KV_RE.sub(r"\1\2[REDACTED]\2", redacted)
+    # Step 5: Redact unquoted key-value secrets (skipping already redacted values)
+    def _unquoted_repl(match: re.Match) -> str:
+        prefix = match.group(1)
+        val = match.group(2)
+        if "[REDACTED]" in val:
+            return match.group(0)
+        sep = ":" if ":" in prefix else "="
+        key_name = re.sub(r"[\s:=]+$", "", prefix)
+        return f"{key_name}{sep}[REDACTED]"
+    redacted = _UNQUOTED_SECRET_KV_RE.sub(_unquoted_repl, redacted)
+
+    # Step 6: Redact standalone known token formats
     for pat in SECRET_PATTERNS:
         def repl(match: re.Match) -> str:
-            if match.re.groups >= 3:
-                prefix = match.group(1)
-                quote = match.group(2)
-                return f"{prefix}:{quote}[REDACTED]{quote}" if ":" in match.group(0) else f"{prefix}={quote}[REDACTED]{quote}"
             val = match.group(0)
             return val[:4] + "[REDACTED]" if len(val) > 8 else "[REDACTED]"
         redacted = pat.sub(repl, redacted)

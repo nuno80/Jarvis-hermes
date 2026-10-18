@@ -56,18 +56,6 @@ class BudgetTracker:
         else:
             self.db_path = self.storage_path
         self._init_db()
-        self._sync_legacy_json()
-
-    def _sync_legacy_json(self) -> None:
-        """Keep optional JSON mirror or empty JSON file for backward compatibility if configured as .json."""
-        if self.storage_path.suffix == ".json":
-            try:
-                with self._get_connection() as conn:
-                    rows = conn.execute("SELECT * FROM budget_records").fetchall()
-                    records = [dict(r) for r in rows]
-                self.storage_path.write_text(json.dumps({"records": records}, indent=2), encoding="utf-8")
-            except Exception:
-                pass
 
     def _get_connection(self) -> sqlite3.Connection:
         conn = sqlite3.connect(str(self.db_path), timeout=30.0, isolation_level=None)
@@ -94,6 +82,10 @@ class BudgetTracker:
             """)
             conn.execute("CREATE INDEX IF NOT EXISTS idx_records_job_id ON budget_records(job_id)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_records_day ON budget_records(day_utc)")
+            try:
+                self.db_path.chmod(0o600)
+            except OSError:
+                pass
 
     def check_budget_available(self, job_id: str | None = None) -> None:
         today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
@@ -186,8 +178,6 @@ class BudgetTracker:
             raise
         finally:
             conn.close()
-
-        self._sync_legacy_json()
 
         return UsageRecord(
             job_id=job_id,

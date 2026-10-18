@@ -87,6 +87,25 @@ class ProjectRegistryTests(unittest.TestCase):
         self.assertNotIn("supersecretpass", res["content"])
         self.assertIn("[REDACTED]", res["content"])
 
+    def test_redact_secrets_special_chars_urls_and_pem(self):
+        # 1. Password con caratteri speciali (quotata e non quotata)
+        raw_env = 'PASSWORD="My$up3r!P@ss#2026" api_key=Sec!ret@Key#99'
+        cleaned_env = redact_secrets(raw_env)
+        self.assertNotIn("My$up3r!P@ss#2026", cleaned_env)
+        self.assertNotIn("Sec!ret@Key#99", cleaned_env)
+        self.assertIn("[REDACTED]", cleaned_env)
+
+        # 2. Basic Auth in URL
+        raw_url = "https://admin:Tr0ub4dor&3!@api.example.com/v1/status"
+        cleaned_url = redact_secrets(raw_url)
+        self.assertEqual(cleaned_url, "https://admin:[REDACTED]@api.example.com/v1/status")
+
+        # 3. Chiave privata PEM multilinea
+        raw_pem = "Config:\n-----BEGIN OPENSSH PRIVATE KEY-----\nb3BlbnNzaC1rZXktdjEAAAAABG5vbmU=\n-----END OPENSSH PRIVATE KEY-----\nDone."
+        cleaned_pem = redact_secrets(raw_pem)
+        self.assertNotIn("b3BlbnNzaC1rZXktdjEAAAAABG5vbmU=", cleaned_pem)
+        self.assertIn("-----BEGIN PRIVATE KEY-----[REDACTED]-----END PRIVATE KEY-----", cleaned_pem)
+
     def test_pagination_and_artifact(self):
         big_file = self.wsl_project / "big.log"
         big_content = "x" * 20000

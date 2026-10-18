@@ -176,6 +176,11 @@ def _disk_free_gb(path: str) -> float | None:
         return None
 
 
+def is_wsl() -> bool:
+    """True se l'host corrente e WSL (riusata da server.py e cli.py)."""
+    return platform.system() == "Linux" and "microsoft" in platform.release().lower()
+
+
 def _disk_free_gb_user() -> float | None:
     """Spazio libero del disco reale dell'utente (fail-closed).
 
@@ -183,8 +188,7 @@ def _disk_free_gb_user() -> float | None:
     corrisponde al disco fisico. ``/mnt/c`` e il disco Windows reale
     (unico HD dell'owner); fallback a ``/`` fuori WSL o se illeggibile.
     """
-    release = platform.release().lower()
-    if platform.system() == "Linux" and "microsoft" in release:
+    if is_wsl():
         free_gb = _disk_free_gb("/mnt/c")
         if free_gb is not None:
             return free_gb
@@ -194,15 +198,14 @@ def _disk_free_gb_user() -> float | None:
 def diagnose_local(disk_path: str = "/") -> dict[str, Any]:
     """Diagnostica sola lettura dell'host corrente, riusata da CLI e hook."""
     system = platform.system()
-    release = platform.release().lower()
-    is_wsl = system == "Linux" and "microsoft" in release
+    wsl = is_wsl()
     free_gb = _disk_free_gb(disk_path)
     return {
         "schema_version": SCHEMA_VERSION,
         "host": {
             "system": system,
             "python": platform.python_version(),
-            "is_wsl": is_wsl,
+            "is_wsl": wsl,
         },
         "disk": {"path": disk_path, "free_gb": free_gb},
     }
@@ -232,10 +235,13 @@ def direct_reply(result: DecisionResult) -> str | None:
         plat = "WSL" if host["is_wsl"] else host["system"]
         return f"Macchina {plat} attiva (Python {host['python']})."
     if handler == "repo_status":
-        proc = subprocess.run(
-            ["git", "status", "--short", "--branch"],
-            capture_output=True, text=True, timeout=10,
-        )
+        try:
+            proc = subprocess.run(
+                ["git", "status", "--short", "--branch"],
+                capture_output=True, text=True, timeout=10,
+            )
+        except (OSError, subprocess.SubprocessError):
+            return None
         if proc.returncode != 0:
             return None
         out = proc.stdout.strip()
