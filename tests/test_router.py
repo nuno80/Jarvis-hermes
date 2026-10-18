@@ -191,6 +191,71 @@ class RouterTests(unittest.TestCase):
             # The route itself only outputs routing decision; it has no ability to generate or sign approval tokens.
 
 
+class NoteCreateFastPathTests(unittest.TestCase):
+    """Issue #46: 'crea una nota' -> intent note_create via regola deterministica.
+
+    Seam: RequestRouter.route (stesso seam dei fast-path esistenti).
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.state_dir = Path(self.tmp.name)
+        self.budget_file = self.state_dir / "budget_usage.json"
+        self.tracker = BudgetTracker(self.budget_file, job_limit_usd=1.00)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def _router(self):
+        mock_llm_client = MagicMock(spec=LLMClient)
+        mock_jev_client = MagicMock(spec=JevClient)
+        mock_jev_client.endpoint_url = None  # Jev disattivato: cade nel fallback conservativo
+        return RequestRouter(
+            jev_client=mock_jev_client,
+            llm_client=mock_llm_client,
+            budget_tracker=self.tracker,
+        ), mock_llm_client, mock_jev_client
+
+    def test_crea_una_nota_fast_paths_to_note_create(self):
+        router, mock_llm, mock_jev = self._router()
+        route = router.route("crea una nota: comprare latte e uova", job_id="note-1")
+        self.assertTrue(route.used_fast_path)
+        self.assertEqual(route.intent, "note_create")
+        self.assertEqual(route.handler, "note_create")
+        self.assertEqual(route.target, RoutingTarget.DETERMINISTIC)
+        self.assertEqual(route.classifier, "deterministic_rule")
+        mock_llm.generate.assert_not_called()
+        mock_jev.classify.assert_not_called()
+
+    def test_note_create_variants_match(self):
+        router, _, _ = self._router()
+        for query in (
+            "scrivi una nota sul meeting di domani",
+            "salva una nota con la ricetta del ragu",
+            "creami una nota: chiamare il dentista",
+        ):
+            with self.subTest(query=query):
+                route = router.route(query, job_id="note-variant")
+                self.assertEqual(route.intent, "note_create")
+                self.assertEqual(route.handler, "note_create")
+                self.assertTrue(route.used_fast_path)
+
+    def test_crea_una_lista_does_not_match_note_create(self):
+        """Issue #47 riserva 'lista' a Todoist: mai catturata da note_create."""
+        router, _, _ = self._router()
+        route = router.route("crea una lista della spesa per latte uova pane",
+                              job_id="note-neg-1")
+        self.assertNotEqual(route.intent, "note_create")
+        self.assertFalse(route.used_fast_path)
+
+    def test_notepad_gui_request_does_not_match_note_create(self):
+        """'apri notepad e scrivi una nota' e GUI, non vault (riga dataset esistente)."""
+        router, _, _ = self._router()
+        route = router.route("apri notepad e scrivi una nota", job_id="note-neg-2")
+        self.assertNotEqual(route.intent, "note_create")
+        self.assertFalse(route.used_fast_path)
+
+
 if __name__ == "__main__":
     unittest.main()
 

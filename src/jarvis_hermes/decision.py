@@ -47,7 +47,7 @@ INTENTS = [
     "code_architecture", "code_writing", "dangerous_ambiguous", "debug_help",
     "device_status", "disk_usage", "email_read", "email_reply",
     "explain_concept", "general_question", "git_push", "gui_action",
-    "memory_correction", "memory_search", "preference_update",
+    "memory_correction", "memory_search", "note_create", "preference_update",
     "project_workflow", "repo_status", "run_command", "summarize",
     "travel_compare", "travel_search", "voice_transcribe",
     "web_form_submit", "web_search", "writing",
@@ -57,7 +57,7 @@ HANDLERS = [
     "agenda_create", "agenda_read", "ask_clarification", "device_status",
     "disk_usage", "email_read", "email_reply", "gemini_reasoning",
     "git_push", "gui_action", "memory_correction", "memory_search",
-    "preference_update", "project_workflow", "repo_status", "run_command",
+    "note_create", "preference_update", "project_workflow", "repo_status", "run_command",
     "travel_compare", "travel_search", "voice_transcribe",
     "web_form_submit", "web_search",
 ]
@@ -551,7 +551,8 @@ def pre_turn_dispatch(text: str,
     clean = text.strip() if isinstance(text, str) else ""
     for _pattern, intent, handler in FAST_PATH_RULES:
         if _pattern.search(clean):
-            skill = {"disk_usage": "system_status", "device_status": "system_status"}.get(handler, "dev_tools")
+            skill = {"disk_usage": "system_status", "device_status": "system_status",
+                     "note_create": "memory"}.get(handler, "dev_tools")
             result = DecisionResult(
                 answers={"intent": intent, "handler": handler, "skill_hint": skill},
                 confidences={"overall": 1.0}, model_id="deterministic_rule",
@@ -594,7 +595,9 @@ def pre_turn_dispatch(text: str,
                 "tokens": 0,
                 "escalation_reason": None,
                 "reply": reply,
-                "skill_context": None,
+                "skill_context": (skill_suggestion(result)
+                                    if (reply is None and skill not in (None, "dev_tools"))
+                                    else None),
                 "model_override": None,
             }
     result = apply_policy(decide(build_v1_request(text, job_id=job_id),

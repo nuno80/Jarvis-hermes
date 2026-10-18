@@ -7,6 +7,7 @@ import json
 import math
 import os
 import unittest
+from unittest.mock import MagicMock
 
 from jarvis_hermes.decision import (
     DECISION_SCHEMA,
@@ -238,6 +239,19 @@ class PreTurnDispatchTests(unittest.TestCase):
         self.assertIn("GiB", out["reply"])
         self.assertIsNone(out["skill_context"])
         self.assertIsNone(out["escalation_reason"])
+
+    def test_note_create_injects_memory_skill_without_model_call(self):
+        """Issue #46: System 1 instrada a 'memory', nessun modello, nessuna reply."""
+        model_call = _good_call()
+        model_call = MagicMock(side_effect=model_call)
+        out = pre_turn_dispatch("crea una nota: comprare il latte", model_call=model_call)
+        self.assertEqual(out["path"], "system_1")
+        self.assertEqual(out["intent"], "note_create")
+        self.assertEqual(out["handler"], "note_create")
+        self.assertIsNone(out["reply"])
+        self.assertEqual(out["skill_context"], "Suggested skill to inspect first: memory")
+        self.assertIsNone(out["escalation_reason"])
+        model_call.assert_not_called()
 
     def test_protected_action_has_no_reply_but_keeps_path(self):
         out = pre_turn_dispatch("ciao", model_call=_good_call(

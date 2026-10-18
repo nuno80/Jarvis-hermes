@@ -143,6 +143,9 @@ FAST_PATH_RULES = [
     (re.compile(r"(quanto\s+spazio|spazio\s+libero|disk\s+usage|\bdf\b)", re.IGNORECASE), "disk_usage", "disk_usage"),
     (re.compile(r"(stato\s+(della\s+)?macchina|device\s+status|\buptime\b|memoria\s+libera)", re.IGNORECASE), "device_status", "device_status"),
     (re.compile(r"(git\s+status|stato\s+(del\s+)?(repo|progetto))", re.IGNORECASE), "repo_status", "repo_status"),
+    # Issue #46: 'crea/scrivi/salva (una) nota' -> vault via write_note (System 2).
+    # 'lista' resta fuori (issue #47, Todoist); 'notepad' e GUI, non vault.
+    (re.compile(r"^(?!.*notepad).*?\b(crea(mi)?|scrivi(mi)?|salva(mi)?)\s+(una\s+)?nota\b", re.IGNORECASE), "note_create", "note_create"),
 ]
 
 
