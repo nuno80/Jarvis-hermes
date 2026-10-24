@@ -16,15 +16,28 @@ import json
 import math
 import os
 import platform
+import re
 import shutil
 import subprocess
 import time
 import urllib.request
 from typing import Any, Callable
 
+
+def _env_float(name: str, default: float) -> float:
+    """Float positivo da env; default se assente o non valido."""
+    try:
+        val = float(os.environ[name])
+    except (KeyError, ValueError):
+        return default
+    return val if math.isfinite(val) and val > 0 else default
+
 # Modello System 1 di default (ADR 0007). Override via env OLLAMA_MODEL.
 DEFAULT_MODEL = "qwen3.5:4b"
-DEFAULT_TIMEOUT_S = 30.0
+DEFAULT_ENDPOINT = "http://localhost:11434/api/generate"
+# Il timeout deve stare vicino al budget di latenza: un hook pre-turno non puo
+# bloccare l'utente 30 s. Override via env JARVIS_S1_TIMEOUT_S.
+DEFAULT_TIMEOUT_S = _env_float("JARVIS_S1_TIMEOUT_S", 2.0)
 SCHEMA_VERSION = "1.0"
 SYSTEM1_VERSION = "system1-v1"
 # Statistiche host per la risposta diretta pre-turno (ADR 0005): solo disco
@@ -33,7 +46,8 @@ SYSTEM1_VERSION = "system1-v1"
 # Budget di latenza del fast path (appendice I4 / AT14): oltre -> escalation.
 # Spec: default proposto 300 ms; alzato a 500 ms perche qwen3.5:4b live su
 # RTX 5070 misura ~1.3s a caldo (ADR 0007: total p50 333ms solo modello).
-LATENCY_BUDGET_MS = 500.0
+# Override via env JARVIS_S1_LATENCY_BUDGET_MS (allinearlo alla latenza misurata).
+LATENCY_BUDGET_MS = _env_float("JARVIS_S1_LATENCY_BUDGET_MS", 500.0)
 
 # Domande V1 (appendice I1).
 QUESTION_KEYS = [
@@ -335,8 +349,8 @@ def skill_suggestion(result: DecisionResult) -> str | None:
 
 
 def _mean_logprob_for_span(tokens: list[dict[str, Any]], span_start: int,
-                           span_end: int) -> float:
-    """Media dei logprob sui token che coprono [span_start, span_end) del testo."""
+                           span_end: int, total: bool = False) -> float:
+    """Media (o somma se ``total``) dei logprob sui token che coprono [span_start, span_end)."""
     if span_end <= span_start:
         return float("nan")
     pos = 0
@@ -356,24 +370,37 @@ def _mean_logprob_for_span(tokens: list[dict[str, Any]], span_start: int,
         pos += tlen
     if not vals:
         return float("nan")
-    return sum(vals) / len(vals)
+    return sum(vals) if total else sum(vals) / len(vals)
 
 
 def label_confidence(response_text: str, logprob_tokens: list[dict[str, Any]],
-                     label: str) -> float:
-    """Confidenza di un'etichetta choice: exp(media logprob) sui suoi token.
+                     label: str, key: str | None = None) -> float:
+    """Confidenza di un'etichetta choice: exp(somma logprob) sui suoi token.
 
+    La somma e la probabilita dell'intera etichetta; la media darebbe la
+    probabilita media per token e gonfierebbe le etichette multi-token.
+    Con ``key`` l'etichetta e cercata nel valore di quel campo JSON: senza,
+    due campi con lo stesso valore (intent == handler) leggono gli stessi token.
     Fallisce chiusa (NaN) se l'etichetta non e nel testo o i logprob mancano.
     """
     if not label or not isinstance(response_text, str):
         return float("nan")
-    start = response_text.find(f'"{label}"')
-    if start < 0:
+    if key is not None:
+        m = re.search(r'"%s"\s*:\s*"%s"' % (re.escape(key), re.escape(label)),
+                      response_text)
+        if m is None:
+            return float("nan")
+        end = m.end() - 1  # posizione della virgoletta di chiusura
+        span = (end - len(label), end)
+    else:
+        start = response_text.find(f'"{label}"')
+        if start < 0:
+            return float("nan")
+        span = (start + 1, start + 1 + len(label))
+    total_lp = _mean_logprob_for_span(logprob_tokens, span[0], span[1], total=True)
+    if not math.isfinite(total_lp):
         return float("nan")
-    mean_lp = _mean_logprob_for_span(logprob_tokens, start + 1, start + 1 + len(label))
-    if not math.isfinite(mean_lp):
-        return float("nan")
-    return math.exp(mean_lp)
+    return math.exp(total_lp)
 
 
 def _validate_answers(raw: Any) -> dict[str, Any] | None:
@@ -445,16 +472,19 @@ def ollama_call(prompt: str, fmt: dict[str, Any], model: str,
 
 def decide(request: DecisionRequest,
            model_call: Callable[..., tuple[str, list[dict[str, Any]], int, int]] | None = None,
-           model_id: str = DEFAULT_MODEL,
-           endpoint: str = "http://localhost:11434/api/generate",
-           timeout_s: float = DEFAULT_TIMEOUT_S,
-           latency_budget_ms: float = LATENCY_BUDGET_MS) -> DecisionResult:
+           model_id: str | None = None,
+           endpoint: str = DEFAULT_ENDPOINT,
+           timeout_s: float | None = None,
+           latency_budget_ms: float | None = None) -> DecisionResult:
     """Esegue le domande V1 in una sola chiamata; fail-closed verso system_2 (AT14).
 
     ``model_call`` e il seam di test (prompt, format) -> (testo, logprobs, prompt_tok, eval_tok).
     Lo state non deve mai contenere token di approvazione o segreti (AT13):
     qui viaggia solo il testo utente.
     """
+    model_id = model_id or os.environ.get("OLLAMA_MODEL") or DEFAULT_MODEL
+    timeout_s = DEFAULT_TIMEOUT_S if timeout_s is None else timeout_s
+    latency_budget_ms = LATENCY_BUDGET_MS if latency_budget_ms is None else latency_budget_ms
     start = time.perf_counter()
     text = request.state.get("text", "")
     if not isinstance(text, str) or not text.strip():
@@ -484,7 +514,7 @@ def decide(request: DecisionRequest,
 
     confidences: dict[str, float] = {}
     for key in ("intent", "handler", "skill_hint"):
-        confidences[key] = label_confidence(response_text, lp_tokens, str(answers[key]))
+        confidences[key] = label_confidence(response_text, lp_tokens, str(answers[key]), key=key)
     # ponytail: binary/score senza distribuzione token -> confidenza = media delle choice, documentata come euristica
     choice_confs = [c for c in confidences.values() if math.isfinite(c)]
     proxy = sum(choice_confs) / len(choice_confs) if choice_confs else float("nan")

@@ -147,6 +147,21 @@ class LabelConfidenceTests(unittest.TestCase):
     def test_missing_label_is_nan(self):
         self.assertTrue(math.isnan(label_confidence('{"a":1}', [], "disk_usage")))
 
+    def test_confidence_with_key_disambiguation(self):
+        # Quando due campi hanno lo stesso valore, key disambigua la posizione corretta
+        text = '{"intent":"disk_usage","handler":"disk_usage"}'
+        toks = [
+            {"token": '{"intent":"disk_usage",', "logprob": -0.01,
+             "bytes": list('{"intent":"disk_usage",'.encode())},
+            {"token": '"handler":"', "logprob": -0.01,
+             "bytes": list('"handler":"'.encode())},
+            {"token": "disk_usage", "logprob": -0.3,
+             "bytes": list("disk_usage".encode())},
+            {"token": '"}', "logprob": -0.01, "bytes": list('"}'.encode())},
+        ]
+        conf = label_confidence(text, toks, "disk_usage", key="handler")
+        self.assertAlmostEqual(conf, math.exp(-0.3), places=6)
+
     def test_confidence_never_a_declared_number(self):
         # Il payload con "confidence": 0.99 dichiarato va ignorato: decide()
         # non lo legge mai; la confidenza nasce solo dai logprob.
