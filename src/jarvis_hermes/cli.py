@@ -59,6 +59,7 @@ def diagnose(disk_path: Path, vault_path: str | None) -> dict:
         "llm_groq_stt": "configured" if bool(os.environ.get("GROQ_API_KEY")) else "missing",
         "web_search_tavily": "configured" if bool(os.environ.get("TAVILY_API_KEY")) else "missing",
         "web_search_exa": "configured" if bool(os.environ.get("EXA_API_KEY")) else "missing",
+        "todoist": "configured" if bool(os.environ.get("TODOIST_API_TOKEN")) else "missing",
     }
 
     return {
@@ -122,6 +123,10 @@ def main() -> int:
     email_demo.add_argument("--json", action="store_true", dest="as_json")
     reminder_demo = sub.add_parser("reminder-demo", help="Run an isolated persistent reminder demo (scheduling, DST test, restart recovery, cancellation)")
     reminder_demo.add_argument("--json", action="store_true", dest="as_json")
+    todoist_demo = sub.add_parser("todoist-demo", help="Run a Todoist task list creation demo (fail-fast without token, live with token)")
+    todoist_demo.add_argument("--name", default="Lista spesa demo", help="List (project) name")
+    todoist_demo.add_argument("--tasks", nargs="*", default=["latte", "uova"], help="List tasks")
+    todoist_demo.add_argument("--json", action="store_true", dest="as_json")
     web_demo = sub.add_parser("web-demo", help="Run an isolated web page read, fill, and consent-gated submission demo")
     gemini_demo = sub.add_parser("gemini-demo", help="Run an isolated Gemini call demo recording token and cost tracking")
     routing_demo = sub.add_parser("routing-demo", help="Run an isolated routing demo testing deterministic fast-path, Jev timeout, and conservative fallback")
@@ -1036,6 +1041,26 @@ def main() -> int:
                 print(f"Test DST: {dst_rem['scheduled_local']} -> UTC {dst_rem['due_at_utc']} (annullato: {cancelled['status']})")
                 print(f"Riconciliazione riavvio: {len(reconciled)} reminder segnati 'missed_during_downtime'")
         return 0
+    if args.command == "todoist-demo":
+        from .todoist import TodoistClient, TodoistError
+        client = TodoistClient()
+        try:
+            res = client.create_task_list(name=args.name, tasks=args.tasks)
+            if args.as_json:
+                print(json.dumps({"ok": True, "data": res}, indent=2, ensure_ascii=False))
+            else:
+                print(f"Lista creata: {res['project']['name']} (ID: {res['project']['id']})")
+                print(f"Task creati: {res['tasks_created']}")
+                for t in res["tasks"]:
+                    print(f"  - {t['content']} (ID: {t['id']})")
+            return 0
+        except TodoistError as exc:
+            payload = {"ok": False, "error": {"code": exc.code, "message": exc.message, "retryable": exc.retryable}}
+            if args.as_json:
+                print(json.dumps(payload, indent=2, ensure_ascii=False))
+            else:
+                print(f"Errore Todoist [{exc.code}]: {exc.message}")
+            return 0 if exc.code == "PROVIDER_NOT_CONFIGURED" else 1
     if args.command == "backup":
         from .backup import BackupManager, BackupError
         state_home = Path(os.environ.get("XDG_STATE_HOME", Path.home() / ".local" / "state"))

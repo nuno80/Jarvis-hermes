@@ -164,7 +164,7 @@ class MCPTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(draft['data']['status'], 'draft')
             self.assertFalse(draft['data']['created_event'])
             self.assertTrue(all(t.annotations.readOnlyHint for t in catalog.tools
-                                if t.name not in ('simulate_with_approval', 'git_push', 'job_cancel', 'create_checkpoint', 'write_project_file', 'restore_checkpoint', 'commit_project_changes', 'execute_gui_action', 'run_command', 'submit_web_form', 'update_preference', 'propose_memory', 'forget_memory', 'write_note', 'pi_task', 'email_send', 'create_reminder', 'cancel_reminder', 'calendar_create_event', 'calendar_update_event', 'calendar_delete_event')))
+                                if t.name not in ('simulate_with_approval', 'git_push', 'job_cancel', 'create_checkpoint', 'write_project_file', 'restore_checkpoint', 'commit_project_changes', 'execute_gui_action', 'run_command', 'submit_web_form', 'update_preference', 'propose_memory', 'forget_memory', 'write_note', 'pi_task', 'email_send', 'create_reminder', 'cancel_reminder', 'calendar_create_event', 'calendar_update_event', 'calendar_delete_event', 'todoist_create_task_list')))
 
     async def test_simulated_approval_records_once_and_counts_only_this_decision(self):
         from pathlib import Path
@@ -1028,6 +1028,18 @@ class MCPTests(unittest.IsolatedAsyncioTestCase):
                 self.assertIn('alternatives', data)
                 self.assertEqual(data['alternatives']['cheapest']['offer_id'], 'O1')
                 self.assertEqual(data['alternatives']['fastest']['offer_id'], 'O2')
+
+    async def test_todoist_tools_via_mcp(self):
+        async with connected() as client:
+            catalog = await client.list_tools()
+            self.assertIn('todoist_create_task_list', [t.name for t in catalog.tools])
+
+            # Fail closed when TODOIST_API_TOKEN is not configured
+            res_fail = (await client.call_tool('todoist_create_task_list', {
+                'name': 'Lista Spesa',
+            })).structuredContent
+            self.assertFalse(res_fail['ok'])
+            self.assertEqual(res_fail['error']['code'], 'PROVIDER_NOT_CONFIGURED')
 
 
 

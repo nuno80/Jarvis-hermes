@@ -24,6 +24,7 @@ CONFIRMATION_POLICIES = {
     "update_preference": "Controllo concorrenza e divieto di bypass privilegi",
     "forget_memory": "Cancellazione memoria inferita con backup dichiarativo",
     "pi_task": "Confinamento su ~/programmazione, lock concorrenza e tracciamento Job",
+    "todoist_create_task_list": "Mutativo reversibile (nessuna conferma / task cancellabili da app)",
 }
 
 

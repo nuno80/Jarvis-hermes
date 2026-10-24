@@ -253,6 +253,19 @@ class PreTurnDispatchTests(unittest.TestCase):
         self.assertIsNone(out["escalation_reason"])
         model_call.assert_not_called()
 
+    def test_list_create_injects_tasks_skill_without_model_call(self):
+        """Issue #47: System 1 instrada a 'tasks', nessun modello, nessuna reply."""
+        model_call = _good_call()
+        model_call = MagicMock(side_effect=model_call)
+        out = pre_turn_dispatch("crea una lista della spesa", model_call=model_call)
+        self.assertEqual(out["path"], "system_1")
+        self.assertEqual(out["intent"], "list_create")
+        self.assertEqual(out["handler"], "list_create")
+        self.assertIsNone(out["reply"])
+        self.assertEqual(out["skill_context"], "Suggested skill to inspect first: tasks")
+        self.assertIsNone(out["escalation_reason"])
+        model_call.assert_not_called()
+
     def test_protected_action_has_no_reply_but_keeps_path(self):
         out = pre_turn_dispatch("ciao", model_call=_good_call(
             text=json.dumps(dict(GOOD_RAW, external_effect=True, risk=4))))
