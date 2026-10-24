@@ -24,6 +24,9 @@ class TodoistError(Exception):
         self.retryable = retryable
 
 
+MAX_PROJECT_NAME_LEN = 80
+
+
 class TodoistClient:
     """Client minimale per le API di Todoist (API v1 unificate)."""
 
@@ -127,6 +130,10 @@ class TodoistClient:
         self._ensure_token()
 
         clean_name = name.strip() if isinstance(name, str) else ""
+        # shortcut: titoli lunghi (es. "Spesa: pollo, senape, ..." con 20 item)
+        # verrebbero troncati male da Todoist; taglia a MAX_PROJECT_NAME_LEN.
+        if len(clean_name) > MAX_PROJECT_NAME_LEN:
+            clean_name = clean_name[: MAX_PROJECT_NAME_LEN - 1].rstrip() + "\u2026"
         clean_tasks = (
             [t.strip() for t in tasks if isinstance(t, str) and t.strip()]
             if tasks
