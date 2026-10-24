@@ -30,6 +30,7 @@ from pathlib import Path
 from typing import Any, Iterable, Iterator, Tuple
 
 from jarvis_hermes.approval import ApprovalError, ApprovalStore
+from jarvis_hermes.core import resolve_state_file
 from jarvis_hermes.projects import redact_secrets
 
 MAX_WEB_PAGE_BYTES = 1048576  # 1 MiB
@@ -60,10 +61,7 @@ class SearchResult:
 class SearchBudgetTracker:
     def __init__(self, db_path: Path | str | None = None, daily_limit: int = 50, monthly_limit: int = 1000):
         if db_path is None:
-            state_home = Path(os.environ.get('XDG_STATE_HOME', Path.home() / '.local' / 'state'))
-            state_dir = state_home / 'jarvis-hermes'
-            state_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
-            db_path = state_dir / 'search.sqlite3'
+            db_path = resolve_state_file('search.sqlite3')
         self.db_path = Path(db_path)
         self.daily_limit = int(os.environ.get("JARVIS_SEARCH_DAILY_LIMIT", daily_limit))
         self.monthly_limit = int(os.environ.get("JARVIS_SEARCH_MONTHLY_LIMIT", monthly_limit))
@@ -171,6 +169,10 @@ class SearchBudgetTracker:
             conn.execute(
                 "INSERT OR REPLACE INTO search_cache (cache_key, provider, query, results_json, created_at, retrieved_at_iso) VALUES (?, ?, ?, ?, ?, ?)",
                 (cache_key, provider, query, json.dumps(results), now_ts, retrieved_at_iso)
+            )
+            conn.execute(
+                "DELETE FROM search_cache WHERE created_at < ?",
+                (now_ts - self.ttl_seconds,),
             )
 
 
