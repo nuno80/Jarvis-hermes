@@ -9,7 +9,13 @@ from pathlib import Path
 import sqlite3
 import time
 from typing import Any, Callable
+import urllib.error
+import uuid
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+
+from .core import resolve_state_file, sqlite_connection
+
+TERMINAL_REMINDER_STATES = ("cancelled", "fired", "missed_during_downtime")
 
 
 class ReminderError(Exception):
@@ -22,25 +28,31 @@ class ReminderError(Exception):
 
 def normalize_due_datetime(due_at_input: str | datetime, timezone_name: str) -> tuple[datetime, str]:
     """Parse and normalize a reminder schedule to absolute UTC datetime and local ISO string."""
+    if not timezone_name or not isinstance(timezone_name, str) or not timezone_name.strip():
+        raise ReminderError("INVALID_TIMEZONE", f"Timezone {timezone_name!r} non valida.")
     try:
-        tz = ZoneInfo(timezone_name)
+        tz = ZoneInfo(timezone_name.strip())
     except (ZoneInfoNotFoundError, Exception) as exc:
         raise ReminderError("INVALID_TIMEZONE", f"Timezone {timezone_name!r} non valida: {exc}")
 
     if isinstance(due_at_input, datetime):
         dt = due_at_input
-    else:
+    elif isinstance(due_at_input, str):
         # Tenta parsing ISO 8601
-        cleaned = due_at_input.strip()
+        cleaned = due_at_input.strip().replace("Z", "+00:00")
         try:
             dt = datetime.fromisoformat(cleaned)
         except ValueError as exc:
             raise ReminderError("INVALID_DATETIME", f"Formato data/ora non valido {cleaned!r}: {exc}")
+    else:
+        raise ReminderError("INVALID_DATETIME", f"Formato data/ora non valido: {due_at_input!r}")
 
     if dt.tzinfo is None:
         # Interpretato nel fuso orario locale richiesto
         dt_local = dt.replace(tzinfo=tz)
         dt_utc = dt_local.astimezone(timezone.utc)
+        # Normalizza dt_local ri-convertendo da UTC per risolvere eventuali gap di cambio ora legale (DST)
+        dt_local = dt_utc.astimezone(tz)
     else:
         dt_utc = dt.astimezone(timezone.utc)
         dt_local = dt.astimezone(tz)
@@ -55,9 +67,7 @@ class ReminderStore:
         self._init_db()
 
     def _connection(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(self.database_path, timeout=10.0)
-        conn.row_factory = sqlite3.Row
-        return conn
+        return sqlite_connection(self.database_path, timeout=10.0)
 
     def _init_db(self) -> None:
         with self._connection() as conn:
@@ -78,6 +88,10 @@ class ReminderStore:
                     delivery_metadata_json TEXT
                 )
             """)
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_reminders_status_due "
+                "ON reminders(status, due_timestamp)"
+            )
             conn.commit()
 
     def create(
@@ -88,9 +102,9 @@ class ReminderStore:
         timezone_str: str = "Europe/Rome",
         metadata: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        if not actor_id or actor_id <= 0:
+        if type(actor_id) is not int or actor_id <= 0:
             raise ReminderError("INVALID_REQUEST", "actor_id deve essere un intero positivo.")
-        cleaned_text = (text or "").strip()
+        cleaned_text = (text or "").strip() if isinstance(text, str) else ""
         if not cleaned_text:
             raise ReminderError("INVALID_REQUEST", "Il testo del reminder non può essere vuoto.")
 
@@ -98,7 +112,7 @@ class ReminderStore:
         now = time.time()
         due_ts = dt_utc.timestamp()
 
-        rem_id = f"rem-{sha256(f'{actor_id}:{cleaned_text}:{due_ts}:{now}'.encode()).hexdigest()[:16]}"
+        rem_id = f"rem-{sha256(f'{actor_id}:{cleaned_text}:{due_ts}:{now}:{uuid.uuid4().hex}'.encode()).hexdigest()[:16]}"
 
         with self._connection() as conn:
             conn.execute(
@@ -139,16 +153,17 @@ class ReminderStore:
         status: str | None = None,
         limit: int = 50,
     ) -> list[dict[str, Any]]:
+        safe_limit = max(1, min(int(limit), 500)) if isinstance(limit, int) and not isinstance(limit, bool) else 50
         query = "SELECT * FROM reminders WHERE 1=1"
         params: list[Any] = []
-        if actor_id:
+        if actor_id is not None:
             query += " AND actor_id = ?"
             params.append(actor_id)
         if status:
             query += " AND status = ?"
             params.append(status)
         query += " ORDER BY due_timestamp ASC LIMIT ?"
-        params.append(limit)
+        params.append(safe_limit)
 
         with self._connection() as conn:
             rows = conn.execute(query, params).fetchall()
@@ -159,9 +174,9 @@ class ReminderStore:
             row = conn.execute("SELECT * FROM reminders WHERE reminder_id = ?", (reminder_id,)).fetchone()
             if not row:
                 raise ReminderError("NOT_FOUND", f"Reminder {reminder_id!r} non trovato.")
-            if actor_id and row["actor_id"] != actor_id:
+            if actor_id is not None and row["actor_id"] != actor_id:
                 raise ReminderError("PERMISSION_DENIED", "Non autorizzato ad annullare questo reminder.")
-            if row["status"] in ("cancelled", "fired", "missed_during_downtime"):
+            if row["status"] in TERMINAL_REMINDER_STATES:
                 raise ReminderError("INVALID_STATE", f"Il reminder è già nello stato terminale {row['status']!r}.")
 
             now = time.time()
@@ -231,7 +246,7 @@ class ReminderStore:
                 try:
                     res = sender_func(actor_id, text)
                     metadata = res or {}
-                except (TimeoutError, ConnectionError) as exc:
+                except (TimeoutError, ConnectionError, urllib.error.URLError) as exc:
                     delivery_status = "delivery_uncertain"
                     warning_msg = f"Invio Telegram incerto o timeout: {exc}"
                 except Exception as exc:
@@ -242,7 +257,7 @@ class ReminderStore:
             with self._connection() as conn:
                 existing_warn = r["warnings"] or ""
                 final_warn = (existing_warn + "\n" + (warning_msg or "")).strip()
-                conn.execute(
+                cur = conn.execute(
                     """
                     UPDATE reminders SET
                         status = 'fired',
@@ -250,12 +265,14 @@ class ReminderStore:
                         updated_at = ?,
                         warnings = ?,
                         delivery_metadata_json = ?
-                    WHERE reminder_id = ?
+                    WHERE reminder_id = ? AND status = 'scheduled'
                     """,
                     (delivery_status, now_epoch, final_warn, json.dumps(metadata), rid),
                 )
                 conn.commit()
-            dispatched.append(self.get(rid))
+                updated = cur.rowcount > 0
+            if updated:
+                dispatched.append(self.get(rid))
 
         return dispatched
 
@@ -323,8 +340,5 @@ def dispatch_due_reminders(
 
 def _default_db_path(path: Path | None) -> Path:
     if path:
-        return path
-    state_home = Path(os.environ.get("XDG_STATE_HOME", Path.home() / ".local" / "state"))
-    state_dir = state_home / "jarvis-hermes"
-    state_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
-    return state_dir / "reminders.sqlite3"
+        return Path(path)
+    return resolve_state_file("reminders.sqlite3")
