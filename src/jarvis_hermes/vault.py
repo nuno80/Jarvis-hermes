@@ -1,9 +1,12 @@
-"""Bounded, read-only Markdown access on an owner-controlled local filesystem."""
+"""Bounded Markdown and preferences access on an owner-controlled local filesystem."""
 import os
+import re
 import stat
 from datetime import datetime, timezone
 from hashlib import sha256
 from pathlib import Path, PurePosixPath
+from typing import Any
+import uuid
 import yaml
 
 MAX_NOTE_BYTES = 262144
@@ -11,6 +14,7 @@ MAX_ENTRIES = 5000
 MAX_SEARCH_NOTES = 500
 MAX_PREFERENCE_BYTES = 65536
 FORBIDDEN_PREFERENCE_KEYS = frozenset({'permissions', 'security', 'approval', 'policy', 'approver', 'system_auth'})
+_SAFE_DOMAIN_RE = re.compile(r"^[a-zA-Z0-9_-]{1,64}$")
 
 
 
@@ -76,9 +80,7 @@ class Vault:
                 'next_offset': offset + limit if offset + limit < len(text) else None,
                 'untrusted_content': True}
 
-    def search(self, query: str, limit: int = 10) -> dict:
-        if not query.strip() or len(query) > 200 or not 1 <= limit <= 20:
-            raise VaultError('INVALID_ARGUMENT', 'Provide 1..200 query characters and a result limit of 1..20.')
+    def _list_safe_note_ids(self) -> tuple[list[str], int, bool]:
         root = self.root()
         folders, candidates = [root], []
         entries = 0
@@ -86,7 +88,6 @@ class Vault:
         truncated = False
         while folders and entries < MAX_ENTRIES:
             folder = folders.pop()
-            # Check again in case a folder changed since it was enumerated.
             if folder.is_symlink() or folder.is_junction() or not folder.resolve().is_relative_to(root):
                 skipped += 1
                 continue
@@ -107,9 +108,15 @@ class Vault:
             except OSError:
                 skipped += 1
         truncated = truncated or bool(folders) or len(candidates) > MAX_SEARCH_NOTES
+        return sorted(candidates)[:MAX_SEARCH_NOTES], skipped, truncated
+
+    def search(self, query: str, limit: int = 10) -> dict:
+        if not query.strip() or len(query) > 200 or not 1 <= limit <= 20:
+            raise VaultError('INVALID_ARGUMENT', 'Provide 1..200 query characters and a result limit of 1..20.')
+        candidates, skipped, truncated = self._list_safe_note_ids()
         matches = []
         scanned = 0
-        for note_id in sorted(candidates)[:MAX_SEARCH_NOTES]:
+        for note_id in candidates:
             try:
                 text, version = self.load(note_id)
             except (VaultError, OSError, UnicodeError):
@@ -158,7 +165,7 @@ class Vault:
 
         # Ensure parent dirs exist safely
         target.parent.mkdir(parents=True, exist_ok=True)
-        temp_file = target.parent / f'.{target.name}.tmp.{os.getpid()}'
+        temp_file = target.parent / f'.{target.name}.tmp.{uuid.uuid4().hex}'
         try:
             temp_file.write_bytes(raw)
             temp_file.replace(target)
@@ -170,11 +177,11 @@ class Vault:
         new_text, new_version = self.load(note_id)
         return {'note_id': note_id, 'version': new_version, 'size_bytes': len(raw)}
 
-    def propose_memory(self, domain: str, key: str, value: any,
+    def propose_memory(self, domain: str, key: str, value: Any,
                        evidence: str, confidence: float = 0.6,
                        note_id: str | None = None) -> dict:
         """Register a candidate/soft inferred memory without promoting it to an explicit constraint."""
-        if not domain or not key:
+        if not domain or not key or not _SAFE_DOMAIN_RE.match(domain):
             raise VaultError('INVALID_ARGUMENT', 'Domain and key must be non-empty strings.')
         if not 0.0 <= confidence <= 1.0:
             raise VaultError('INVALID_ARGUMENT', 'Confidence must be between 0.0 and 1.0.')
@@ -185,16 +192,21 @@ class Vault:
         is_conflicting_explicit = key in domain_explicit and domain_explicit[key] != value
 
         target_note_id = note_id or f"Knowledge/Inferred/{domain}.md"
-        # Check if note already exists
-        root = self.root()
-        full_path = root / target_note_id
 
         existing_frontmatter = {}
         body = f"# Memory: {domain}\n\nCandidate inferred preference.\n"
         expected_ver = None
 
-        if full_path.is_file():
+        try:
             text, expected_ver = self.load(target_note_id)
+        except VaultError as exc:
+            if exc.code == 'PERMISSION_DENIED':
+                raise
+            text = None
+        except FileNotFoundError:
+            text = None
+
+        if text is not None:
             if text.startswith('---\n'):
                 end_idx = text.find('\n---\n', 4)
                 if end_idx != -1:
@@ -259,7 +271,8 @@ class Vault:
         backup_dir = root / '.jarvis_backups'
         backup_dir.mkdir(parents=True, exist_ok=True)
         retention_info = "Local backup stored in .jarvis_backups; retention declared per backup policy."
-        backup_file = backup_dir / f"{target.name}.{int(datetime.now(timezone.utc).timestamp())}.bak"
+        ts_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
+        backup_file = backup_dir / f"{target.name}.{ts_ms}.bak"
         backup_file.write_bytes(target.read_bytes())
 
         if key is None:
@@ -308,9 +321,13 @@ class Vault:
         """Load typed explicit preferences from preferences.yaml in the vault root."""
         root = self.root()
         pref_path = root / 'preferences.yaml'
+        if pref_path.is_symlink() or pref_path.is_junction():
+            raise VaultError('PERMISSION_DENIED', 'preferences.yaml cannot be a symbolic link.')
         if not pref_path.is_file():
             return {}, 'empty'
         info = pref_path.stat()
+        if not stat.S_ISREG(info.st_mode) or info.st_nlink > 1:
+            raise VaultError('PERMISSION_DENIED', 'preferences.yaml must be an ordinary unlinked file.')
         if info.st_size > MAX_PREFERENCE_BYTES:
             raise VaultError('PREFERENCE_TOO_LARGE', 'preferences.yaml exceeds maximum size.')
         raw = pref_path.read_bytes()
@@ -326,7 +343,7 @@ class Vault:
         safe_prefs = {k: v for k, v in parsed.items() if k.lower() not in FORBIDDEN_PREFERENCE_KEYS}
         return safe_prefs, digest
 
-    def update_preference(self, key_path: str, value: any, expected_version: str | None = None) -> dict:
+    def update_preference(self, key_path: str, value: Any, expected_version: str | None = None) -> dict:
         """Update a typed explicit preference in preferences.yaml with optimistic concurrency check."""
         root = self.root()
         pref_path = root / 'preferences.yaml'
@@ -346,7 +363,8 @@ class Vault:
         backup_dir = root / '.jarvis_backups'
         backup_dir.mkdir(parents=True, exist_ok=True)
         if pref_path.exists():
-            backup_file = backup_dir / f"preferences.yaml.{int(datetime.now(timezone.utc).timestamp())}.bak"
+            ts_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
+            backup_file = backup_dir / f"preferences.yaml.{ts_ms}.bak"
             backup_file.write_bytes(pref_path.read_bytes())
 
         # Navigate and update dict
@@ -359,7 +377,7 @@ class Vault:
 
         # Atomic write to preferences.yaml
         new_content = yaml.safe_dump(current_prefs, sort_keys=False)
-        temp_file = root / f'.preferences.yaml.tmp.{os.getpid()}'
+        temp_file = root / f'.preferences.yaml.tmp.{uuid.uuid4().hex}'
         try:
             temp_file.write_text(new_content, encoding='utf-8')
             temp_file.replace(pref_path)
@@ -374,18 +392,15 @@ class Vault:
     def get_profile(self) -> dict:
         """Return the compiled user profile combining explicit preferences and scanned markdown frontmatter."""
         explicit, pref_version = self.load_preferences()
-        root = self.root()
 
         # Scan vault notes for frontmatter preferences and notes (e.g. 00-System/Preferences.md or other notes)
         frontmatter_notes = []
         ambiguities = []
 
         try:
-            for item in root.glob('**/*.md'):
-                if item.name.startswith('.') or item.is_symlink():
-                    continue
+            candidates, _, _ = self._list_safe_note_ids()
+            for rel_id in candidates:
                 try:
-                    rel_id = item.relative_to(root).as_posix()
                     text, version = self.load(rel_id)
                 except Exception:
                     continue
