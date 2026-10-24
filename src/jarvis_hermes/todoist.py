@@ -25,15 +25,16 @@ class TodoistError(Exception):
 
 
 class TodoistClient:
-    """Client minimale per le API REST v2 di Todoist."""
+    """Client minimale per le API di Todoist (API v1 unificate)."""
 
     def __init__(
         self,
         api_token: str | None = None,
-        base_url: str = "https://api.todoist.com/rest/v2",
+        base_url: str = "https://api.todoist.com/api/v1",
         timeout_seconds: float = 10.0,
     ):
-        self.api_token = (api_token if api_token is not None else os.environ.get("TODOIST_API_TOKEN", "")).strip()
+        token_from_env = os.environ.get("TODOIST_API_TOKEN") or os.environ.get("TODOIST_API_KEY") or ""
+        self.api_token = (api_token if api_token is not None else token_from_env).strip()
         self.base_url = base_url.rstrip("/")
         self.timeout_seconds = timeout_seconds
 

@@ -59,7 +59,7 @@ def diagnose(disk_path: Path, vault_path: str | None) -> dict:
         "llm_groq_stt": "configured" if bool(os.environ.get("GROQ_API_KEY")) else "missing",
         "web_search_tavily": "configured" if bool(os.environ.get("TAVILY_API_KEY")) else "missing",
         "web_search_exa": "configured" if bool(os.environ.get("EXA_API_KEY")) else "missing",
-        "todoist": "configured" if bool(os.environ.get("TODOIST_API_TOKEN")) else "missing",
+        "todoist": "configured" if bool(os.environ.get("TODOIST_API_TOKEN") or os.environ.get("TODOIST_API_KEY")) else "missing",
     }
 
     return {

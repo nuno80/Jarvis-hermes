@@ -33,8 +33,8 @@ Quando l'utente richiede di creare una lista (es. "crea una lista della spesa", 
 
 ## Decisione
 
-1. **Provider Primario:** **Todoist** tramite la REST API v2 (`https://api.todoist.com/rest/v2`), usando `urllib.request` standard (nessun SDK esterno).
-2. **Credenziali:** Letta esclusivamente dalla variabile d'ambiente `TODOIST_API_TOKEN`. Mai salvata in vault, mai esposta in log, URL o messaggi (AT13, filtrata da `redact_secrets`).
+1. **Provider Primario:** **Todoist** tramite la API v1 unificata (`https://api.todoist.com/api/v1`), usando `urllib.request` standard (nessun SDK esterno). A febbraio 2026 Todoist ha effettuato il sunset della vecchia REST API v2 (restituendo HTTP 410 Gone).
+2. **Credenziali:** Letta esclusivamente dalla variabile d'ambiente `TODOIST_API_TOKEN` (o `TODOIST_API_KEY` come alias). Mai salvata in vault, mai esposta in log, URL o messaggi (AT13, filtrata da `redact_secrets`).
 3. **Fail-Closed / No Mock:** In assenza di `TODOIST_API_TOKEN`, il tool e la CLI sollevano immediatamente `PROVIDER_NOT_CONFIGURED` o `CREDENTIALS_REQUIRED` indicando le istruzioni di configurazione. Non vengono mai generate o simulate checklist fittizie in chat.
 4. **Politica di Conferma:** Operazione mutativa reversibile: non richiede conferma interattiva (i task creati sono cancellabili dall'app Todoist).
 5. **Disambiguazione Routing (#46 vs #47):**

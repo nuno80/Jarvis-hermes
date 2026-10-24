@@ -38,6 +38,12 @@ class TodoistTests(unittest.TestCase):
             client.create_task_list(name="", tasks=[])
         self.assertEqual(ctx.exception.code, "INVALID_PARAMETER")
 
+    def test_accepts_todoist_api_key_alias(self):
+        """Accetta TODOIST_API_KEY se TODOIST_API_TOKEN non è definita."""
+        with patch.dict(os.environ, {"TODOIST_API_KEY": "alias_token_xyz"}, clear=True):
+            client = TodoistClient()
+            self.assertEqual(client.api_token, "alias_token_xyz")
+
     @patch("urllib.request.urlopen")
     def test_create_project_only(self, mock_urlopen):
         """Crea solo la lista (progetto) senza task."""
@@ -64,7 +70,7 @@ class TodoistTests(unittest.TestCase):
         self.assertEqual(mock_urlopen.call_count, 1)
         req = mock_urlopen.call_args[0][0]
         self.assertEqual(req.method, "POST")
-        self.assertEqual(req.full_url, "https://api.todoist.com/rest/v2/projects")
+        self.assertEqual(req.full_url, "https://api.todoist.com/api/v1/projects")
         self.assertEqual(req.headers["Authorization"], "Bearer test_secret_token_abc")
         sent_body = json.loads(req.data.decode("utf-8"))
         self.assertEqual(sent_body, {"name": "Lista Spesa"})
@@ -117,7 +123,7 @@ class TodoistTests(unittest.TestCase):
         self.assertEqual(mock_urlopen.call_count, 3)
         # Task 1 check
         req_task1 = mock_urlopen.call_args_list[1][0][0]
-        self.assertEqual(req_task1.full_url, "https://api.todoist.com/rest/v2/tasks")
+        self.assertEqual(req_task1.full_url, "https://api.todoist.com/api/v1/tasks")
         body1 = json.loads(req_task1.data.decode("utf-8"))
         self.assertEqual(body1, {"content": "Latte", "project_id": "proj_456"})
 
@@ -139,7 +145,7 @@ class TodoistTests(unittest.TestCase):
         self.assertEqual(result["project"]["id"], "inbox")
         self.assertEqual(result["tasks_created"], 1)
         req = mock_urlopen.call_args[0][0]
-        self.assertEqual(req.full_url, "https://api.todoist.com/rest/v2/tasks")
+        self.assertEqual(req.full_url, "https://api.todoist.com/api/v1/tasks")
         body = json.loads(req.data.decode("utf-8"))
         self.assertEqual(body, {"content": "Chiamare commercialista"})
 
@@ -165,7 +171,7 @@ class TodoistTests(unittest.TestCase):
     def test_401_raises_authentication_failed(self, mock_urlopen):
         """HTTP 401 Unauthorized solleva AUTHENTICATION_FAILED (non retryable)."""
         err = urllib.error.HTTPError(
-            url="https://api.todoist.com/rest/v2/projects",
+            url="https://api.todoist.com/api/v1/projects",
             code=401,
             msg="Unauthorized",
             hdrs={},
@@ -183,7 +189,7 @@ class TodoistTests(unittest.TestCase):
     def test_429_raises_rate_limit_exceeded(self, mock_urlopen):
         """HTTP 429 solleva RATE_LIMIT_EXCEEDED (retryable)."""
         err = urllib.error.HTTPError(
-            url="https://api.todoist.com/rest/v2/projects",
+            url="https://api.todoist.com/api/v1/projects",
             code=429,
             msg="Too Many Requests",
             hdrs={},
@@ -201,7 +207,7 @@ class TodoistTests(unittest.TestCase):
     def test_500_raises_provider_error(self, mock_urlopen):
         """HTTP 500 solleva PROVIDER_ERROR (retryable)."""
         err = urllib.error.HTTPError(
-            url="https://api.todoist.com/rest/v2/projects",
+            url="https://api.todoist.com/api/v1/projects",
             code=500,
             msg="Internal Server Error",
             hdrs={},
