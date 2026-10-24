@@ -301,11 +301,60 @@ class ListCreateFastPathTests(unittest.TestCase):
             "aggiungi una lista delle cose da comprare",
             "crea la lista della spesa",
             "crea una nuova lista to-do",
+            "crea le liste della spesa",
+            "crea un todo",
+            "crea un todo per le vacanze",
+            "aggiungi un task per il weekend",
+            "crea un task: comprare il latte",
+            "crea un to-do per domani",
         ):
             with self.subTest(query=query):
                 route = router.route(query, job_id="list-variant")
                 self.assertEqual(route.intent, "list_create")
                 self.assertEqual(route.handler, "list_create")
+                self.assertTrue(route.used_fast_path)
+
+    def test_timeless_reminder_routes_to_todoist(self):
+        """Ibrida #47: promemoria/ricordami SENZA data/ora -> Todoist."""
+        router, _, _ = self._router()
+        for query in (
+            "crea un promemoria",
+            "crea un promemoria per la palestra",
+            "ricordami di comprare il latte",
+            "crea un reminder per la palestra",
+            "aggiungi un promemoria: chiamare Marco",
+        ):
+            with self.subTest(query=query):
+                route = router.route(query, job_id="list-reminder")
+                self.assertEqual(route.intent, "list_create")
+                self.assertEqual(route.handler, "list_create")
+                self.assertTrue(route.used_fast_path)
+
+    def test_timed_reminder_does_not_fast_path_to_todoist(self):
+        """Ibrida #47 + ADR 0014: promemoria CON data/ora -> create_reminder, non fast-path."""
+        router, _, _ = self._router()
+        for query in (
+            "ricordami di chiamare mamma domani alle 9",
+            "crea un promemoria per domani alle 9",
+            "ricordami tra 2 ore di bere",
+            "crea un reminder per lunedi alle 10",
+        ):
+            with self.subTest(query=query):
+                route = router.route(query, job_id="list-timed")
+                self.assertNotEqual(route.intent, "list_create")
+                self.assertFalse(route.used_fast_path)
+
+    def test_obsidian_forces_vault_over_todoist(self):
+        """Ibrida #47: 'obsidian' esplicito -> note_create/vault anche per liste."""
+        router, _, _ = self._router()
+        for query in (
+            "crea una lista obsidian della spesa",
+            "crea un todo obsidian per le vacanze",
+        ):
+            with self.subTest(query=query):
+                route = router.route(query, job_id="list-obsidian")
+                self.assertEqual(route.intent, "note_create")
+                self.assertEqual(route.handler, "note_create")
                 self.assertTrue(route.used_fast_path)
 
     def test_crea_una_nota_does_not_match_list_create(self):

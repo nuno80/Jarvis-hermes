@@ -317,7 +317,7 @@ def build_server() -> FastMCP:
     @server.tool(annotations=destructive)
     def write_note(note_id: str, content: str, expected_version: str | None = None,
                    request_id: str | None = None) -> dict[str, Any]:
-        """Write or update a markdown note in the vault with concurrency conflict detection."""
+        """Crea una NOTA nel vault Obsidian. Solo per 'nota'; liste/todo/promemoria vanno su Todoist."""
         return respond(lambda: vault.write_note(note_id=note_id, content=content, expected_version=expected_version), request_id)
 
     @server.tool(annotations=readonly)
@@ -1016,7 +1016,7 @@ def build_server() -> FastMCP:
     @server.tool(annotations=destructive)
     def create_reminder(text: str, due_at: str, timezone_str: str = 'Europe/Rome',
                         request_id: str | None = None) -> dict[str, Any]:
-        """Schedule an explicit, persistent reminder with timezone and absolute UTC expiry. Consultable and cancellable."""
+        """Reminder con SCADENZA (data/ora): Telegram avvisa all'ora. Senza ora usa todoist_create_task_list."""
         def _do_create() -> dict[str, Any]:
             actor_id = _configured_approver()
             return reminder_store.create(actor_id=actor_id, text=text, due_at=due_at, timezone_str=timezone_str)
@@ -1046,7 +1046,7 @@ def build_server() -> FastMCP:
     def todoist_create_task_list(name: str, tasks: list[str] | None = None,
                                  project_id: str | None = None,
                                  request_id: str | None = None) -> dict[str, Any]:
-        """Crea una lista (progetto) o task associati su Todoist. Operazione mutativa reversibile."""
+        """Crea LISTA/TODO/TASK su Todoist (anche promemoria senza ora). Con data/ora usa create_reminder."""
         def _do_create() -> dict[str, Any]:
             client = TodoistClient()
             return client.create_task_list(name=name, tasks=tasks, project_id=project_id)
