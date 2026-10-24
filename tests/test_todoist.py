@@ -251,6 +251,75 @@ class TodoistTests(unittest.TestCase):
         self.assertLessEqual(len(sent), 80)
         self.assertTrue(sent.endswith("\u2026"))
 
+    @patch("urllib.request.urlopen")
+    def test_403_raises_authentication_failed(self, mock_urlopen):
+        """HTTP 403 (permessi insufficienti) solleva AUTHENTICATION_FAILED."""
+        err = urllib.error.HTTPError(
+            url="https://api.todoist.com/api/v1/projects",
+            code=403,
+            msg="Forbidden",
+            hdrs={},
+            fp=io.BytesIO(b'{"error": "Forbidden"}'),
+        )
+        mock_urlopen.side_effect = err
+        client = TodoistClient(api_token="valid_token")
+        with self.assertRaises(TodoistError) as ctx:
+            client.create_task_list(name="Spesa")
+        self.assertEqual(ctx.exception.code, "AUTHENTICATION_FAILED")
+        self.assertFalse(ctx.exception.retryable)
+
+    def test_too_many_tasks_rejected(self):
+        """Piu di MAX_TASKS_PER_CALL task solleva INVALID_PARAMETER senza chiamate API."""
+        client = TodoistClient(api_token="valid_token_123")
+        with self.assertRaises(TodoistError) as ctx:
+            client.create_task_list(
+                name="Spesa", tasks=[f"item{i}" for i in range(51)]
+            )
+        self.assertEqual(ctx.exception.code, "INVALID_PARAMETER")
+
+    @patch("urllib.request.urlopen")
+    def test_missing_project_id_raises_provider_error(self, mock_urlopen):
+        """Risposta progetto senza id solleva PROVIDER_ERROR (mai id 'None')."""
+        mock_response = MagicMock()
+        mock_response.status = 200
+        mock_response.read.return_value = json.dumps({"name": "Spesa"}).encode("utf-8")
+        mock_response.__enter__.return_value = mock_response
+        mock_urlopen.return_value = mock_response
+        client = TodoistClient(api_token="tok")
+        with self.assertRaises(TodoistError) as ctx:
+            client.create_task_list(name="Spesa")
+        self.assertEqual(ctx.exception.code, "PROVIDER_ERROR")
+        self.assertNotIn("None", str(ctx.exception.message))
+
+    @patch("urllib.request.urlopen")
+    def test_partial_task_failure_is_not_retryable(self, mock_urlopen):
+        """Se 1 task su 2 fallisce, retryable=False e conteggio (creati 1/2)."""
+        proj_resp = MagicMock()
+        proj_resp.status = 200
+        proj_resp.read.return_value = json.dumps({
+            "id": "proj_1", "name": "Spesa", "url": None,
+        }).encode("utf-8")
+        proj_resp.__enter__.return_value = proj_resp
+        task_ok = MagicMock()
+        task_ok.status = 200
+        task_ok.read.return_value = json.dumps({
+            "id": "t1", "content": "Latte",
+        }).encode("utf-8")
+        task_ok.__enter__.return_value = task_ok
+        err = urllib.error.HTTPError(
+            url="https://api.todoist.com/api/v1/tasks",
+            code=500,
+            msg="Internal Server Error",
+            hdrs={},
+            fp=io.BytesIO(b""),
+        )
+        mock_urlopen.side_effect = [proj_resp, task_ok, err]
+        client = TodoistClient(api_token="tok")
+        with self.assertRaises(TodoistError) as ctx:
+            client.create_task_list(name="Spesa", tasks=["Latte", "Uova"])
+        self.assertFalse(ctx.exception.retryable)
+        self.assertIn("creati 1/2", ctx.exception.message)
+
     def test_token_redacted_never_leaked(self):
         """Il token non deve mai trapelare nei messaggi di errore."""
         token = "secret_canary_token_999888"
