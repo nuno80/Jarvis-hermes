@@ -146,6 +146,9 @@ FAST_PATH_RULES = [
     # Issue #46: 'crea/scrivi/salva (una) nota' -> vault via write_note (System 2).
     # 'lista' resta fuori (issue #47, Todoist); 'notepad' e GUI, non vault.
     (re.compile(r"^(?!.*notepad).*?\b(crea(mi)?|scrivi(mi)?|salva(mi)?)\s+(una\s+)?nota\b", re.IGNORECASE), "note_create", "note_create"),
+    # Issue #47: 'crea/aggiungi (una) lista' -> Todoist via todoist_create_task_list (System 2).
+    # 'nota' resta fuori (issue #46, vault); 'notepad' e GUI.
+    (re.compile(r"^(?!.*notepad).*?\b(crea(mi)?|aggiungi(mi)?)\s+(una\s+|la\s+)?(nuova\s+)?lista\b", re.IGNORECASE), "list_create", "list_create"),
 ]
 
 

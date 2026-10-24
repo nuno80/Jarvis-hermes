@@ -31,6 +31,7 @@ from .reminder import ReminderError, ReminderStore
 from .decision import pre_turn_dispatch as system1_pre_turn_dispatch
 from .router import JevClient, RequestRouter, RouterError
 from .travel import TravelError, TravelManager, compare_flight_offers
+from .todoist import TodoistError, TodoistClient
 from .vault import Vault, VaultError
 from .voice import VoiceError
 from .web import WebError, WebManager
@@ -258,6 +259,9 @@ def build_server() -> FastMCP:
             return {**result, 'ok': False, 'data': None,
                     'error': {'code': exc.code, 'message': exc.message, 'retryable': exc.retryable}}
         except EmailError as exc:
+            return {**result, 'ok': False, 'data': None,
+                    'error': {'code': exc.code, 'message': exc.message, 'retryable': exc.retryable}}
+        except TodoistError as exc:
             return {**result, 'ok': False, 'data': None,
                     'error': {'code': exc.code, 'message': exc.message, 'retryable': exc.retryable}}
         except (OSError, UnicodeError, ValueError):
@@ -1037,6 +1041,16 @@ def build_server() -> FastMCP:
             actor_id = _configured_approver()
             return reminder_store.cancel(reminder_id=reminder_id, actor_id=actor_id)
         return respond(_do_cancel, request_id)
+
+    @server.tool(annotations=open_world_destructive)
+    def todoist_create_task_list(name: str, tasks: list[str] | None = None,
+                                 project_id: str | None = None,
+                                 request_id: str | None = None) -> dict[str, Any]:
+        """Crea una lista (progetto) o task associati su Todoist. Operazione mutativa reversibile."""
+        def _do_create() -> dict[str, Any]:
+            client = TodoistClient()
+            return client.create_task_list(name=name, tasks=tasks, project_id=project_id)
+        return respond(_do_create, request_id)
 
     @server.tool(annotations=readonly)
     def email_search(folder: str = 'INBOX', q: str | None = None,

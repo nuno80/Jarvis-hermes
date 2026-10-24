@@ -47,7 +47,7 @@ INTENTS = [
     "code_architecture", "code_writing", "dangerous_ambiguous", "debug_help",
     "device_status", "disk_usage", "email_read", "email_reply",
     "explain_concept", "general_question", "git_push", "gui_action",
-    "memory_correction", "memory_search", "note_create", "preference_update",
+    "list_create", "memory_correction", "memory_search", "note_create", "preference_update",
     "project_workflow", "repo_status", "run_command", "summarize",
     "travel_compare", "travel_search", "voice_transcribe",
     "web_form_submit", "web_search", "writing",
@@ -56,7 +56,7 @@ INTENTS = [
 HANDLERS = [
     "agenda_create", "agenda_read", "ask_clarification", "device_status",
     "disk_usage", "email_read", "email_reply", "gemini_reasoning",
-    "git_push", "gui_action", "memory_correction", "memory_search",
+    "git_push", "gui_action", "list_create", "memory_correction", "memory_search",
     "note_create", "preference_update", "project_workflow", "repo_status", "run_command",
     "travel_compare", "travel_search", "voice_transcribe",
     "web_form_submit", "web_search",
@@ -64,7 +64,7 @@ HANDLERS = [
 
 SKILLS = [
     "admin", "calendar", "desktop_automation", "dev_tools", "email",
-    "memory", "none", "reasoning", "system_status", "travel", "voice",
+    "memory", "none", "reasoning", "system_status", "tasks", "travel", "voice",
     "web_browsing",
 ]
 
@@ -558,7 +558,7 @@ def pre_turn_dispatch(text: str,
     for _pattern, intent, handler in FAST_PATH_RULES:
         if _pattern.search(clean):
             skill = {"disk_usage": "system_status", "device_status": "system_status",
-                     "note_create": "memory"}.get(handler, "dev_tools")
+                     "note_create": "memory", "list_create": "tasks"}.get(handler, "dev_tools")
             result = DecisionResult(
                 answers={"intent": intent, "handler": handler, "skill_hint": skill},
                 confidences={"overall": 1.0}, model_id="deterministic_rule",
