@@ -28,8 +28,11 @@ from typing import Any
 import urllib.parse
 import urllib.request
 
+from jarvis_hermes.core import ensure_secure_file_permissions, ensure_state_dir
 from jarvis_hermes.jobs import JobError, JobStore
 from jarvis_hermes.projects import redact_secrets
+
+_SAFE_MODEL_RE = re.compile(r"^[a-zA-Z0-9._:/-]+$")
 
 
 class PiCodingError(Exception):
@@ -55,7 +58,7 @@ def _confined(path: Path, root: Path) -> Path:
         raise PiCodingError(
             "FORBIDDEN_PATH",
             f"pi_task may only run inside a project under {real_root} (got {real}).")
-    return path
+    return real
 
 
 def resolve_project_path(project_query: str | None = None) -> tuple[Path, str]:
@@ -168,18 +171,25 @@ def send_telegram_notification(text: str) -> bool:
 
     first_chat_id = chat_id.split(",")[0].strip()
     url = f"https://api.telegram.org/bot{token}/sendMessage"
-    payload = urllib.parse.urlencode({
-        "chat_id": first_chat_id,
-        "text": text,
-        "parse_mode": "Markdown",
-    }).encode("utf-8")
+    safe_text = redact_secrets(text)
 
-    try:
-        req = urllib.request.Request(url, data=payload, headers={"User-Agent": "Jarvis-Hermes/1.0"})
-        with urllib.request.urlopen(req, timeout=10) as resp:
-            return resp.status == 200
-    except Exception:
-        return False
+    for mode in ("Markdown", None):
+        params = {"chat_id": first_chat_id, "text": safe_text}
+        if mode:
+            params["parse_mode"] = mode
+        payload = urllib.parse.urlencode(params).encode("utf-8")
+        try:
+            req = urllib.request.Request(url, data=payload, headers={"User-Agent": "Jarvis-Hermes/1.0"})
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                if resp.status == 200:
+                    return True
+        except urllib.error.HTTPError as exc:
+            if exc.code == 400 and mode == "Markdown":
+                continue  # Fallback to plain text if Markdown entities are unbalanced
+            return False
+        except Exception:
+            return False
+    return False
 
 
 def _extract_summary(full_output: str, max_lines: int = 15) -> str:
@@ -200,7 +210,7 @@ def ensure_proxy_servers_running() -> dict[str, str]:
     config_yaml = home / ".cli-proxy-api" / "config.yaml"
     is_cli_running = False
     try:
-        pgrep = subprocess.run(["pgrep", "-f", "cli-proxy-api"], capture_output=True, text=True)
+        pgrep = subprocess.run(["pgrep", "-f", "cli-proxy-api"], stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=5)
         if pgrep.returncode == 0:
             is_cli_running = True
     except Exception:
@@ -212,6 +222,7 @@ def ensure_proxy_servers_running() -> dict[str, str]:
         try:
             subprocess.Popen(
                 [cli_proxy_cmd, "-config", str(config_yaml)],
+                stdin=subprocess.DEVNULL,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
                 start_new_session=True,
@@ -227,7 +238,7 @@ def ensure_proxy_servers_running() -> dict[str, str]:
     cc_proxy_dir = home / "commandcode-proxy"
     is_cc_running = False
     try:
-        pgrep = subprocess.run(["pgrep", "-f", "proxy.mjs"], capture_output=True, text=True)
+        pgrep = subprocess.run(["pgrep", "-f", "node.*proxy\\.mjs"], stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=5)
         if pgrep.returncode == 0:
             is_cc_running = True
     except Exception:
@@ -241,6 +252,7 @@ def ensure_proxy_servers_running() -> dict[str, str]:
             subprocess.Popen(
                 [node_cmd, "proxy.mjs"],
                 cwd=str(cc_proxy_dir),
+                stdin=subprocess.DEVNULL,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
                 start_new_session=True,
@@ -306,10 +318,11 @@ def _run_pi_process(cmd: list[str], cwd: str, timeout: int,
     """Run pi. With a JobStore the process gets its own session and is registered so
     job_cancel can kill the whole process group; without one, behave like subprocess.run."""
     if job_store is None or job_id is None:
-        return subprocess.run(cmd, cwd=cwd, capture_output=True, text=True, timeout=timeout)
+        return subprocess.run(cmd, cwd=cwd, stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=timeout)
 
     job_store.check_not_cancelled(job_id)
-    proc = subprocess.Popen(cmd, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+    proc = subprocess.Popen(cmd, cwd=cwd, stdin=subprocess.DEVNULL,
+                            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                             text=True, start_new_session=(os.name != "nt"))
     try:
         pgid = os.getpgid(proc.pid) if os.name != "nt" else None
@@ -385,6 +398,8 @@ def run_pi_task(
     if not new_session:
         cmd.append("-c")
     if model:
+        if not _SAFE_MODEL_RE.match(model):
+            raise PiCodingError("INVALID_ARGUMENT", f"Invalid model identifier: {model!r}")
         cmd.extend(["--model", model])
     cmd.append(prompt)
 
@@ -404,7 +419,9 @@ def run_pi_task(
         elapsed = round(time.time() - start_time, 2)
         stdout = res.stdout or ""
         stderr = res.stderr or ""
-        full_output = stdout if stdout else stderr
+        full_output = (
+            f"{stdout}\n{stderr}".strip() if (stdout and stderr and res.returncode != 0) else (stdout or stderr)
+        )
 
         # Check git diff stat if target_dir is a git repository
         git_diff_stat = ""
@@ -422,14 +439,13 @@ def run_pi_task(
             pass
 
         clean_output = redact_secrets(full_output.strip())
+        clean_prompt = redact_secrets(prompt)
         is_long = len(clean_output) > max_inline_chars
         output_file_path: str | None = None
         summary = _extract_summary(clean_output)
 
         if is_long:
-            state_home = Path(os.environ.get('XDG_STATE_HOME', Path.home() / '.local' / 'state'))
-            output_dir = state_home / 'jarvis-hermes' / 'pi-outputs'
-            output_dir.mkdir(parents=True, exist_ok=True)
+            output_dir = ensure_state_dir('pi-outputs')
             ts = int(time.time())
             file_path = output_dir / f"pi_{resolved_name}_{ts}.md"
 
@@ -437,13 +453,14 @@ def run_pi_task(
                 f"# Pi Task Output - {resolved_name}\n\n"
                 f"- **Timestamp:** {time.strftime('%Y-%m-%d %H:%M:%S')}\n"
                 f"- **Directory:** `{target_dir}`\n"
-                f"- **Prompt:** {prompt}\n\n"
+                f"- **Prompt:** {clean_prompt}\n\n"
                 f"## Execution Log\n\n```text\n{clean_output}\n```\n"
             )
             if git_diff_stat:
                 file_content += f"\n## Git Changes\n\n```text\n{git_diff_stat}\n```\n"
 
             file_path.write_text(file_content, encoding="utf-8")
+            ensure_secure_file_permissions(file_path)
             output_file_path = str(file_path)
 
         result_payload = {
