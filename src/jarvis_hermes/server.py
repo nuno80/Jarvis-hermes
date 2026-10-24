@@ -1046,7 +1046,7 @@ def build_server() -> FastMCP:
     def todoist_create_task_list(name: str, tasks: list[str] | None = None,
                                  project_id: str | None = None,
                                  request_id: str | None = None) -> dict[str, Any]:
-        """Crea LISTA/TODO/TASK su Todoist (anche promemoria senza ora). Con data/ora usa create_reminder."""
+        """Crea LISTA/TODO/TASK su Todoist. Nome breve (max ~6 parole); item come tasks, non nel nome."""
         def _do_create() -> dict[str, Any]:
             client = TodoistClient()
             return client.create_task_list(name=name, tasks=tasks, project_id=project_id)

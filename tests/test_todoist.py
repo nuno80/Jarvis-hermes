@@ -232,6 +232,25 @@ class TodoistTests(unittest.TestCase):
         self.assertEqual(ctx.exception.code, "PROVIDER_ERROR")
         self.assertTrue(ctx.exception.retryable)
 
+    @patch("urllib.request.urlopen")
+    def test_long_project_name_is_truncated(self, mock_urlopen):
+        """Nomi lunghi (20 item nel titolo) troncati a MAX_PROJECT_NAME_LEN."""
+        mock_response = MagicMock()
+        mock_response.status = 200
+        mock_response.read.return_value = json.dumps({
+            "id": "proj_1", "name": "Spesa", "url": None,
+        }).encode("utf-8")
+        mock_response.__enter__.return_value = mock_response
+        mock_urlopen.return_value = mock_response
+
+        client = TodoistClient(api_token="tok")
+        long_name = "Spesa: " + ", ".join(f"item{i}" for i in range(20))
+        client.create_task_list(name=long_name)
+        req = mock_urlopen.call_args[0][0]
+        sent = json.loads(req.data.decode("utf-8"))["name"]
+        self.assertLessEqual(len(sent), 80)
+        self.assertTrue(sent.endswith("\u2026"))
+
     def test_token_redacted_never_leaked(self):
         """Il token non deve mai trapelare nei messaggi di errore."""
         token = "secret_canary_token_999888"
