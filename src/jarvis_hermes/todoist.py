@@ -25,6 +25,7 @@ class TodoistError(Exception):
 
 
 MAX_PROJECT_NAME_LEN = 80
+MAX_TASKS_PER_CALL = 50
 
 
 class TodoistClient:
@@ -72,10 +73,10 @@ class TodoistClient:
                     return {}
                 return json.loads(body)
         except urllib.error.HTTPError as exc:
-            if exc.code == 401:
+            if exc.code in (401, 403):
                 raise TodoistError(
                     "AUTHENTICATION_FAILED",
-                    "Autenticazione Todoist fallita: token non valido o scaduto.",
+                    "Autenticazione Todoist fallita: token non valido o permessi insufficienti.",
                     retryable=False,
                 ) from exc
             if exc.code == 429:
@@ -139,6 +140,12 @@ class TodoistClient:
             if tasks
             else []
         )
+        if len(clean_tasks) > MAX_TASKS_PER_CALL:
+            raise TodoistError(
+                "INVALID_PARAMETER",
+                f"Troppi task in una singola richiesta (max {MAX_TASKS_PER_CALL}).",
+                retryable=False,
+            )
 
         if not clean_name and not clean_tasks and not project_id:
             raise TodoistError(
@@ -159,7 +166,14 @@ class TodoistClient:
             project_data = {"id": "inbox", "name": "Inbox"}
         elif clean_name:
             res = self._request("POST", "/projects", payload={"name": clean_name})
-            target_project_id = str(res.get("id"))
+            raw_id = res.get("id")
+            if raw_id is None or str(raw_id).strip() == "":
+                raise TodoistError(
+                    "PROVIDER_ERROR",
+                    "Risposta Todoist priva di project id valido.",
+                    retryable=False,
+                )
+            target_project_id = str(raw_id)
             project_data = {
                 "id": target_project_id,
                 "name": res.get("name", clean_name),
@@ -175,7 +189,18 @@ class TodoistClient:
             task_payload: dict[str, Any] = {"content": task_content}
             if target_project_id and target_project_id != "inbox":
                 task_payload["project_id"] = target_project_id
-            task_res = self._request("POST", "/tasks", payload=task_payload)
+            try:
+                task_res = self._request("POST", "/tasks", payload=task_payload)
+            except TodoistError as exc:
+                # Effetti esterni gia avvenuti: retry cieco duplicherebbe.
+                had_side_effects = bool(created_tasks) or (
+                    not project_id and target_project_id is not None
+                )
+                raise TodoistError(
+                    exc.code,
+                    f"{exc.message} (creati {len(created_tasks)}/{len(clean_tasks)} task)",
+                    retryable=False if had_side_effects else exc.retryable,
+                ) from exc
             created_tasks.append(
                 {
                     "id": str(task_res.get("id")),
