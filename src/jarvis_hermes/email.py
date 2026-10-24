@@ -25,6 +25,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from .approval import ApprovalError, ApprovalStore
+from .core import sqlite_connection
 
 YAHOO_IMAP_HOST = "imap.mail.yahoo.com"
 YAHOO_IMAP_PORT = 993
@@ -532,8 +533,7 @@ class EmailAuditLog:
             """)
 
     def _connect(self):
-        conn = sqlite3.connect(self.db_path, timeout=10)
-        return conn
+        return sqlite_connection(self.db_path, timeout=10.0)
 
     def record_sent(
         self,
@@ -548,25 +548,23 @@ class EmailAuditLog:
     ) -> None:
         created_at = datetime.now(timezone.utc).isoformat()
         recipients_str = ", ".join(recipients)
-        with closing(self._connect()) as conn:
-            with conn:
-                conn.execute(
-                    """
-                    INSERT OR REPLACE INTO sent_emails
-                    (message_id, sender, recipients, subject, digest, status, attachments_count, created_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    (message_id, sender, recipients_str, subject, digest, status, attachments_count, created_at),
-                )
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT OR REPLACE INTO sent_emails
+                (message_id, sender, recipients, subject, digest, status, attachments_count, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (message_id, sender, recipients_str, subject, digest, status, attachments_count, created_at),
+            )
 
     def is_recorded(self, message_id: str) -> bool:
-        with closing(self._connect()) as conn:
+        with self._connect() as conn:
             row = conn.execute("SELECT status FROM sent_emails WHERE message_id = ?", (message_id,)).fetchone()
             return row is not None
 
     def get_record(self, message_id: str) -> dict[str, Any] | None:
-        with closing(self._connect()) as conn:
-            conn.row_factory = sqlite3.Row
+        with self._connect() as conn:
             row = conn.execute("SELECT * FROM sent_emails WHERE message_id = ?", (message_id,)).fetchone()
             if row:
                 return dict(row)

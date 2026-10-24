@@ -21,6 +21,7 @@ import sqlite3
 import time
 from typing import Any
 
+from .core import sqlite_connection
 from .projects import redact_secrets
 
 
@@ -53,11 +54,8 @@ class RoutingDecisionStore:
             pass
         self._init_db()
 
-    def _get_connection(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(str(self.db_path), timeout=30.0, isolation_level=None)
-        conn.row_factory = sqlite3.Row
-        conn.execute("PRAGMA journal_mode=WAL")
-        return conn
+    def _get_connection(self):
+        return sqlite_connection(self.db_path, timeout=30.0, isolation_level=None)
 
     def _init_db(self) -> None:
         with self._get_connection() as conn:

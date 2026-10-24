@@ -23,6 +23,7 @@ from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from .approval import ApprovalError, ApprovalStore
+from .core import sqlite_connection
 
 PROVIDER_NAME = "google"
 EVENTS_URL_TEMPLATE = "https://www.googleapis.com/calendar/v3/calendars/{calendar_id}/events"
@@ -514,10 +515,8 @@ class CalendarAuditLog:
             self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._init_db()
 
-    def _get_connection(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(self.db_path)
-        conn.row_factory = sqlite3.Row
-        return conn
+    def _get_connection(self):
+        return sqlite_connection(self.db_path, timeout=10.0)
 
     def _init_db(self) -> None:
         with self._get_connection() as conn:
