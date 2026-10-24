@@ -138,17 +138,37 @@ ITALIAN_ROUTING_DATASET = [
 ]
 
 
+# Parole/orari che indicano un reminder con scadenza (ADR 0014 -> create_reminder,
+# non Todoist). Se presenti, la regola promemoria NON deve matchare: la richiesta
+# cade nel fallback e il System 2 sceglie create_reminder.
+_REMINDER_TIME_HINT = (
+    r"alle|ore|domani|dopodomani|oggi|stanotte|stamattina|stamane|"
+    r"pomeriggio|sera|mattina|tra|fra|luned[i\u00ec]|marted[i\u00ec]|mercoled[i\u00ec]|"
+    r"gioved[i\u00ec]|venerd[i\u00ec]|sabato|domenica|gennaio|febbraio|marzo|aprile|"
+    r"maggio|giugno|luglio|agosto|settembre|ottobre|novembre|dicembre|"
+    r"scadenza|entro|\d{1,2}:\d{2}|\d{1,2}/\d{1,2}"
+)
+
+
 # Deterministic pattern matchers for fast-path
 FAST_PATH_RULES = [
     (re.compile(r"(quanto\s+spazio|spazio\s+libero|disk\s+usage|\bdf\b)", re.IGNORECASE), "disk_usage", "disk_usage"),
     (re.compile(r"(stato\s+(della\s+)?macchina|device\s+status|\buptime\b|memoria\s+libera)", re.IGNORECASE), "device_status", "device_status"),
     (re.compile(r"(git\s+status|stato\s+(del\s+)?(repo|progetto))", re.IGNORECASE), "repo_status", "repo_status"),
+    # Obsidian esplicito forza il vault anche per liste/todo/task (ibrida #47).
+    # Viene prima di note_create/list_create per vincere su "crea una lista obsidian".
+    (re.compile(r"^(?!.*notepad)(?=.*\bobsidian\b).*?\b(crea(mi)?|scrivi(mi)?|salva(mi)?|aggiungi(mi)?)\b", re.IGNORECASE), "note_create", "note_create"),
     # Issue #46: 'crea/scrivi/salva (una) nota' -> vault via write_note (System 2).
     # 'lista' resta fuori (issue #47, Todoist); 'notepad' e GUI, non vault.
     (re.compile(r"^(?!.*notepad).*?\b(crea(mi)?|scrivi(mi)?|salva(mi)?)\s+(una\s+)?nota\b", re.IGNORECASE), "note_create", "note_create"),
     # Issue #47: 'crea/aggiungi (una) lista' -> Todoist via todoist_create_task_list (System 2).
     # 'nota' resta fuori (issue #46, vault); 'notepad' e GUI.
-    (re.compile(r"^(?!.*notepad).*?\b(crea(mi)?|aggiungi(mi)?)\s+(una\s+|la\s+)?(nuova\s+)?lista\b", re.IGNORECASE), "list_create", "list_create"),
+    (re.compile(r"^(?!.*notepad).*?\b(crea(mi)?|aggiungi(mi)?)\s+(una\s+|la\s+|le\s+|della\s+|delle\s+)?(nuova\s+)?list[ae]\b", re.IGNORECASE), "list_create", "list_create"),
+    # Ibrida #47: 'crea/aggiungi ... todo/to-do/task' -> sempre Todoist.
+    (re.compile(r"^(?!.*notepad).*?\b(crea(mi)?|aggiungi(mi)?)\b.*?\b(todo(\-?list)?s?|to[\s\-]?dos?|tasks?)\b", re.IGNORECASE), "list_create", "list_create"),
+    # Ibrida #47: 'crea ... promemoria/reminder' o 'ricordami ...' SENZA data/ora -> Todoist.
+    # Con data/ora non matcha: cade nel fallback e il System 2 usa create_reminder (ADR 0014).
+    (re.compile(r"^(?!.*notepad)(?!.*\b(" + _REMINDER_TIME_HINT + r")\b)(?:.*?\b(crea(mi)?|aggiungi(mi)?)\b.*?\b(promemori[ae]|reminders?)\b|.*?\bricordami\b)", re.IGNORECASE), "list_create", "list_create"),
 ]
 
 
