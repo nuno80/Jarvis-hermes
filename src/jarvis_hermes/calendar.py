@@ -33,6 +33,26 @@ READONLY_SCOPE = "https://www.googleapis.com/auth/calendar.readonly"
 EVENTS_SCOPE = "https://www.googleapis.com/auth/calendar.events"
 
 ATTENDEE_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+RRULE_PREFIX_RE = re.compile(r"^(RRULE|EXRULE|RDATE|EXDATE):", re.IGNORECASE)
+
+
+def _validate_recurrence(recurrence: list[str] | None) -> list[str]:
+    """Valida e normalizza regole RFC 5545 per ricorrenza Google Calendar."""
+    if not recurrence:
+        return []
+    if isinstance(recurrence, str):
+        recurrence = [recurrence]
+    if not isinstance(recurrence, list):
+        raise CalendarError("INVALID_RECURRENCE", "recurrence deve essere una lista di regole RRULE RFC 5545.")
+    normalized = []
+    for rule in recurrence:
+        rule_str = str(rule).strip()
+        if not rule_str:
+            continue
+        if not RRULE_PREFIX_RE.match(rule_str):
+            rule_str = f"RRULE:{rule_str}"
+        normalized.append(rule_str)
+    return normalized
 CONTROL_RE = re.compile(r"[\x00-\x1f\x7f]")
 
 
@@ -453,6 +473,7 @@ class DraftEventRequest:
     location: str | None = None
     description: str = ""
     attendees: list[Any] = field(default_factory=list)
+    recurrence: list[str] | None = None
 
     @classmethod
     def from_params(cls, params: dict[str, Any]) -> "DraftEventRequest":
@@ -469,10 +490,11 @@ class DraftEventRequest:
             attendees = [attendees]
         if not isinstance(attendees, list):
             raise CalendarError("INVALID_ATTENDEE", "attendees deve essere una lista di email.")
+        recurrence = _validate_recurrence(params.get("recurrence"))
         return cls(calendar_id=calendar_id, summary=summary, start=str(params["start"]).strip(),
                    end=str(params["end"]).strip(), time_zone=time_zone,
                    location=params.get("location"), description=str(params.get("description", "") or ""),
-                   attendees=attendees)
+                   attendees=attendees, recurrence=recurrence or None)
 
 
 def compute_calendar_digest(
@@ -485,9 +507,11 @@ def compute_calendar_digest(
     location: str | None = None,
     description: str = "",
     attendees: list[str] | None = None,
+    recurrence: list[str] | None = None,
 ) -> str:
     """Calcola digest SHA-256 univoco e canonico per la creazione di un evento."""
     norm_attendees = sorted([str(a).strip().lower() for a in (attendees or []) if str(a).strip()])
+    norm_recurrence = sorted([str(r).strip() for r in (recurrence or []) if str(r).strip()])
     payload = {
         "calendar_id": str(calendar_id).strip(),
         "summary": str(summary).strip(),
@@ -497,6 +521,7 @@ def compute_calendar_digest(
         "location": str(location).strip() if location else "",
         "description": str(description).strip() if description else "",
         "attendees": norm_attendees,
+        "recurrence": norm_recurrence,
     }
     raw = json.dumps(payload, sort_keys=True, ensure_ascii=False)
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
@@ -634,7 +659,8 @@ class CalendarManager:
             normalized_attendees.append({"email": email, "display_name": item.get("displayName") if isinstance(item, dict) else None})
         digest = hashlib.sha256(json.dumps(
             {"calendar_id": req.calendar_id, "summary": req.summary, "start": start_norm,
-             "end": end_norm, "attendees": sorted(a["email"] for a in normalized_attendees)},
+             "end": end_norm, "attendees": sorted(a["email"] for a in normalized_attendees),
+             "recurrence": req.recurrence or []},
             sort_keys=True, ensure_ascii=False).encode("utf-8")).hexdigest()
         return {
             "status": "draft",
@@ -647,6 +673,7 @@ class CalendarManager:
             "location": req.location,
             "description": req.description,
             "attendees": normalized_attendees,
+            "recurrence": req.recurrence,
             "duration": duration,
             "dst_transition": dst_transition,
             "digest": digest,
@@ -666,6 +693,7 @@ class CalendarManager:
         location: str | None = None,
         description: str = "",
         attendees: list[str] | list[dict[str, Any]] | None = None,
+        recurrence: list[str] | None = None,
     ) -> dict[str, Any]:
         """Prepara una richiesta di approvazione per creare un evento sul calendario (D07)."""
         if not self.approval_store:
@@ -697,6 +725,8 @@ class CalendarManager:
                 raise CalendarError("INVALID_ATTENDEE", f"Indirizzo invitato non valido '{email_val}'.")
             attendee_emails.append(email_val)
 
+        norm_recurrence = _validate_recurrence(recurrence)
+
         digest = compute_calendar_digest(
             calendar_id=calendar_id,
             summary=summary,
@@ -706,6 +736,7 @@ class CalendarManager:
             location=location,
             description=description,
             attendees=attendee_emails,
+            recurrence=norm_recurrence,
         )
 
         target = f"calendar_create:{calendar_id}"
@@ -719,6 +750,7 @@ class CalendarManager:
             "location": location or "",
             "description": description or "",
             "attendees": sorted([e.lower() for e in attendee_emails]),
+            "recurrence": norm_recurrence,
         }
 
         req = self.approval_store.request(actor_id=actor_id, target=target, arguments=arguments)
@@ -729,6 +761,7 @@ class CalendarManager:
             f"- Inizio: {start_norm}\n"
             f"- Fine: {end_norm}\n"
             f"- Timezone: {time_zone}\n"
+            + (f"- Ricorrenza: {', '.join(norm_recurrence)}\n" if norm_recurrence else "")
             + (f"- Luogo: {location}\n" if location else "")
             + (f"- Descrizione: {description}\n" if description else "")
             + (f"- Invitati: {', '.join(attendee_emails)}\n" if attendee_emails else "- Invitati: nessuno\n")
@@ -757,6 +790,7 @@ class CalendarManager:
         location: str | None = None,
         description: str = "",
         attendees: list[str] | list[dict[str, Any]] | None = None,
+        recurrence: list[str] | None = None,
     ) -> dict[str, Any]:
         """Crea un evento su Google Calendar previa verifica e consumo del consenso monouso."""
         if not approval_token:
@@ -787,6 +821,8 @@ class CalendarManager:
             attendee_emails.append(email_val)
             payload_attendees.append({"email": email_val})
 
+        norm_recurrence = _validate_recurrence(recurrence)
+
         digest = compute_calendar_digest(
             calendar_id=calendar_id,
             summary=summary,
@@ -796,6 +832,7 @@ class CalendarManager:
             location=location,
             description=description,
             attendees=attendee_emails,
+            recurrence=norm_recurrence,
         )
 
         target = f"calendar_create:{calendar_id}"
@@ -809,6 +846,7 @@ class CalendarManager:
             "location": location or "",
             "description": description or "",
             "attendees": sorted([e.lower() for e in attendee_emails]),
+            "recurrence": norm_recurrence,
         }
 
         # 1. Verifica e consumo del consenso monouso
@@ -851,6 +889,8 @@ class CalendarManager:
             event_payload["location"] = location
         if payload_attendees:
             event_payload["attendees"] = payload_attendees
+        if norm_recurrence:
+            event_payload["recurrence"] = norm_recurrence
 
         if start_all_day:
             event_payload["start"] = {"date": start_norm}
@@ -919,6 +959,7 @@ class CalendarManager:
         time_zone: str = "Europe/Rome",
         location: str | None = None,
         description: str | None = None,
+        recurrence: list[str] | None = None,
     ) -> dict[str, Any]:
         """Prepara richiesta di approvazione per modifica evento."""
         if not self.approval_store:
@@ -937,6 +978,8 @@ class CalendarManager:
             if start_dt and end_dt and end_dt <= start_dt:
                 raise CalendarError("INVALID_TIME_RANGE", "end deve essere successiva a start.")
 
+        norm_recurrence = _validate_recurrence(recurrence) if recurrence is not None else None
+
         digest = hashlib.sha256(json.dumps({
             "calendar_id": calendar_id,
             "event_id": event_id,
@@ -944,6 +987,7 @@ class CalendarManager:
             "start": start_norm,
             "end": end_norm,
             "location": location,
+            "recurrence": norm_recurrence,
         }, sort_keys=True, ensure_ascii=False).encode("utf-8")).hexdigest()
 
         target = f"calendar_update:{calendar_id}:{event_id}"
@@ -957,6 +1001,7 @@ class CalendarManager:
             "time_zone": time_zone,
             "location": location,
             "description": description,
+            "recurrence": norm_recurrence,
         }
         req = self.approval_store.request(actor_id=actor_id, target=target, arguments=arguments)
         summary_text = (
@@ -964,6 +1009,7 @@ class CalendarManager:
             + (f"- Titolo: {summary}\n" if summary else "")
             + (f"- Inizio: {start_norm}\n" if start_norm else "")
             + (f"- Fine: {end_norm}\n" if end_norm else "")
+            + (f"- Ricorrenza: {', '.join(norm_recurrence)}\n" if norm_recurrence else "")
             + (f"- Luogo: {location}\n" if location else "")
             + f"- SHA-256 Digest: {digest}"
         )
@@ -990,6 +1036,7 @@ class CalendarManager:
         time_zone: str = "Europe/Rome",
         location: str | None = None,
         description: str | None = None,
+        recurrence: list[str] | None = None,
     ) -> dict[str, Any]:
         """Aggiorna un evento esistente previa verifica e consumo del token di approvazione."""
         if not approval_token:
@@ -1009,6 +1056,8 @@ class CalendarManager:
             if start_dt and end_dt and end_dt <= start_dt:
                 raise CalendarError("INVALID_TIME_RANGE", "end deve essere successiva a start.")
 
+        norm_recurrence = _validate_recurrence(recurrence) if recurrence is not None else None
+
         digest = hashlib.sha256(json.dumps({
             "calendar_id": calendar_id,
             "event_id": event_id,
@@ -1016,6 +1065,7 @@ class CalendarManager:
             "start": start_norm,
             "end": end_norm,
             "location": location,
+            "recurrence": norm_recurrence,
         }, sort_keys=True, ensure_ascii=False).encode("utf-8")).hexdigest()
 
         target = f"calendar_update:{calendar_id}:{event_id}"
@@ -1029,6 +1079,7 @@ class CalendarManager:
             "time_zone": time_zone,
             "location": location,
             "description": description,
+            "recurrence": norm_recurrence,
         }
         try:
             decision = self.approval_store.decide(
@@ -1051,6 +1102,8 @@ class CalendarManager:
             payload["description"] = description
         if location is not None:
             payload["location"] = location
+        if norm_recurrence is not None:
+            payload["recurrence"] = norm_recurrence
         if start_norm and end_norm:
             if start_all_day:
                 payload["start"] = {"date": start_norm}

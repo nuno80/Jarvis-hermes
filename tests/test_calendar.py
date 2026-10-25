@@ -269,16 +269,70 @@ class CalendarCreateEventTests(unittest.TestCase):
         )
         self.assertEqual(d1, d2)
 
-        # Modifica al titolo cambia il digest
-        d3 = compute_calendar_digest(
+        # Modifica alla ricorrenza cambia il digest
+        d4 = compute_calendar_digest(
             calendar_id="primary",
-            summary="Meeting Modificato",
+            summary="Meeting",
             start="2026-11-01T10:00:00+01:00",
             end="2026-11-01T11:00:00+01:00",
             time_zone="Europe/Rome",
             attendees=["a@example.com", "b@example.com"],
+            recurrence=["RRULE:FREQ=YEARLY"],
         )
-        self.assertNotEqual(d1, d3)
+        self.assertNotEqual(d1, d4)
+
+    def test_recurrence_normalization_and_payload_in_create(self):
+        prov = GoogleCalendarProvider(access_token="test_token")
+        mgr = CalendarManager(provider=prov, approval_store=self.approval_store, audit_log=self.audit_log)
+        stage = mgr.stage_create_event(
+            calendar_id="primary",
+            summary="Compleanno Annuale",
+            start="2026-12-18",
+            end="2026-12-19",
+            actor_id=self.actor,
+            recurrence=["FREQ=YEARLY"],
+        )
+        self.assertIn("RRULE:FREQ=YEARLY", stage["summary_text"])
+
+        fake_resp = {
+            "id": "recur_evt_1",
+            "summary": "Compleanno Annuale",
+            "start": {"date": "2026-12-18"},
+            "end": {"date": "2026-12-19"},
+            "recurrence": ["RRULE:FREQ=YEARLY"],
+        }
+        mock_http = MagicMock()
+        mock_http.read.return_value = json.dumps(fake_resp).encode("utf-8")
+        mock_http.__enter__.return_value = mock_http
+
+        with patch("urllib.request.urlopen", return_value=mock_http) as mock_urlopen:
+            res = mgr.create_event(
+                calendar_id="primary",
+                summary="Compleanno Annuale",
+                start="2026-12-18",
+                end="2026-12-19",
+                approval_token=stage["approval_token"],
+                actor_id=self.actor,
+                recurrence=["FREQ=YEARLY"],
+            )
+
+        self.assertTrue(res["created"])
+        self.assertEqual(res["event_id"], "recur_evt_1")
+        # Verifica payload inviato a Google
+        req_sent = mock_urlopen.call_args[0][0]
+        sent_body = json.loads(req_sent.data.decode("utf-8"))
+        self.assertEqual(sent_body["recurrence"], ["RRULE:FREQ=YEARLY"])
+
+    def test_draft_with_recurrence(self):
+        draft = CalendarManager.draft_event({
+            "summary": "Meeting ricorrente",
+            "start": "2026-11-01T10:00:00+01:00",
+            "end": "2026-11-01T11:00:00+01:00",
+            "recurrence": ["FREQ=WEEKLY;BYDAY=MO,WE,FR"],
+        })
+        self.assertEqual(draft["recurrence"], ["RRULE:FREQ=WEEKLY;BYDAY=MO,WE,FR"])
+        self.assertIsInstance(draft["digest"], str)
+        self.assertEqual(len(draft["digest"]), 64)
 
     def test_create_fails_without_approval_token(self):
         prov = GoogleCalendarProvider(access_token="test_token")
@@ -336,7 +390,8 @@ class CalendarCreateEventTests(unittest.TestCase):
             target="calendar_create:primary",
             arguments={"digest": stage["digest"], "calendar_id": "primary", "summary": "Riunione da Rifiutare",
                        "start": "2026-11-01T10:00:00+01:00", "end": "2026-11-01T11:00:00+01:00",
-                       "time_zone": "Europe/Rome", "location": "", "description": "", "attendees": []},
+                       "time_zone": "Europe/Rome", "location": "", "description": "", "attendees": [],
+                       "recurrence": []},
             approve=False,
         )
 
