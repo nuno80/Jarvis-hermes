@@ -11,8 +11,10 @@ Hook registrati:
   dispatch normale (None/allow).
 - ``pre_llm_call``: iniezione ``Suggested skill to inspect first: ...`` in
   coda al messaggio utente (prefix cache preservata, ADR 0005 §5).
-- ``llm_request``: passthrough del modello (override solo se un giorno la
-  policy lo prevede; oggi sempre None).
+- ``llm_request``: passthrough modello + slice list_create issue #64 (ADR 0017):
+  se eleggibile, un solo tool allowlisted + tool_choice required (puro, no I/O).
+- ``pre_tool_call``: gate deterministico list_create, valida gli argomenti LLM
+  prima di ogni effetto (fail-closed, nessun retry).
 """
 from __future__ import annotations
 
@@ -43,9 +45,15 @@ if _src and _src not in sys.path:
 
 try:
     from jarvis_hermes.decision import pre_turn_dispatch
+    from jarvis_hermes.direct_action import (
+        constrain_llm_request_for_list_create,
+        validate_list_create_arguments,
+    )
     from jarvis_hermes.voice import handle_voice_transcript
 except Exception:  # Hermes non deve rompersi se Jarvis non e installato
     pre_turn_dispatch = None  # type: ignore[assignment]
+    constrain_llm_request_for_list_create = None  # type: ignore[assignment]
+    validate_list_create_arguments = None  # type: ignore[assignment]
     handle_voice_transcript = None  # type: ignore[assignment]
 
 
@@ -317,23 +325,62 @@ def pre_llm_call_hook(user_message: Any, **kwargs: Any) -> Any:
 
 
 def llm_request_middleware(request: Any, **kwargs: Any) -> Any:
-    """Passthrough: oggi la policy non prevede override del modello."""
+    """Passthrough modello + slice list_create #64: rewrite pura, mai I/O."""
     if pre_turn_dispatch is None or not isinstance(request, dict):
         return {"request": request}
     try:
-        override = pre_turn_dispatch(
-            str((request.get("messages") or [{}])[-1].get("content", "")),
-        ).get("model_override")
+        last = str((request.get("messages") or [{}])[-1].get("content", ""))
+        dispatch = pre_turn_dispatch(last)
+    except Exception:
+        return {"request": request}
+    try:
+        override = dispatch.get("model_override")
     except Exception:
         override = None
     if override:
         request = dict(request)
         request["model"] = override
+    if constrain_llm_request_for_list_create is not None:
+        try:
+            rewritten = constrain_llm_request_for_list_create(request, dispatch)
+        except Exception:
+            rewritten = None
+        if rewritten is not None:
+            logger.info("jarvis list_create llm_request: tool vincolato, choice required")
+            return {"request": rewritten, "source": "jarvis-list-create"}
     return {"request": request}
+
+
+def pre_tool_call_hook(tool_name: str = "", args: Any = None, **kwargs: Any) -> Any:
+    """Gate deterministico list_create #64: argomenti LLM validati o blocco.
+
+    Solo il tool allowlisted; fail-closed con messaggio (niente eccezioni nel
+    turno); None = il turno prosegue normale. Nessun retry qui: se la validazione
+    fallisce, il Reasoner del turno in corso riceve il blocco e risponde senza
+    effetti. Mai auto-retry dopo una write: quella resta in execute_direct_action.
+    """
+    name = str(tool_name or "")
+    if name not in ("mcp__jarvis__todoist_create_task_list",
+                     "todoist_create_task_list"):
+        return None
+    if validate_list_create_arguments is None:
+        return {"action": "block",
+                "message": "jarvis list_create non disponibile (modulo assente)."}
+    try:
+        valid = validate_list_create_arguments(dict(args or {}))
+    except Exception:
+        valid = None
+    if valid is None:
+        logger.warning("jarvis list_create pre_tool_call bloccato: args=%r", args)
+        return {"action": "block",
+                "message": ("Lista non valida: serve nome «Spesa» con 1-50 task "
+                              "non vuoti e senza duplicati. Riformula la richiesta.")}
+    return None
 
 
 def register(ctx: Any) -> None:
     ctx.register_hook("pre_gateway_dispatch", pre_gateway_dispatch_hook)
     ctx.register_hook("post_stt_enrichment", post_stt_enrichment_hook)
     ctx.register_hook("pre_llm_call", pre_llm_call_hook)
+    ctx.register_hook("pre_tool_call", pre_tool_call_hook)
     ctx.register_middleware("llm_request", llm_request_middleware)
