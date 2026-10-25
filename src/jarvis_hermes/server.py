@@ -540,9 +540,12 @@ def build_server() -> FastMCP:
 
     @server.tool(annotations=destructive)
     def restore_checkpoint(checkpoint_id: str, expected_job_id: str | None = None,
+                           expected_current_hash: str | None = None,
                            request_id: str | None = None) -> dict[str, Any]:
-        """Restore a project file from a checkpoint without resetting unrelated files."""
-        return respond(lambda: checkpoint_manager.restore_checkpoint(checkpoint_id, expected_job_id), request_id)
+        """Restore a project file from a checkpoint; requires the owning job id and the last known file hash (initial_hash or new_hash from the last write), failing with CONFLICT on concurrent edits."""
+        return respond(lambda: checkpoint_manager.restore_checkpoint(
+            checkpoint_id, expected_job_id=expected_job_id,
+            expected_current_hash=expected_current_hash), request_id)
 
     @server.tool(annotations=readonly)
     def run_project_workflow(project_id: str, workflow_name: str,

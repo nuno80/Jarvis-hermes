@@ -19,7 +19,7 @@ CONFIRMATION_POLICIES = {
     "run_project_workflow": "Verifica hash script e git hooks prima dell'esecuzione",
     "commit_project_changes": "Verifica run precedente richiesta (nessun commit arbitrario)",
     "write_project_file": "Protetto da Checkpoint attivo e controllo di concorrenza su hash",
-    "restore_checkpoint": "Protetto da Job ID corrispondente",
+    "restore_checkpoint": "Job ID + hash ultimo stato noto obbligatori; CONFLICT se il file e' cambiato",
     "write_note": "Controllo concorrenza ottimistica su versione SHA-256 nota",
     "update_preference": "Controllo concorrenza e divieto di bypass privilegi",
     "forget_memory": "Cancellazione memoria inferita con backup dichiarativo",

@@ -34,10 +34,11 @@ class CheckpointTests(unittest.TestCase):
         # 2. Modify file as part of job
         file_path.write_text("modified code by job\n", encoding="utf-8")
 
-        # 3. Restore checkpoint
+        # 3. Restore checkpoint (job + last known hash required)
         res = self.manager.restore_checkpoint(
             checkpoint_id=cp["checkpoint_id"],
-            expected_job_id="job-1"
+            expected_job_id="job-1",
+            expected_current_hash=self.manager.compute_hash(file_path)
         )
         self.assertTrue(res["restored"])
         self.assertEqual(file_path.read_text(encoding="utf-8"), "initial code\n")
@@ -136,7 +137,11 @@ class CheckpointTests(unittest.TestCase):
         self.assertEqual(ctx.exception.code, "CHECKPOINT_REQUIRED")
 
         # 6. Already restored checkpoint -> CHECKPOINT_REQUIRED
-        self.manager.restore_checkpoint(checkpoint_id=cp["checkpoint_id"])
+        self.manager.restore_checkpoint(
+            checkpoint_id=cp["checkpoint_id"],
+            expected_job_id="job-neg",
+            expected_current_hash=cp["initial_hash"]
+        )
         with self.assertRaises(CheckpointError) as ctx:
             self.manager.safe_write_file(
                 checkpoint_id=cp["checkpoint_id"],

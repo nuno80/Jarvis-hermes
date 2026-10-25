@@ -41,7 +41,7 @@
 | `reconcile_calendar_event` | Read-only / Nessun effetto collaterale distruttivo | Implementato & Testato via MCP | Reconcile calendar event creation status by digest without blind retries (AT04). |
 | `reconcile_email` | Read-only / Nessun effetto collaterale distruttivo | Implementato & Testato via MCP | Reconcile an email send outcome by Message-ID (AT04) without blind retries. |
 | `record_routing_correction` | Read-only / Nessun effetto collaterale distruttivo | Implementato & Testato via MCP | Record user correction on a prior routing decision for telemetry and calibration datasets. |
-| `restore_checkpoint` | Protetto da Job ID corrispondente | Implementato & Testato via MCP | Restore a project file from a checkpoint without resetting unrelated files. |
+| `restore_checkpoint` | Job ID + hash ultimo stato noto obbligatori; CONFLICT se il file e' cambiato | Implementato & Testato via MCP | Restore a project file from a checkpoint; requires the owning job id and the last known file hash (initial_hash or new_hash from the last write), failing with CONFLICT on concurrent edits. |
 | `route_request` | Read-only / Nessun effetto collaterale distruttivo | Implementato & Testato via MCP | Diagnostica di routing (sezione 7): NON e un fast path pre-turno. |
 | `run_command` | Policy deterministica (automatico per READONLY/WRITE_RECOVERABLE, approvazione per PRIVILEGED/DESTRUCTIVE) | Implementato & Testato via MCP | Execute a terminal/administrative command evaluated by policy on the configured device. |
 | `run_project_workflow` | Verifica hash script e git hooks prima dell'esecuzione | Implementato & Testato via MCP | Run an allowed project workflow checking script and git hook integrity, recording verification run. |

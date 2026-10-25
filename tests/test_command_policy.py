@@ -166,7 +166,8 @@ class CommandPolicyTests(unittest.TestCase):
         mock_registry.get_registered_roots.return_value = [workdir.resolve()]
         self.manager.project_registry = mock_registry
 
-        res = self.manager.run_command("echo 'new content' > sample.txt", cwd=workdir)
+        res = self.manager.run_command("echo 'new content' > sample.txt", cwd=workdir,
+                                        job_id="job-cmd-test")
         self.assertEqual(res["exit_code"], 0)
         self.assertEqual(res["category"], "WRITE_RECOVERABLE")
         self.assertIsNotNone(res["checkpoint_id"])
@@ -174,8 +175,13 @@ class CommandPolicyTests(unittest.TestCase):
         # File was modified
         self.assertEqual(target.read_text(encoding="utf-8").strip(), "new content")
 
-        # Now restore from checkpoint
-        cp_mgr.restore_checkpoint(res["checkpoint_id"])
+        # Now restore from checkpoint (last known hash = current content after the write)
+        from jarvis_hermes.checkpoint import CheckpointManager as _CPM
+        cp_mgr.restore_checkpoint(
+            res["checkpoint_id"],
+            expected_job_id="job-cmd-test",
+            expected_current_hash=_CPM.compute_hash(target),
+        )
         self.assertEqual(target.read_text(encoding="utf-8"), "initial content")
 
     def test_redirect_outside_registered_root_requires_confirmation(self):
