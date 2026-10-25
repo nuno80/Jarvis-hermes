@@ -293,11 +293,48 @@ def build_server() -> FastMCP:
         """Read current typed explicit preferences and frontmatter memory profile fresh from the vault."""
         return respond(lambda: vault.get_profile(), request_id)
 
+    async def _require_vault_consent(ctx: Context, target: str, arguments: dict[str, Any], summary: str) -> None:
+        """One-shot owner consent for a vault mutation; anything but explicit accept fails closed.
+
+        The token is consumed on accept before the mutation runs, binding consent
+        to these exact arguments (D14). A later CONFLICT leaves the token spent
+        but performs no effect."""
+        actor_id = _configured_approver()
+        pending = approval_store.request(actor_id=actor_id, target=target, arguments=arguments)
+        prompt = (f"Jarvis: autorizzi la modifica del vault?\n{summary}\nSHA-256 digest: {pending['digest']}")
+        try:
+            choice = await asyncio.wait_for(ctx.elicit(prompt, _ApprovalResponse), timeout=305)
+        except Exception:
+            choice = None
+        try:
+            result = approval_store.decide(token=pending['token'], actor_id=actor_id,
+                                           target=target, arguments=arguments,
+                                           approve=getattr(choice, 'action', None) == 'accept')
+        except ApprovalError as exc:
+            raise VaultError(exc.code, 'Vault mutation consent unavailable.')
+        if result.get('status') != 'executed':
+            raise VaultError('APPROVAL_DECLINED', 'Vault mutation declined by owner or elicitation unavailable.')
+
     @server.tool(annotations=destructive)
-    def update_preference(key_path: str, value: Any, expected_version: str | None = None,
-                          request_id: str | None = None) -> dict[str, Any]:
+    async def update_preference(key_path: str, value: Any, ctx: Context, expected_version: str | None = None,
+                                request_id: str | None = None) -> dict[str, Any]:
         """Update typed explicit preference in preferences.yaml with conflict detection and security guardrails."""
-        return respond(lambda: vault.update_preference(key_path, value, expected_version=expected_version), request_id)
+        observed = {'schema_version': '1.0', 'device_id': device, 'request_id': request_id,
+                    'observed_at': datetime.now(timezone.utc).isoformat(),
+                    'provenance': {'source': 'local_process', 'scope': 'vault_preferences'}}
+        try:
+            vault.check_preference_version(expected_version)
+            await _require_vault_consent(ctx, 'vault:update_preference',
+                                        {'key_path': key_path, 'expected_version': expected_version},
+                                        f"preferences.yaml: {key_path}")
+            return {**observed, 'ok': True,
+                    'data': vault.update_preference(key_path, value, expected_version=expected_version), 'error': None}
+        except VaultError as exc:
+            return {**observed, 'ok': False, 'data': None,
+                    'error': {'code': exc.code, 'message': exc.message, 'retryable': False}}
+        except ApprovalError as exc:
+            return {**observed, 'ok': False, 'data': None,
+                    'error': {'code': exc.code, 'message': f'Approval error: {exc.code}', 'retryable': False}}
 
     @server.tool(annotations=destructive)
     def propose_memory(domain: str, key: str, value: Any, evidence: str,
@@ -309,16 +346,46 @@ def build_server() -> FastMCP:
                                                     note_id=note_id), request_id)
 
     @server.tool(annotations=destructive)
-    def forget_memory(note_id: str, key: str | None = None, expected_version: str | None = None,
-                      request_id: str | None = None) -> dict[str, Any]:
-        """Remove or correct an inferred memory note or key, declaring retention backup and preserving other notes."""
-        return respond(lambda: vault.forget_memory(note_id=note_id, key=key, expected_version=expected_version), request_id)
+    async def forget_memory(note_id: str, ctx: Context, key: str | None = None, expected_version: str | None = None,
+                            request_id: str | None = None) -> dict[str, Any]:
+        """Remove or correct an inferred candidate memory note or key, declaring retention backup."""
+        observed = {'schema_version': '1.0', 'device_id': device, 'request_id': request_id,
+                    'observed_at': datetime.now(timezone.utc).isoformat(),
+                    'provenance': {'source': 'local_process', 'scope': 'vault_memory'}}
+        try:
+            vault.check_forget_version(note_id, expected_version)
+            await _require_vault_consent(ctx, 'vault:forget_memory',
+                                        {'note_id': note_id, 'key': key, 'expected_version': expected_version},
+                                        f"Delete {'key ' + key + ' in ' if key else ''}{note_id} (backup retained)")
+            return {**observed, 'ok': True,
+                    'data': vault.forget_memory(note_id=note_id, key=key, expected_version=expected_version), 'error': None}
+        except VaultError as exc:
+            return {**observed, 'ok': False, 'data': None,
+                    'error': {'code': exc.code, 'message': exc.message, 'retryable': False}}
+        except ApprovalError as exc:
+            return {**observed, 'ok': False, 'data': None,
+                    'error': {'code': exc.code, 'message': f'Approval error: {exc.code}', 'retryable': False}}
 
     @server.tool(annotations=destructive)
-    def write_note(note_id: str, content: str, expected_version: str | None = None,
-                   request_id: str | None = None) -> dict[str, Any]:
+    async def write_note(note_id: str, content: str, ctx: Context, expected_version: str | None = None,
+                         request_id: str | None = None) -> dict[str, Any]:
         """Crea una NOTA nel vault Obsidian. Solo per 'nota'; liste/todo/promemoria vanno su Todoist."""
-        return respond(lambda: vault.write_note(note_id=note_id, content=content, expected_version=expected_version), request_id)
+        observed = {'schema_version': '1.0', 'device_id': device, 'request_id': request_id,
+                    'observed_at': datetime.now(timezone.utc).isoformat(),
+                    'provenance': {'source': 'local_process', 'scope': 'vault_note'}}
+        try:
+            vault.check_write_version(note_id, expected_version)
+            await _require_vault_consent(ctx, 'vault:write_note',
+                                        {'note_id': note_id, 'expected_version': expected_version},
+                                        f"Write note {note_id}")
+            return {**observed, 'ok': True,
+                    'data': vault.write_note(note_id=note_id, content=content, expected_version=expected_version), 'error': None}
+        except VaultError as exc:
+            return {**observed, 'ok': False, 'data': None,
+                    'error': {'code': exc.code, 'message': exc.message, 'retryable': False}}
+        except ApprovalError as exc:
+            return {**observed, 'ok': False, 'data': None,
+                    'error': {'code': exc.code, 'message': f'Approval error: {exc.code}', 'retryable': False}}
 
     @server.tool(annotations=readonly)
     def read_project_file(project_id: str, relative_path: str, device_id: str | None = None,

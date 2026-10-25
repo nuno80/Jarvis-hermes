@@ -24,6 +24,27 @@ class VaultError(Exception):
         super().__init__(message)
 
 
+def is_candidate_content(text: str) -> bool:
+    """An inferred-candidate note only when its frontmatter says so.
+
+    Notes without frontmatter, with explicit source, or with malformed
+    frontmatter are canonical and protected."""
+    if not text.startswith('---\n'):
+        return False
+    end = text.find('\n---\n', 4)
+    if end == -1:
+        return False
+    try:
+        frontmatter = yaml.safe_load(text[4:end])
+    except Exception:
+        return False
+    if not isinstance(frontmatter, dict):
+        return False
+    if frontmatter.get('source') != 'inferred':
+        return False
+    return frontmatter.get('status') == 'candidate' or frontmatter.get('type') == 'candidate_preference'
+
+
 class Vault:
     def __init__(self, configured: str | None):
         self.configured = configured
@@ -133,6 +154,42 @@ class Vault:
         return {'matches': matches, 'truncated': truncated, 'scanned_notes': scanned,
                 'skipped_entries': skipped, 'untrusted_content': True}
 
+    def check_write_version(self, note_id: str, expected_version: str | None) -> str | None:
+        """Read-only version gate: creation needs 'new', overwrite needs the current hash.
+
+        Missing or stale versions fail closed with CONFLICT, before any consent
+        prompt, so the owner is never asked to approve an action bound to fail."""
+        try:
+            _, current = self.load(note_id)
+        except FileNotFoundError:
+            current = None
+        if current is None:
+            if expected_version != 'new':
+                raise VaultError('CONFLICT', 'Creating a note requires expected_version="new".')
+        elif expected_version != current:
+            raise VaultError('CONFLICT',
+                             f'Note has changed concurrently (expected {expected_version}, current {current}).')
+        return current
+
+    def check_preference_version(self, expected_version: str | None) -> str:
+        """Read-only version gate for preferences.yaml: a stale version fails with CONFLICT."""
+        _, current = self.load_preferences()
+        if expected_version != current:
+            raise VaultError('CONFLICT',
+                             f'Preferences have changed concurrently (expected {expected_version}, current {current}).')
+        return current
+
+    def check_forget_version(self, note_id: str, expected_version: str | None) -> str:
+        """Read-only gate for candidate deletion: wrong target fails with PERMISSION_DENIED,
+        missing or stale version with CONFLICT, before any consent prompt."""
+        text, current = self.load(note_id)
+        if not is_candidate_content(text):
+            raise VaultError('PERMISSION_DENIED',
+                             'Inferred memory can only delete validated candidate notes, never canonical notes.')
+        if expected_version != current:
+            raise VaultError('CONFLICT', f'Note has changed concurrently (expected {expected_version}, current {current}).')
+        return current
+
     def write_note(self, note_id: str, content: str, expected_version: str | None = None) -> dict:
         """Safely write/overwrite a Markdown note in the vault with concurrency check and safety boundaries."""
         root = self.root()
@@ -151,13 +208,8 @@ class Vault:
         if not target.resolve().is_relative_to(root):
             raise VaultError('PERMISSION_DENIED', 'The note is outside the configured vault.')
 
-        current_version = None
-        if target.exists():
-            _, current_version = self.load(note_id)
-            if expected_version is not None and expected_version != current_version:
-                raise VaultError('CONFLICT', f'Note has changed concurrently (expected {expected_version}, current {current_version}).')
-        elif expected_version is not None and expected_version != 'new':
-            raise VaultError('CONFLICT', f'Expected existing version {expected_version}, but note does not exist.')
+        # Mandatory explicit version: 'new' for creation, current hash for overwrite.
+        self.check_write_version(note_id, expected_version)
 
         raw = content.encode('utf-8')
         if len(raw) > MAX_NOTE_BYTES:
@@ -205,6 +257,13 @@ class Vault:
             text = None
         except FileNotFoundError:
             text = None
+
+        if text is None:
+            expected_ver = 'new'
+
+        if text is not None and not is_candidate_content(text):
+            raise VaultError('PERMISSION_DENIED',
+                             'Inferred memory can only create or modify validated candidate notes, never canonical notes.')
 
         if text is not None:
             if text.startswith('---\n'):
@@ -260,9 +319,9 @@ class Vault:
 
     def forget_memory(self, note_id: str, key: str | None = None, expected_version: str | None = None) -> dict:
         """Remove or correct an inferred memory note/key, updating frontmatter and indices while preserving backups/unrelated notes."""
-        text, current_version = self.load(note_id)
-        if expected_version is not None and expected_version != current_version:
-            raise VaultError('CONFLICT', f'Note has changed concurrently (expected {expected_version}, current {current_version}).')
+        # Destructive even on candidates: candidate target and explicit version are mandatory.
+        current_version = self.check_forget_version(note_id, expected_version)
+        text, _ = self.load(note_id)
 
         root = self.root()
         target = root / note_id
@@ -347,10 +406,9 @@ class Vault:
         """Update a typed explicit preference in preferences.yaml with optimistic concurrency check."""
         root = self.root()
         pref_path = root / 'preferences.yaml'
-        current_prefs, current_version = self.load_preferences()
-
-        if expected_version is not None and expected_version != current_version:
-            raise VaultError('CONFLICT', f'Preferences have changed concurrently (expected {expected_version}, current {current_version}).')
+        # D14: an explicit version is mandatory, never a caller-supplied pass flag.
+        current_version = self.check_preference_version(expected_version)
+        current_prefs, _ = self.load_preferences()
 
         # Check key path safety
         parts = key_path.strip().split('.')

@@ -12,9 +12,11 @@ Occorre definire chiaramente quali operazioni su **vault** e **GUI** sono distru
 
 1. **Vault (Obsidian / Knowledge base):**
    - **`write_note` (sovrascrittura/creazione di note canoniche) e `forget_memory` (cancellazione chiavi o note di memoria):**
-     Modificano o eliminano lo stato canonico del vault utente. Richiedono conferma obbligatoria lato server quando invocati via MCP con elicit/token se configurato un approvatore, oppure richiedono checkpoint/version conflict checking deterministico. In particolare per `forget_memory`, l'eliminazione definitiva è un'operazione distruttiva che richiede elicitazione/approvazione esplicita se non invocata in modalità batch o con flag di backup tracciato.
+     Modificano o eliminano lo stato canonico del vault utente. Richiedono conferma obbligatoria lato server via `ctx.elicit` e token monouso (`ApprovalStore`), con controllo versione deterministico prima del prompt. Nessuna modalità batch e nessun flag fornito dal client esonera dal consenso: il consenso mancante, rifiutato o non disponibile fallisce chiuso con `APPROVAL_DECLINED` senza alcun effetto.
    - **`propose_memory`:**
-     Non sovrascrive preferenze esplicite; aggiunge inferenze a bassa fiducia (soft candidate). Non è distruttivo e non richiede blocco d'approvazione, ma preserva le preferenze esplicite dell'utente come sancito da D08.
+     Non sovrascrive preferenze esplicite; crea o aggiorna soltanto note candidate validate (`source: inferred` con `status: candidate` o `type: candidate_preference`) e preserva le preferenze esplicite (D08). Una `note_id` canonica o esplicita produce `PERMISSION_DENIED` senza modifiche. Non richiede blocco d'approvazione perché non tocca lo stato canonico.
+   - **`update_preference` (preferences.yaml):**
+     Scrittura canonica: richiede `expected_version` esplicita e consenso via elicitation come `write_note`.
    - **`read_note`, `search_notes`, `get_profile`:**
      Operazioni strettamente read-only.
 
@@ -30,3 +32,16 @@ Occorre definire chiaramente quali operazioni su **vault** e **GUI** sono distru
 3. **Invariante D14 applicato a Vault e GUI:**
    - La conferma dell'approvatore (`ApprovalStore`) consuma un token crittografico monouso associato all'hash dei parametri specifici dell'azione.
    - Nessun flag `approved=true` o dizionario fornito dal client o dall'LLM può aggirare questo controllo lato server.
+
+4. **Matrice operazione / versione / consenso / target (stato implementato, fix 1):**
+
+   | Operazione | Versione richiesta | Consenso | Target ammessi |
+   |---|---|---|---|
+   | `write_note` crea | `expected_version: "new"`, altrimenti `CONFLICT` | elicitation + token monouso, altrimenti `APPROVAL_DECLINED` | qualsiasi nota visibile `.md` nel vault |
+   | `write_note` sovrascrive | hash corrente della nota, altrimenti `CONFLICT` | elicitation + token monouso, altrimenti `APPROVAL_DECLINED` | qualsiasi nota visibile `.md` nel vault |
+   | `update_preference` | digest corrente di `preferences.yaml`, altrimenti `CONFLICT` | elicitation + token monouso, altrimenti `APPROVAL_DECLINED` | chiavi non in `FORBIDDEN_PREFERENCE_KEYS`, altrimenti `PERMISSION_DENIED` |
+   | `propose_memory` | `new` implicito per nota assente; hash corrente per candidata esistente | nessuno (solo candidate) | solo note nuove o candidate validate (`source: inferred`); canoniche → `PERMISSION_DENIED` |
+   | `forget_memory` intera / chiave | hash corrente obbligatorio, altrimenti `CONFLICT` | elicitation + token monouso, altrimenti `APPROVAL_DECLINED`; backup in `.jarvis_backups` prima dell'effetto | solo note candidate validate; canoniche → `PERMISSION_DENIED` |
+   | `read_note`, `search_notes`, `get_profile` | nessuna | nessuno | read-only |
+
+   Ordine di valutazione: versione prima del consenso (una versione stale restituisce `CONFLICT` senza sollecitare il proprietario); target canonico prima di ogni effetto per i tool di memoria inferita (`PERMISSION_DENIED` senza modifiche a frontmatter o corpo).
