@@ -740,6 +740,7 @@ def build_server() -> FastMCP:
                               calendar_id: str = 'primary', time_zone: str | None = None,
                               location: str | None = None, description: str = '',
                               attendees: list[Any] | None = None,
+                              recurrence: list[str] | None = None,
                               request_id: str | None = None) -> dict[str, Any]:
         """Build a local event draft with explicit timezone/account; no network, no event created. Creation (#24) needs approval."""
         return respond(lambda: CalendarManager.draft_event({
@@ -747,6 +748,7 @@ def build_server() -> FastMCP:
             'calendar_id': calendar_id, 'time_zone': time_zone or None,
             'location': location, 'description': description,
             'attendees': attendees or [],
+            'recurrence': recurrence,
         }), request_id)
 
     @server.tool(annotations=destructive)
@@ -760,6 +762,7 @@ def build_server() -> FastMCP:
         location: str | None = None,
         description: str = '',
         attendees: list[Any] | None = None,
+        recurrence: list[str] | None = None,
         request_id: str | None = None,
     ) -> dict[str, Any]:
         """Create an event on Google Calendar. Call this tool IMMEDIATELY upon user request; DO NOT ask for confirmation in chat because this tool triggers the native Allow/Deny dialog directly."""
@@ -783,6 +786,7 @@ def build_server() -> FastMCP:
                 location=location,
                 description=description,
                 attendees=attendees,
+                recurrence=recurrence,
             )
 
             prompt = (
@@ -814,6 +818,7 @@ def build_server() -> FastMCP:
                     "location": location or "",
                     "description": description or "",
                     "attendees": norm_attendees,
+                    "recurrence": stage.get("digest") and [str(r).strip() for r in (recurrence or [])] if recurrence else [],
                 }
                 try:
                     approval_store.decide(
@@ -848,6 +853,7 @@ def build_server() -> FastMCP:
                 location=location,
                 description=description,
                 attendees=attendees,
+                recurrence=recurrence,
             )
             return {
                 **observed,
@@ -894,6 +900,7 @@ def build_server() -> FastMCP:
         time_zone: str | None = 'Europe/Rome',
         location: str | None = None,
         description: str | None = None,
+        recurrence: list[str] | None = None,
         request_id: str | None = None,
     ) -> dict[str, Any]:
         """Update or reschedule an existing event on Google Calendar. Call this tool IMMEDIATELY upon user request; DO NOT ask for verbal confirmation in chat because this tool presents the native Allow/Deny approval dialog directly to the user."""
@@ -917,6 +924,7 @@ def build_server() -> FastMCP:
                 time_zone=tz_name,
                 location=location,
                 description=description,
+                recurrence=recurrence,
             )
             prompt = f"Jarvis: autorizzi la seguente modifica dell'evento nel calendario?\n{stage['summary_text']}"
             try:
@@ -937,6 +945,7 @@ def build_server() -> FastMCP:
                     "time_zone": tz_name,
                     "location": location,
                     "description": description,
+                    "recurrence": recurrence,
                 }
                 try:
                     approval_store.decide(token=stage['approval_token'], actor_id=actor_id, target=target, arguments=arguments, approve=False)
@@ -960,6 +969,7 @@ def build_server() -> FastMCP:
                 time_zone=tz_name,
                 location=location,
                 description=description,
+                recurrence=recurrence,
             )
             return {**observed, 'ok': True, 'data': result, 'error': None}
         except (ApprovalError, CalendarError) as exc:
