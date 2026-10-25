@@ -158,6 +158,11 @@ class CheckpointManager:
         }
 
     def restore_checkpoint(self, checkpoint_id: str, expected_job_id: str | None = None, expected_current_hash: str | None = None, job_id: str | None = None) -> dict[str, Any]:
+        # Both proofs are mandatory: restore must never overwrite an unverified state.
+        if not expected_job_id:
+            raise CheckpointError('CHECKPOINT_REQUIRED', 'Restore requires the expected job id.')
+        if not expected_current_hash:
+            raise CheckpointError('CHECKPOINT_REQUIRED', 'Restore requires the last known file hash (initial_hash or new_hash from the last write).')
         effective_job = expected_job_id or job_id
         if effective_job and self.job_store:
             self.job_store.check_not_cancelled(effective_job)
@@ -167,7 +172,7 @@ class CheckpointManager:
             if not row:
                 raise CheckpointError('NOT_FOUND', f'Checkpoint {checkpoint_id!r} not found.')
 
-            if expected_job_id and row['job_id'] != expected_job_id:
+            if row['job_id'] != expected_job_id:
                 raise CheckpointError('PERMISSION_DENIED', 'Checkpoint does not belong to expected job.')
 
             target = Path(row['target_path'])
@@ -176,7 +181,7 @@ class CheckpointManager:
                 raise CheckpointError('RESOURCE_UNAVAILABLE', 'Checkpoint snapshot missing.')
 
             current_hash = self.compute_hash(target)
-            if expected_current_hash and current_hash != expected_current_hash:
+            if current_hash != expected_current_hash:
                 raise CheckpointError('CONFLICT', 'Target file modified since last known job state.')
 
             old_content = target.read_text(encoding='utf-8', errors='replace') if target.exists() else ''

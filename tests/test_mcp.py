@@ -410,14 +410,49 @@ class MCPTests(unittest.IsolatedAsyncioTestCase):
                 self.assertTrue(write_res['ok'])
                 self.assertEqual(source_file.read_text(encoding="utf-8"), "def add(a, b): return a + b + 1\n")
 
-                # 3. Restore checkpoint
+                # 3. Restore checkpoint (needs owning job + hash of last write)
+                new_hash = write_res['data']['new_hash']
                 restore_res = (await client.call_tool('restore_checkpoint', {
                     'checkpoint_id': cp_id,
-                    'expected_job_id': 'job-42'
+                    'expected_job_id': 'job-42',
+                    'expected_current_hash': new_hash,
                 })).structuredContent
                 self.assertTrue(restore_res['ok'])
                 self.assertEqual(source_file.read_text(encoding="utf-8"), "def add(a, b): return a + b\n")
                 self.assertIn("-def add(a, b): return a + b + 1", restore_res['data']['diff'])
+
+                # 3b. Missing hash rejected before touching the file
+                cp_tmp = (await client.call_tool('create_checkpoint', {
+                    'job_id': 'job-42',
+                    'project_id': 'my-calc',
+                    'relative_path': 'calc.py',
+                    'device_id': 'test-node'
+                })).structuredContent
+                missing_hash = await client.call_tool('restore_checkpoint', {
+                    'checkpoint_id': cp_tmp['data']['checkpoint_id'],
+                    'expected_job_id': 'job-42',
+                })
+                self.assertFalse(missing_hash.structuredContent['ok'])
+                self.assertEqual(missing_hash.structuredContent['error']['code'], 'CHECKPOINT_REQUIRED')
+
+                # 3c. Wrong job rejected; concurrent edit preserved as CONFLICT
+                source_file.write_text("manual aftermath\n", encoding="utf-8")
+                wrong_job = (await client.call_tool('restore_checkpoint', {
+                    'checkpoint_id': cp_tmp['data']['checkpoint_id'],
+                    'expected_job_id': 'job-99',
+                    'expected_current_hash': cp_tmp['data']['initial_hash'],
+                })).structuredContent
+                self.assertFalse(wrong_job['ok'])
+                self.assertEqual(wrong_job['error']['code'], 'PERMISSION_DENIED')
+                stale = (await client.call_tool('restore_checkpoint', {
+                    'checkpoint_id': cp_tmp['data']['checkpoint_id'],
+                    'expected_job_id': 'job-42',
+                    'expected_current_hash': cp_tmp['data']['initial_hash'],
+                })).structuredContent
+                self.assertFalse(stale['ok'])
+                self.assertEqual(stale['error']['code'], 'CONFLICT')
+                self.assertEqual(source_file.read_text(encoding="utf-8"), "manual aftermath\n")
+                source_file.write_text("def add(a, b): return a + b\n", encoding="utf-8")
 
                 # 4. Conflict detection on external edit
                 cp_res2 = (await client.call_tool('create_checkpoint', {
