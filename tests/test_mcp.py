@@ -36,7 +36,7 @@ async def connected(vault=None, *, approver_id=None, approval_action='accept', s
             kwargs = {}
             if elicit:
                 async def callback(context, request):
-                    if 'Simulated effect' not in request.message and 'autorizzi il push' not in request.message and 'autorizzi l\'esecuzione del comando' not in request.message and 'autorizzi l\'invio esterno' not in request.message:
+                    if 'Simulated effect' not in request.message and 'autorizzi il push' not in request.message and 'autorizzi l\'esecuzione del comando' not in request.message and 'autorizzi l\'invio esterno' not in request.message and 'modifica del vault' not in request.message:
                         raise AssertionError('approval prompt must include action summary')
                     return ElicitResult(action=approval_action,
                                         content={} if approval_action == 'accept' else None)
@@ -866,9 +866,13 @@ class MCPTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(upd['data']['value'], 1000)
 
                 # 4. Attempting to set permissions/security fails closed
+                # Fix 1: expected_version is mandatory, so pass the fresh version
+                # to reach the security guardrail.
+                p2b = (await client.call_tool('get_profile', {})).structuredContent
                 sec = (await client.call_tool('update_preference', {
                     'key_path': 'permissions.allow_all',
-                    'value': True
+                    'value': True,
+                    'expected_version': p2b['data']['preferences_version']
                 })).structuredContent
                 self.assertFalse(sec['ok'])
                 self.assertEqual(sec['error']['code'], 'PERMISSION_DENIED')
@@ -928,6 +932,63 @@ class MCPTests(unittest.IsolatedAsyncioTestCase):
                 self.assertTrue(del_res['ok'])
                 self.assertEqual(del_res['data']['action'], 'deleted')
                 self.assertTrue((vault_dir / del_res['data']['backup_retained']).is_file())
+
+    async def test_vault_canonical_mutations_need_version_and_consent(self):
+        """Issue #48: protected vault mutations fail closed without version or consent."""
+        from pathlib import Path
+        with tempfile.TemporaryDirectory() as directory:
+            vault_dir = Path(directory)
+            (vault_dir / 'Canon.md').write_text('# Canonical\nKeep me.\n', encoding='utf-8')
+
+            # Happy path with consent: create with 'new', overwrite with current hash.
+            async with connected(vault_dir, approver_id=424242) as client:
+                created = (await client.call_tool('write_note', {
+                    'note_id': 'Notes/New.md', 'content': '# New\n', 'expected_version': 'new'
+                })).structuredContent
+                self.assertTrue(created['ok'], created)
+                cur = created['data']['version']
+                updated = (await client.call_tool('write_note', {
+                    'note_id': 'Notes/New.md', 'content': '# New v2\n', 'expected_version': cur
+                })).structuredContent
+                self.assertTrue(updated['ok'], updated)
+
+                # Canonical note via inferred-memory tools: PERMISSION_DENIED, content unchanged.
+                before = (vault_dir / 'Canon.md').read_text(encoding='utf-8')
+                prop = (await client.call_tool('propose_memory', {
+                    'domain': 'travel', 'key': 'x', 'value': 'y',
+                    'evidence': 'e', 'note_id': 'Canon.md'
+                })).structuredContent
+                self.assertFalse(prop['ok'])
+                self.assertEqual(prop['error']['code'], 'PERMISSION_DENIED')
+                canon = (await client.call_tool('read_note', {'note_id': 'Canon.md'})).structuredContent
+                forg = (await client.call_tool('forget_memory', {
+                    'note_id': 'Canon.md', 'expected_version': canon['data']['version']
+                })).structuredContent
+                self.assertFalse(forg['ok'])
+                self.assertEqual(forg['error']['code'], 'PERMISSION_DENIED')
+                self.assertEqual((vault_dir / 'Canon.md').read_text(encoding='utf-8'), before)
+
+            # Declined consent: mutation refused, content unchanged.
+            async with connected(vault_dir, approver_id=424242, approval_action='decline') as client:
+                canon = (await client.call_tool('read_note', {'note_id': 'Canon.md'})).structuredContent
+                denied = (await client.call_tool('write_note', {
+                    'note_id': 'Canon.md', 'content': '# Hacked\n',
+                    'expected_version': canon['data']['version']
+                })).structuredContent
+                self.assertFalse(denied['ok'])
+                self.assertEqual(denied['error']['code'], 'APPROVAL_DECLINED')
+                self.assertIn('Keep me.', (vault_dir / 'Canon.md').read_text(encoding='utf-8'))
+
+            # No elicitation support: same closed failure, no effect.
+            async with connected(vault_dir, approver_id=424242, elicit=False) as client:
+                canon = (await client.call_tool('read_note', {'note_id': 'Canon.md'})).structuredContent
+                noelicit = (await client.call_tool('write_note', {
+                    'note_id': 'Canon.md', 'content': '# Hacked\n',
+                    'expected_version': canon['data']['version']
+                })).structuredContent
+                self.assertFalse(noelicit['ok'])
+                self.assertEqual(noelicit['error']['code'], 'APPROVAL_DECLINED')
+                self.assertIn('Keep me.', (vault_dir / 'Canon.md').read_text(encoding='utf-8'))
 
                 # Email tools via MCP (Issue #25 & #26)
                 # 1. Search fails closed without configuration

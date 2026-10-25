@@ -118,9 +118,12 @@ class PreferencesTests(unittest.TestCase):
         self.assertEqual(profile["ambiguities"][0]["explicit_value"], 950)
         self.assertEqual(profile["ambiguities"][0]["note_value"], 600)
 
-    def test_write_note_with_concurrency_conflict(self):
+    def test_write_note_requires_explicit_version_for_create_and_overwrite(self):
         note_id = "Projects/Plan.md"
-        res1 = self.vault.write_note(note_id, "# Initial Plan\n", expected_version=None)
+        with self.assertRaises(VaultError) as ctx_none:
+            self.vault.write_note(note_id, "# Initial Plan\n", expected_version=None)
+        self.assertEqual(ctx_none.exception.code, "CONFLICT")
+        res1 = self.vault.write_note(note_id, "# Initial Plan\n", expected_version='new')
         self.assertEqual(res1["note_id"], note_id)
         v1 = res1["version"]
 
@@ -136,6 +139,36 @@ class PreferencesTests(unittest.TestCase):
         # Writing with v2 succeeds
         res3 = self.vault.write_note(note_id, "# Up to date\n", expected_version=v2)
         self.assertEqual(res3["note_id"], note_id)
+
+    def test_update_preference_requires_explicit_version(self):
+        pref_file = self.vault_path / "preferences.yaml"
+        pref_file.write_text("travel:\n  max_budget: 800\n", encoding="utf-8")
+        with self.assertRaises(VaultError) as ctx:
+            self.vault.update_preference("travel.max_budget", 900, expected_version=None)
+        self.assertEqual(ctx.exception.code, "CONFLICT")
+        prefs, _ = self.vault.load_preferences()
+        self.assertEqual(prefs["travel"]["max_budget"], 800)
+
+    def test_inferred_tools_reject_canonical_notes(self):
+        canonical = self.vault.write_note("Knowledge/Explicit.md", "# Canonical\n", expected_version='new')
+        before, _ = self.vault.load("Knowledge/Explicit.md")
+        with self.assertRaises(VaultError) as ctx_prop:
+            self.vault.propose_memory(domain="travel", key="seat", value="aisle",
+                                      evidence="saw it", note_id="Knowledge/Explicit.md")
+        self.assertEqual(ctx_prop.exception.code, "PERMISSION_DENIED")
+        with self.assertRaises(VaultError) as ctx_forget:
+            self.vault.forget_memory("Knowledge/Explicit.md", expected_version=canonical["version"])
+        self.assertEqual(ctx_forget.exception.code, "PERMISSION_DENIED")
+        after, _ = self.vault.load("Knowledge/Explicit.md")
+        self.assertEqual(before, after)
+
+    def test_forget_memory_requires_explicit_version(self):
+        mem = self.vault.propose_memory(domain="travel", key="seat", value="window",
+                                        evidence="saw seat choice", confidence=0.8)
+        with self.assertRaises(VaultError) as ctx:
+            self.vault.forget_memory(mem["note_id"], expected_version=None)
+        self.assertEqual(ctx.exception.code, "CONFLICT")
+        self.assertTrue((self.vault_path / mem["note_id"]).exists())
 
     def test_forget_inferred_memory_and_retention_backup(self):
         # 1. Propose inferred memory note
