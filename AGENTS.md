@@ -27,7 +27,7 @@ GitHub Issues in nuno80/Jarvis-hermes. See docs/agents/issue-tracker.md.
 Single-context: CONTEXT.md and docs/adr/. See docs/agents/domain.md.
 
 Use Matt Pocock skills installed in the coding agent. Skill source is not vendored here.
-The 30 tickets were prepared with to-tickets and publication authorized by the owner.
+The tickets were prepared with to-tickets and publication authorized by the owner.
 
 ---
 
@@ -41,7 +41,7 @@ The 30 tickets were prepared with to-tickets and publication authorized by the o
 
 ## Workflow
 
-Use the installed skills: `greet me` → `to task` → `to issue` → `implement`.
+Use the installed skills: `greel me` → `to task` → `to issue` → `implement`.
 Do not redefine the flow here. Check that the names match the installed skills; this repo's tickets were created with `to-tickets`.
 The source of truth for issues is GitHub Issues. Do not keep a second copy of issue state in local files.
 
