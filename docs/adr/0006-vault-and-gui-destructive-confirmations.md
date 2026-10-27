@@ -21,13 +21,15 @@ Occorre definire chiaramente quali operazioni su **vault** e **GUI** sono distru
      Operazioni strettamente read-only.
 
 2. **Automazione Desktop e GUI (`execute_gui_action`):**
-   - Le azioni GUI come `open_and_inspect` su applicazioni consentite (es. Notepad, Calcolatrice) con screenshot prima e dopo sono osservabili e benigne.
-   - Tuttavia, qualunque azione GUI che comporti input di comandi non banali o chiusura forzata (`close` / `kill`) o invio di keystroke/interazione che muta dati applicativi è classificata come potenziale mutazione protetta.
-   - Nel server MCP, `execute_gui_action` applica una triplice barriera server-side:
-     1. Verifica rigorosa dell'interattività della sessione Windows (`DESKTOP_INTERACTIVE` via OpenInputDesktop, AT10). Se bloccata, fallisce immediatamente (`DESKTOP_UNAVAILABLE`).
-     2. Concurrency lock esclusivo: mai più di un job GUI in esecuzione contemporanea (`CONCURRENT_GUI_JOB`).
-     3. Allowlist stretta di applicazioni non elevate e azioni ammesse. Azioni o applicazioni non registrate vengono rifiutate con `PERMISSION_DENIED` indipendentemente dalle richieste dell'LLM.
-     4. Quando un'azione GUI distruttiva o modificatrice viene richiesta (es. input batch o salvataggio/chiusura), l'approvazione viene richiesta al proprietario via elicitation sul server prima dell'esecuzione.
+   - Le azioni GUI come `open_and_inspect` su applicazioni consentite (es. Notepad, Calcolatrice) con screenshot prima e dopo sono osservabili e benigne: restano accessibili senza richiesta di conferma.
+   - Tuttavia, qualunque azione GUI modificatrice o distruttiva (come la chiusura forzata `close` o futuro input/salvataggio dati) richiede obbligatoriamente il consenso dell'utente via `ctx.elicit` al boundary MCP prima dell'esecuzione.
+   - Senza elicitation o in caso di rifiuto/timeout, `close` fallisce chiuso con `APPROVAL_DECLINED` e non raggiunge né il manager GUI né PowerShell.
+   - La scrittura simulata non implementata (`write_test_note`) è ritirata dall'allowlist: qualsiasi invocazione produce `ACTION_NOT_PERMITTED` senza sollecitare l'utente.
+   - Nel server MCP, `execute_gui_action` applica una quadrupla barriera server-side:
+     1. Validazione statica dell'allowlist di applicazioni non elevate e azioni ammesse (`PERMISSION_DENIED` o `ACTION_NOT_PERMITTED` immediati prima di ogni effetto o richiesta di consenso).
+     2. Verifica del consenso via `ctx.elicit` al boundary MCP per qualsiasi azione non osservativa (`close`), con token monouso (`ApprovalStore`).
+     3. Verifica rigorosa dell'interattività della sessione Windows (`DESKTOP_INTERACTIVE` via OpenInputDesktop, AT10). Se bloccata, fallisce immediatamente (`DESKTOP_UNAVAILABLE`).
+     4. Concurrency lock esclusivo: mai più di un job GUI in esecuzione contemporanea (`CONCURRENT_GUI_JOB`).
 
 3. **Invariante D14 applicato a Vault e GUI:**
    - La conferma dell'approvatore (`ApprovalStore`) consuma un token crittografico monouso associato all'hash dei parametri specifici dell'azione.
@@ -43,5 +45,8 @@ Occorre definire chiaramente quali operazioni su **vault** e **GUI** sono distru
    | `propose_memory` | `new` implicito per nota assente; hash corrente per candidata esistente | nessuno (solo candidate) | solo note nuove o candidate validate (`source: inferred`); canoniche → `PERMISSION_DENIED` |
    | `forget_memory` intera / chiave | hash corrente obbligatorio, altrimenti `CONFLICT` | elicitation + token monouso, altrimenti `APPROVAL_DECLINED`; backup in `.jarvis_backups` prima dell'effetto | solo note candidate validate; canoniche → `PERMISSION_DENIED` |
    | `read_note`, `search_notes`, `get_profile` | nessuna | nessuno | read-only |
+   | `execute_gui_action` (`open_and_inspect`) | nessuna | nessuno (osservativo) | sole app in allowlist (`notepad`, `calc`) |
+   | `execute_gui_action` (`close`) | nessuna | elicitation + token monouso, altrimenti `APPROVAL_DECLINED` (non tocca PowerShell) | sole app in allowlist (`notepad`, `calc`) |
+   | `execute_gui_action` (`write_test_note`) | non applicabile | non applicabile (`ACTION_NOT_PERMITTED` prima del consenso) | nessuno (ritirata dall'allowlist) |
 
    Ordine di valutazione: versione prima del consenso (una versione stale restituisce `CONFLICT` senza sollecitare il proprietario); target canonico prima di ogni effetto per i tool di memoria inferita (`PERMISSION_DENIED` senza modifiche a frontmatter o corpo).

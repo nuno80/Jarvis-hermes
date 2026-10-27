@@ -36,7 +36,7 @@ async def connected(vault=None, *, approver_id=None, approval_action='accept', s
             kwargs = {}
             if elicit:
                 async def callback(context, request):
-                    if 'Simulated effect' not in request.message and 'autorizzi il push' not in request.message and 'autorizzi l\'esecuzione del comando' not in request.message and 'autorizzi l\'invio esterno' not in request.message and 'modifica del vault' not in request.message:
+                    if 'Simulated effect' not in request.message and 'autorizzi il push' not in request.message and 'autorizzi l\'esecuzione del comando' not in request.message and 'autorizzi l\'invio esterno' not in request.message and 'modifica del vault' not in request.message and 'autorizzi l\'azione GUI' not in request.message:
                         raise AssertionError('approval prompt must include action summary')
                     return ElicitResult(action=approval_action,
                                         content={} if approval_action == 'accept' else None)
@@ -740,6 +740,39 @@ class MCPTests(unittest.IsolatedAsyncioTestCase):
             bad_res = (await client.call_tool('execute_gui_action', {'app_name': 'cmd.exe'})).structuredContent
             self.assertFalse(bad_res['ok'])
             self.assertEqual(bad_res['error']['code'], 'PERMISSION_DENIED')
+
+            # execute_gui_action with unpermitted / simulated write rejected without elicitation
+            write_res = (await client.call_tool('execute_gui_action', {'app_name': 'notepad', 'action': 'write_test_note'})).structuredContent
+            self.assertFalse(write_res['ok'])
+            self.assertEqual(write_res['error']['code'], 'ACTION_NOT_PERMITTED')
+
+            # execute_gui_action open_and_inspect runs without confirmation
+            open_res = (await client.call_tool('execute_gui_action', {'app_name': 'notepad', 'action': 'open_and_inspect'})).structuredContent
+            self.assertTrue(open_res['ok'])
+            self.assertEqual(open_res['data']['interaction']['observed_state'], 'window_opened_ready')
+
+            # execute_gui_action close without approver configured fails closed
+            close_no_app = (await client.call_tool('execute_gui_action', {'app_name': 'notepad', 'action': 'close'})).structuredContent
+            self.assertFalse(close_no_app['ok'])
+            self.assertEqual(close_no_app['error']['code'], 'APPROVER_NOT_CONFIGURED')
+
+        # execute_gui_action close with declined elicitation fails closed
+        async with connected(approver_id=424242, approval_action='decline') as client:
+            declined_res = (await client.call_tool('execute_gui_action', {'app_name': 'notepad', 'action': 'close'})).structuredContent
+            self.assertFalse(declined_res['ok'])
+            self.assertEqual(declined_res['error']['code'], 'APPROVAL_DECLINED')
+
+        # execute_gui_action close with client having no elicitation support fails closed
+        async with connected(approver_id=424242, elicit=False) as client:
+            no_elicit_res = (await client.call_tool('execute_gui_action', {'app_name': 'notepad', 'action': 'close'})).structuredContent
+            self.assertFalse(no_elicit_res['ok'])
+            self.assertEqual(no_elicit_res['error']['code'], 'APPROVAL_DECLINED')
+
+        # execute_gui_action close with approved consent succeeds
+        async with connected(approver_id=424242, approval_action='accept') as client:
+            accepted_res = (await client.call_tool('execute_gui_action', {'app_name': 'notepad', 'action': 'close'})).structuredContent
+            self.assertTrue(accepted_res['ok'])
+            self.assertEqual(accepted_res['data']['interaction']['observed_state'], 'window_closed')
 
     async def test_run_command_via_mcp(self):
         from pathlib import Path

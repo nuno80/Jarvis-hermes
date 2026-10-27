@@ -14,7 +14,7 @@ CONFIRMATION_POLICIES = {
     "calendar_create_event": "Elicitazione nativa MCP (riepilogo evento, digest)",
     "calendar_update_event": "Elicitazione nativa MCP (id, modifiche, digest)",
     "calendar_delete_event": "Elicitazione nativa MCP (id, digest)",
-    "execute_gui_action": "Policy protetta (app whitelisted, desktop interattivo, prima/dopo screenshot)",
+    "execute_gui_action": "Elicitazione obbligatoria per azioni modificatrici (close); osservazione senza conferma (open_and_inspect)",
     "run_command": "Policy deterministica (automatico per READONLY/WRITE_RECOVERABLE, approvazione per PRIVILEGED/DESTRUCTIVE)",
     "run_project_workflow": "Verifica hash script e git hooks prima dell'esecuzione",
     "commit_project_changes": "Verifica run precedente richiesta (nessun commit arbitrario)",

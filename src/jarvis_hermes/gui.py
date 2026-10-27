@@ -37,7 +37,7 @@ ALLOWED_APPS = {
     "notepad": {
         "executable": "notepad.exe",
         "description": "Standard Windows Notepad",
-        "allowed_actions": ["open_and_inspect", "write_test_note", "close"],
+        "allowed_actions": ["open_and_inspect", "close"],
     },
     "calc": {
         "executable": "calc.exe",
@@ -45,6 +45,9 @@ ALLOWED_APPS = {
         "allowed_actions": ["open_and_inspect", "close"],
     }
 }
+
+OBSERVATIONAL_ACTIONS: frozenset[str] = frozenset({"open_and_inspect"})
+MUTATING_ACTIONS: frozenset[str] = frozenset({"close"})
 
 BANNED_APPS = {
     "cmd.exe", "powershell.exe", "pwsh.exe", "bash.exe", "wsl.exe",
@@ -257,17 +260,8 @@ Write-Output "$($p.Id)|||$($p.MainWindowTitle)"
             status["active_window"] = self._get_active_window_info()
         return status
 
-    def execute_gui_action(
-        self,
-        app_name: str,
-        action: str = "open_and_inspect",
-        job_id: str | None = None,
-    ) -> dict[str, Any]:
-        """Execute a benign GUI action with before/after screenshots and concurrency lock."""
-        if job_id and self.job_store:
-            self.job_store.check_not_cancelled(job_id)
-
-        # 1. Reject banned or non-whitelisted apps
+    def validate_action(self, app_name: str, action: str) -> tuple[str, dict[str, Any]]:
+        """Validate application and action against security policy before execution."""
         norm_app = app_name.lower().strip()
         if norm_app in BANNED_APPS or any(norm_app.endswith(b) for b in BANNED_APPS):
             raise GuiError("PERMISSION_DENIED", f"Execution of system/shell tool '{app_name}' is banned via GUI.")
@@ -278,6 +272,21 @@ Write-Output "$($p.Id)|||$($p.MainWindowTitle)"
 
         if action not in app_cfg["allowed_actions"]:
             raise GuiError("ACTION_NOT_PERMITTED", f"Action '{action}' is not permitted for '{app_name}'.")
+
+        return norm_app, app_cfg
+
+    def execute_gui_action(
+        self,
+        app_name: str,
+        action: str = "open_and_inspect",
+        job_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Execute a benign GUI action with before/after screenshots and concurrency lock."""
+        if job_id and self.job_store:
+            self.job_store.check_not_cancelled(job_id)
+
+        # 1. Reject banned or non-whitelisted apps and actions
+        norm_app, app_cfg = self.validate_action(app_name, action)
 
         # 2. Check desktop interactive session (AT10)
         interactive, detail = self.check_desktop_interactive()

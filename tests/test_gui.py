@@ -70,6 +70,49 @@ class GuiAutomationTests(unittest.TestCase):
             self.manager.execute_gui_action(app_name="notepad", action="send_external_http_payload")
         self.assertEqual(cm.exception.code, "ACTION_NOT_PERMITTED")
 
+    def test_write_test_note_rejected_as_not_permitted(self):
+        """Simulated write action (write_test_note) is removed from allowlist and produces ACTION_NOT_PERMITTED."""
+        with self.assertRaises(GuiError) as cm:
+            self.manager.execute_gui_action(app_name="notepad", action="write_test_note")
+        self.assertEqual(cm.exception.code, "ACTION_NOT_PERMITTED")
+
+    def test_validate_action_helpers(self):
+        """validate_action rejects unauthorized apps and unpermitted actions before execution."""
+        norm_app, app_cfg = self.manager.validate_action("notepad", "open_and_inspect")
+        self.assertEqual(norm_app, "notepad")
+        self.assertIn("open_and_inspect", app_cfg["allowed_actions"])
+
+        with self.assertRaises(GuiError) as cm:
+            self.manager.validate_action("cmd.exe", "open_and_inspect")
+        self.assertEqual(cm.exception.code, "PERMISSION_DENIED")
+
+        with self.assertRaises(GuiError) as cm:
+            self.manager.validate_action("notepad", "write_test_note")
+        self.assertEqual(cm.exception.code, "ACTION_NOT_PERMITTED")
+
+    def test_live_windows_gui_close_with_consent(self):
+        """Acceptance test: real Windows host execution of GUI open and close with observed state and screenshots."""
+        ps = self.manager._get_powershell_cmd()
+        if not ps:
+            self.skipTest("No Windows PowerShell available on this host.")
+        interactive, detail = self.manager.check_desktop_interactive()
+        if not interactive:
+            self.skipTest(f"Windows desktop session not interactive: {detail}")
+
+        # Open and inspect
+        res_open = self.manager.execute_gui_action(app_name="notepad", action="open_and_inspect")
+        self.assertTrue(res_open["ok"])
+        self.assertEqual(res_open["interaction"]["observed_state"], "window_opened_ready")
+        self.assertTrue(Path(res_open["screenshots"]["before"]).exists())
+        self.assertTrue(Path(res_open["screenshots"]["after"]).exists())
+
+        # Close
+        res_close = self.manager.execute_gui_action(app_name="notepad", action="close")
+        self.assertTrue(res_close["ok"])
+        self.assertEqual(res_close["interaction"]["observed_state"], "window_closed")
+        self.assertTrue(Path(res_close["screenshots"]["before"]).exists())
+        self.assertTrue(Path(res_close["screenshots"]["after"]).exists())
+
     def test_benign_gui_action_produces_before_after_screenshots(self):
         """Benign observable GUI action produces before & after screenshots and reports observed state."""
         with patch.object(self.manager, "check_desktop_interactive", return_value=(True, "DESKTOP_INTERACTIVE")), \
