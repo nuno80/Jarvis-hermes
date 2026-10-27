@@ -176,3 +176,47 @@ class JobStoreTests(unittest.TestCase):
         self.assertEqual(status_after["status"], "outcome_unknown")
         self.assertEqual(status_after["last_step"], "step 2: sent payload")
         self.assertIn("Node restarted during execution", status_after["warnings"])
+
+    def test_concurrent_cross_process_admission_control(self):
+        """Simulate concurrent tasks across distinct processes / connections on same JobStore DB."""
+        import multiprocessing
+
+        def worker_acquire(db_file, proj_name, out_queue):
+            try:
+                s = JobStore(db_file)
+                j = s.acquire_pi_job(actor_id=99, project_name=proj_name, prompt="p")
+                out_queue.put(("ok", j["job_id"]))
+            except JobError as exc:
+                out_queue.put(("error", exc.code, exc.retryable))
+
+        q = multiprocessing.Queue()
+        # Five concurrent attempts across 5 distinct processes
+        # 3 for project A, 2 for project B
+        procs = [
+            multiprocessing.Process(target=worker_acquire, args=(self.db_path, "projA", q)),
+            multiprocessing.Process(target=worker_acquire, args=(self.db_path, "projA", q)),
+            multiprocessing.Process(target=worker_acquire, args=(self.db_path, "projA", q)),
+            multiprocessing.Process(target=worker_acquire, args=(self.db_path, "projB", q)),
+            multiprocessing.Process(target=worker_acquire, args=(self.db_path, "projB", q)),
+        ]
+        for p in procs:
+            p.start()
+        for p in procs:
+            p.join(timeout=10.0)
+
+        results = []
+        while not q.empty():
+            results.append(q.get())
+
+        self.assertEqual(len(results), 5)
+        oks = [r for r in results if r[0] == "ok"]
+        errors = [r for r in results if r[0] == "error"]
+
+        # Exactly 2 tasks succeeded (1 for projA, 1 for projB)
+        self.assertEqual(len(oks), 2)
+        # Exactly 3 tasks failed with retryable PROJECT_BUSY or CAPACITY_EXCEEDED
+        self.assertEqual(len(errors), 3)
+        for err in errors:
+            self.assertIn(err[1], {"PROJECT_BUSY", "CAPACITY_EXCEEDED"})
+            self.assertTrue(err[2])
+

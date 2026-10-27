@@ -514,3 +514,50 @@ class WorkflowAndCommitTests(unittest.TestCase):
         registry_allowed = ProjectRegistry(self.cfg_file, current_device="local", current_environment="wsl", state_dir=state_dir)
         res = registry_allowed.commit_project_changes("sample", ["app.py"], "commit no verify", vr_id, no_verify=True)
         self.assertTrue(res["committed"])
+
+    def test_commit_and_push_respect_project_ownership_and_busy_state(self):
+        """Coordinated git operations cannot commit or push when project is busy with an active Pi task."""
+        from jarvis_hermes.jobs import JobStore
+        (self.proj_dir / "app.py").write_text("v1\n", encoding="utf-8")
+        subprocess.run(["git", "add", "."], cwd=self.proj_dir, check=True)
+        subprocess.run(["git", "commit", "-m", "init"], cwd=self.proj_dir, check=True)
+
+        (self.proj_dir / "app.py").write_text("v2\n", encoding="utf-8")
+        self.cfg_file.write_text(json.dumps({
+            "devices": {"local": {"environment": "wsl"}},
+            "projects": {
+                "sample": {
+                    "paths": {"local": str(self.proj_dir)},
+                    "workflows": {"test": {"command": ["python3", "-c", "print('ok')"]}}
+                }
+            }
+        }), encoding="utf-8")
+
+        state_dir = Path(self.tmp.name) / "state"
+        job_db = state_dir / "jobs.sqlite3"
+        job_store = JobStore(job_db)
+        registry = ProjectRegistry(self.cfg_file, current_device="local", current_environment="wsl",
+                                   state_dir=state_dir, job_store=job_store)
+
+        wf_res = registry.run_project_workflow("sample", "test")
+        vr_id = wf_res["verification_run_id"]
+
+        # Acquire a Pi task on 'sample'
+        pi_job = job_store.acquire_pi_job(actor_id=1, project_name="sample", prompt="pi working")
+
+        # An uncoordinated commit or commit with different job_id gets PROJECT_BUSY
+        with self.assertRaises(ProjectError) as ctx:
+            registry.commit_project_changes("sample", ["app.py"], "commit under pi", vr_id)
+        self.assertEqual(ctx.exception.code, "PROJECT_BUSY")
+        self.assertTrue(ctx.exception.retryable)
+
+        # Same for push_project_commit
+        with self.assertRaises(ProjectError) as ctx:
+            registry.push_project_commit("sample", "origin", "main", "a"*40, "tok", 1)
+        self.assertEqual(ctx.exception.code, "PROJECT_BUSY")
+        self.assertTrue(ctx.exception.retryable)
+
+        # The owning pi_job itself CAN commit
+        res = registry.commit_project_changes("sample", ["app.py"], "pi commit", vr_id, job_id=pi_job["job_id"])
+        self.assertTrue(res["committed"])
+

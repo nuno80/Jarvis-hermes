@@ -27,6 +27,7 @@ import time
 from typing import Any
 import urllib.parse
 import urllib.request
+import uuid
 
 from jarvis_hermes.core import ensure_secure_file_permissions, ensure_state_dir
 from jarvis_hermes.jobs import JobError, JobStore, terminate_process_tree, drain_process_pipes
@@ -36,9 +37,10 @@ _SAFE_MODEL_RE = re.compile(r"^[a-zA-Z0-9._:/-]+$")
 
 
 class PiCodingError(Exception):
-    def __init__(self, code: str, message: str):
+    def __init__(self, code: str, message: str, retryable: bool = False):
         self.code = code
         self.message = message
+        self.retryable = retryable
         super().__init__(message)
 
 
@@ -305,7 +307,7 @@ def snapshot_repo(target_dir: Path) -> dict[str, Any]:
                          "-m", "jarvis pi_task pre-run snapshot", cwd=toplevel, env=env)
             if commit.returncode != 0:
                 return {"ref": None, "reason": "commit_tree_failed"}
-            ref = f"refs/jarvis/pi-snapshots/{int(time.time())}-{os.getpid()}"
+            ref = f"refs/jarvis/pi-snapshots/{int(time.time())}-{uuid.uuid4().hex[:12]}"
             if git("update-ref", ref, commit.stdout.strip(), cwd=toplevel).returncode != 0:
                 return {"ref": None, "reason": "update_ref_failed"}
         return {"ref": ref, "restore_hint": f"git restore --source={ref} --staged --worktree -- ."}
@@ -372,12 +374,18 @@ def run_pi_task(
     snapshot = snapshot_repo(target_dir)
     job_id: str | None = None
     if job_store is not None:
-        job = job_store.create_job(
-            actor_id, f"pi_task:{resolved_name}", prompt[:200],
-            metadata={"project_path": str(target_dir), "async": async_mode,
-                      "snapshot_ref": snapshot.get("ref")})
-        job_id = job["job_id"]
-        job_store.update_status(job_id, "running", step="pi started")
+        try:
+            job = job_store.acquire_pi_job(
+                actor_id=actor_id,
+                project_name=resolved_name,
+                prompt=prompt,
+                metadata={"project_path": str(target_dir), "async": async_mode,
+                          "snapshot_ref": snapshot.get("ref")}
+            )
+            job_id = job["job_id"]
+            job_store.update_status(job_id, "running", step="pi started")
+        except JobError as exc:
+            raise PiCodingError(exc.code, exc.message, retryable=exc.retryable)
 
     def _finish_job(status: str, warning: str | None = None, result: dict[str, Any] | None = None) -> None:
         if job_store is None or job_id is None:
@@ -440,8 +448,8 @@ def run_pi_task(
 
         if is_long:
             output_dir = ensure_state_dir('pi-outputs')
-            ts = int(time.time())
-            file_path = output_dir / f"pi_{resolved_name}_{ts}.md"
+            uid = uuid.uuid4().hex[:12]
+            file_path = output_dir / f"pi_{resolved_name}_{int(time.time())}_{uid}.md"
 
             file_content = (
                 f"# Pi Task Output - {resolved_name}\n\n"

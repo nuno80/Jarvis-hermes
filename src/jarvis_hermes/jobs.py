@@ -8,14 +8,16 @@ import sqlite3
 import subprocess
 import time
 from typing import Any
+import uuid
 
 TERMINAL_STATES = {'succeeded', 'failed', 'cancelled', 'interrupted', 'outcome_unknown'}
 
 
 class JobError(Exception):
-    def __init__(self, code: str, message: str):
+    def __init__(self, code: str, message: str, retryable: bool = False):
         self.code = code
         self.message = message
+        self.retryable = retryable
         super().__init__(message)
 
 
@@ -72,6 +74,71 @@ class JobStore:
                 job_id, actor_id, target, description, now, now, json.dumps(metadata or {})
             ))
             conn.commit()
+        return self.get_job(job_id)
+
+    def acquire_pi_job(self, actor_id: int, project_name: str, prompt: str,
+                       metadata: dict[str, Any] | None = None,
+                       max_active: int = 2) -> dict[str, Any]:
+        """Atomically admit and create a Pi job within an IMMEDIATE transaction.
+        Enforces a global cap (max_active) across all Pi jobs and exactly one active Pi job per project.
+        Raises JobError with retryable=True on global limit (CAPACITY_EXCEEDED) or project busy (PROJECT_BUSY).
+        """
+        now = time.time()
+        job_id = f"job-{uuid.uuid4().hex[:16]}"
+        target = f"pi_task:{project_name}"
+        meta = dict(metadata or {})
+        meta["project_name"] = project_name
+
+        with self._connection() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            try:
+                # 1. Check project concurrency: exactly one active Pi job for this project
+                row = conn.execute(
+                    """
+                    SELECT job_id FROM jobs
+                    WHERE target = ?
+                      AND status NOT IN ('succeeded', 'failed', 'cancelled', 'interrupted', 'outcome_unknown')
+                    LIMIT 1
+                    """,
+                    (target,)
+                ).fetchone()
+                if row:
+                    raise JobError(
+                        "PROJECT_BUSY",
+                        f"Project '{project_name}' has an active Pi task ({row['job_id']}). Only one active task per project is permitted.",
+                        retryable=True
+                    )
+
+                # 2. Check global Pi concurrency
+                count_row = conn.execute(
+                    """
+                    SELECT COUNT(*) as active_count FROM jobs
+                    WHERE target LIKE 'pi_task:%'
+                      AND status NOT IN ('succeeded', 'failed', 'cancelled', 'interrupted', 'outcome_unknown')
+                    """
+                ).fetchone()
+                active_count = count_row["active_count"] if count_row else 0
+                if active_count >= max_active:
+                    raise JobError(
+                        "CAPACITY_EXCEEDED",
+                        f"Maximum concurrent Pi tasks reached ({active_count}/{max_active}). Retry later.",
+                        retryable=True
+                    )
+
+                conn.execute(
+                    """
+                    INSERT INTO jobs (
+                        job_id, actor_id, target, description, status,
+                        last_step, effects_count, created_at, updated_at, metadata_json
+                    ) VALUES (?, ?, ?, ?, 'received', NULL, 0, ?, ?, ?)
+                    """,
+                    (job_id, actor_id, target, prompt[:200], now, now, json.dumps(meta))
+                )
+                conn.commit()
+            except Exception:
+                conn.rollback()
+                raise
+
         return self.get_job(job_id)
 
     def get_job(self, job_id: str) -> dict[str, Any]:
