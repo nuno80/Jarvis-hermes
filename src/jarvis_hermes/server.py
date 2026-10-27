@@ -241,10 +241,10 @@ def build_server() -> FastMCP:
                     'error': {'code': exc.code, 'message': exc.message, 'retryable': False}}
         except JobError as exc:
             return {**result, 'ok': False, 'data': None,
-                    'error': {'code': exc.code, 'message': exc.message, 'retryable': False}}
+                    'error': {'code': exc.code, 'message': exc.message, 'retryable': getattr(exc, 'retryable', False)}}
         except ProjectError as exc:
             return {**result, 'ok': False, 'data': None,
-                    'error': {'code': exc.code, 'message': exc.message, 'retryable': False}}
+                    'error': {'code': exc.code, 'message': exc.message, 'retryable': getattr(exc, 'retryable', False)}}
         except CheckpointError as exc:
             return {**result, 'ok': False, 'data': None,
                     'error': {'code': exc.code, 'message': exc.message, 'retryable': False}}
@@ -259,7 +259,7 @@ def build_server() -> FastMCP:
                     'error': {'code': exc.code, 'message': exc.message, 'retryable': getattr(exc, 'retryable', False)}}
         except PiCodingError as exc:
             return {**result, 'ok': False, 'data': None,
-                    'error': {'code': exc.code, 'message': exc.message, 'retryable': False}}
+                    'error': {'code': exc.code, 'message': exc.message, 'retryable': getattr(exc, 'retryable', False)}}
         except LLMError as exc:
             return {**result, 'ok': False, 'data': None,
                     'error': {'code': exc.code, 'message': exc.message, 'retryable': False}}

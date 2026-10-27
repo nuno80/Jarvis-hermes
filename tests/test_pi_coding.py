@@ -210,6 +210,22 @@ class PiSnapshotTests(unittest.TestCase):
         finally:
             shutil.rmtree(plain, ignore_errors=True)
 
+    def test_snapshots_with_same_timestamp_and_pid_have_distinct_refs_and_independent_recovery(self):
+        # Create two distinct commit points in the same second / pid
+        (self.repo / "state.txt").write_text("state-alpha\n")
+        snap1 = snapshot_repo(self.repo)
+
+        (self.repo / "state.txt").write_text("state-beta\n")
+        snap2 = snapshot_repo(self.repo)
+
+        self.assertIsNotNone(snap1["ref"])
+        self.assertIsNotNone(snap2["ref"])
+        self.assertNotEqual(snap1["ref"], snap2["ref"])
+
+        # Recovery states are independent
+        self.assertEqual(_git(self.repo, "show", f"{snap1['ref']}:state.txt"), "state-alpha\n")
+        self.assertEqual(_git(self.repo, "show", f"{snap2['ref']}:state.txt"), "state-beta\n")
+
 
 class PiJobTrackingTests(unittest.TestCase):
     def setUp(self):
@@ -275,3 +291,66 @@ class PiJobTrackingTests(unittest.TestCase):
         self.assertEqual(self.store.get_job(job_id)["status"], "cancelled")
         self.assertFalse(JobStore._is_process_alive(pid))
         time.sleep(0.5)  # let the background runner wind down before the temp dir is removed
+
+    def test_admission_control_rejects_second_task_on_same_project_with_project_busy(self):
+        self._fake_pi("sleep 30")
+        res1 = self._run(async_mode=True)
+        self.assertTrue(res1["ok"])
+
+        # Second task on same project should fail with PROJECT_BUSY
+        with self.assertRaises(PiCodingError) as ctx:
+            self._run(async_mode=True)
+        self.assertEqual(ctx.exception.code, "PROJECT_BUSY")
+        self.assertTrue(ctx.exception.retryable)
+
+        # Cancel the first job so it finishes
+        self.store.cancel_job(res1["job_id"])
+
+    def test_admission_control_global_limit_two_active_tasks(self):
+        # Create second project directory
+        (self.tmp / "programmazione" / "proj2").mkdir(parents=True)
+        (self.tmp / "programmazione" / "proj3").mkdir(parents=True)
+
+        self._fake_pi("sleep 30")
+        with patch("pathlib.Path.home", return_value=self.tmp), \
+             patch("shutil.which", return_value=str(self.fake_pi)), \
+             patch("jarvis_hermes.pi_coding.ensure_proxy_servers_running", return_value={}):
+            res1 = run_pi_task(prompt="task 1", project_query="proj", async_mode=True,
+                               notify_telegram=False, job_store=self.store, actor_id=1)
+            res2 = run_pi_task(prompt="task 2", project_query="proj2", async_mode=True,
+                               notify_telegram=False, job_store=self.store, actor_id=1)
+
+            self.assertTrue(res1["ok"])
+            self.assertTrue(res2["ok"])
+
+            # Third task across distinct projects should fail with CAPACITY_EXCEEDED
+            with self.assertRaises(PiCodingError) as ctx:
+                run_pi_task(prompt="task 3", project_query="proj3", async_mode=True,
+                            notify_telegram=False, job_store=self.store, actor_id=1)
+            self.assertEqual(ctx.exception.code, "CAPACITY_EXCEEDED")
+            self.assertTrue(ctx.exception.retryable)
+
+            # Cleanup
+            self.store.cancel_job(res1["job_id"])
+            self.store.cancel_job(res2["job_id"])
+
+    def test_long_outputs_get_distinct_readable_files(self):
+        long_body = "x" * 4000
+        self._fake_pi(f"echo '{long_body}'")
+
+        res1 = self._run(max_inline_chars=100)
+        res2 = self._run(max_inline_chars=100)
+
+        self.assertTrue(res1["is_long_output"])
+        self.assertTrue(res2["is_long_output"])
+        self.assertIsNotNone(res1["output_file"])
+        self.assertIsNotNone(res2["output_file"])
+        self.assertNotEqual(res1["output_file"], res2["output_file"])
+
+        f1 = Path(res1["output_file"])
+        f2 = Path(res2["output_file"])
+        self.assertTrue(f1.is_file())
+        self.assertTrue(f2.is_file())
+        self.assertIn("Execution Log", f1.read_text())
+        self.assertIn("Execution Log", f2.read_text())
+

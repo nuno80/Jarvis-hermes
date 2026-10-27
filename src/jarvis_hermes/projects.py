@@ -86,9 +86,10 @@ def redact_secrets(text: str) -> str:
 
 
 class ProjectError(Exception):
-    def __init__(self, code: str, message: str):
+    def __init__(self, code: str, message: str, retryable: bool = False):
         self.code = code
         self.message = message
+        self.retryable = retryable
         super().__init__(message)
 
 
@@ -455,6 +456,24 @@ class ProjectRegistry:
         """Commit only relevant files changed by the job after verifying verification_run_id."""
         if job_id and self.job_store:
             self.job_store.check_not_cancelled(job_id)
+
+        # Coordinate project ownership: cannot commit if another task owns/operates on this project
+        if self.job_store:
+            with self.job_store._connection() as conn:
+                row = conn.execute(
+                    """
+                    SELECT job_id FROM jobs
+                    WHERE target = ?
+                      AND status NOT IN ('succeeded', 'failed', 'cancelled', 'interrupted', 'outcome_unknown')
+                    LIMIT 1
+                    """,
+                    (f"pi_task:{project_id}",)
+                ).fetchone()
+                if row and (not job_id or row['job_id'] != job_id):
+                    raise ProjectError('PROJECT_BUSY',
+                                       f"Project {project_id!r} is busy running active Pi task {row['job_id']}.",
+                                       retryable=True)
+
         if isinstance(verification_run_id, dict):
             raise ProjectError('VERIFICATION_REQUIRED', 'verification_run_id must be a string ID referencing a recorded verification run, not a dictionary.')
         if not verification_run_id or not isinstance(verification_run_id, str):
@@ -604,6 +623,23 @@ class ProjectRegistry:
         root, resolved_device, _ = self.resolve_project_root(project_id, device_id)
         if not (root / '.git').exists():
             raise ProjectError('NOT_A_GIT_REPO', f'Project root {root} is not a git repository.')
+
+        # Coordinate project ownership: cannot push if another task owns/operates on this project
+        if self.job_store:
+            with self.job_store._connection() as conn:
+                row = conn.execute(
+                    """
+                    SELECT job_id FROM jobs
+                    WHERE target = ?
+                      AND status NOT IN ('succeeded', 'failed', 'cancelled', 'interrupted', 'outcome_unknown')
+                    LIMIT 1
+                    """,
+                    (f"pi_task:{project_id}",)
+                ).fetchone()
+                if row:
+                    raise ProjectError('PROJECT_BUSY',
+                                       f"Project {project_id!r} is busy running active Pi task {row['job_id']}.",
+                                       retryable=True)
 
         cfg = self._load_config()
         proj = cfg.get('projects', {}).get(project_id, {})
