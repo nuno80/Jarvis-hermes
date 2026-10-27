@@ -24,6 +24,7 @@ from contextlib import closing
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
+import base64
 from .approval import ApprovalError, ApprovalStore
 from .core import sqlite_connection
 
@@ -35,6 +36,98 @@ YAHOO_SMTP_PORT = 465
 
 FOLDER_RE = re.compile(r"^[a-zA-Z0-9_\- ]+$")
 MAX_BODY_CHARS = 10000
+MAX_ATTACHMENT_BYTES = 10 * 1024 * 1024  # 10 MiB per allegato
+MAX_TOTAL_ATTACHMENTS_BYTES = 25 * 1024 * 1024  # 25 MiB totale allegati
+
+
+def normalize_and_validate_attachments(
+    attachments: list[dict[str, Any]] | None,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Valida e normalizza gli allegati decodificando base64 una sola volta.
+
+    Restituisce una tupla (prepared_attachments, normalized_metadata).
+    - prepared_attachments: dict con filename, content_bytes, sha256, size_bytes.
+    - normalized_metadata: dict con filename, sha256, size_bytes (per digest e audit).
+    Rifiuta allegati non conformi, sha256 o size non corrispondenti, o limiti superati.
+    """
+    if not attachments:
+        return [], []
+
+    prepared: list[dict[str, Any]] = []
+    metadata: list[dict[str, Any]] = []
+    total_bytes = 0
+
+    for i, att in enumerate(attachments):
+        if not isinstance(att, dict):
+            raise EmailError("INVALID_ATTACHMENT", f"Allegato #{i} non valido: formato dizionario atteso.")
+        filename = str(att.get("filename", "")).strip()
+        if not filename:
+            raise EmailError("INVALID_ATTACHMENT", f"Allegato #{i} privo di 'filename'.")
+
+        raw_content = att.get("content")
+        raw_b64 = att.get("content_base64")
+
+        if raw_b64 is not None:
+            if not isinstance(raw_b64, str):
+                raise EmailError("INVALID_ATTACHMENT", f"Allegato '{filename}': 'content_base64' deve essere stringa base64.")
+            try:
+                content_bytes = base64.b64decode(raw_b64, validate=True)
+            except Exception as exc:
+                raise EmailError("INVALID_ATTACHMENT", f"Allegato '{filename}': decodifica base64 fallita: {exc}") from exc
+        elif raw_content is not None:
+            if isinstance(raw_content, str):
+                content_bytes = raw_content.encode("utf-8")
+            elif isinstance(raw_content, (bytes, bytearray)):
+                content_bytes = bytes(raw_content)
+            else:
+                raise EmailError("INVALID_ATTACHMENT", f"Allegato '{filename}': formato 'content' non supportato.")
+        else:
+            raise EmailError("INVALID_ATTACHMENT", f"Allegato '{filename}': specificare 'content_base64' o 'content'.")
+
+        actual_size = len(content_bytes)
+        if actual_size > MAX_ATTACHMENT_BYTES:
+            raise EmailError(
+                "ATTACHMENT_TOO_LARGE",
+                f"Allegato '{filename}' ({actual_size} byte) supera il limite consentito di {MAX_ATTACHMENT_BYTES} byte.",
+            )
+
+        total_bytes += actual_size
+        if total_bytes > MAX_TOTAL_ATTACHMENTS_BYTES:
+            raise EmailError(
+                "ATTACHMENT_TOO_LARGE",
+                f"La dimensione totale degli allegati ({total_bytes} byte) supera il limite consentito di {MAX_TOTAL_ATTACHMENTS_BYTES} byte.",
+            )
+
+        actual_sha256 = hashlib.sha256(content_bytes).hexdigest()
+
+        declared_size = att.get("size_bytes")
+        if declared_size is not None and int(declared_size) != actual_size:
+            raise EmailError(
+                "ATTACHMENT_INTEGRITY_MISMATCH",
+                f"Allegato '{filename}': dimensione dichiarata ({declared_size}) non corrisponde a quella effettiva ({actual_size}).",
+            )
+
+        declared_sha256 = att.get("sha256")
+        if declared_sha256 is not None and str(declared_sha256).strip().lower() != actual_sha256.lower():
+            raise EmailError(
+                "ATTACHMENT_INTEGRITY_MISMATCH",
+                f"Allegato '{filename}': sha256 dichiarato non corrisponde al digest calcolato dai byte.",
+            )
+
+        meta = {
+            "filename": filename,
+            "sha256": actual_sha256,
+            "size_bytes": actual_size,
+        }
+        metadata.append(meta)
+        prepared.append({
+            "filename": filename,
+            "content_bytes": content_bytes,
+            "sha256": actual_sha256,
+            "size_bytes": actual_size,
+        })
+
+    return prepared, metadata
 
 
 def compute_email_digest(
@@ -317,22 +410,25 @@ class SmtpEmailSender:
 
         for att in attachments:
             fname = att.get("filename", "attachment")
-            raw_content = att.get("content")
-            if raw_content is None:
-                continue
-            if isinstance(raw_content, str):
-                data = raw_content.encode("utf-8")
-                maintype, subtype = "text", "plain"
-            elif isinstance(raw_content, (bytes, bytearray)):
-                data = bytes(raw_content)
-                maintype, subtype = "application", "octet-stream"
+            if "content_bytes" in att:
+                data = att["content_bytes"]
             else:
-                continue
+                raw_content = att.get("content")
+                if raw_content is None and att.get("content_base64") is not None:
+                    raw_content = base64.b64decode(att["content_base64"])
+                if raw_content is None:
+                    continue
+                if isinstance(raw_content, str):
+                    data = raw_content.encode("utf-8")
+                elif isinstance(raw_content, (bytes, bytearray)):
+                    data = bytes(raw_content)
+                else:
+                    continue
 
             msg.add_attachment(
                 data,
-                maintype=maintype,
-                subtype=subtype,
+                maintype="application",
+                subtype="octet-stream",
                 filename=fname,
             )
 
@@ -623,15 +719,8 @@ class EmailManager:
         bcc = bcc or []
         attachments = attachments or []
 
-        # Normalizza allegati per il calcolo del digest (esclude il contenuto binario grezzo)
-        normalized_attachments = []
-        for att in attachments:
-            if isinstance(att, dict) and "filename" in att:
-                normalized_attachments.append({
-                    "filename": str(att.get("filename", "")),
-                    "sha256": str(att.get("sha256", "")),
-                    "size_bytes": int(att.get("size_bytes", 0)),
-                })
+        # Normalizza e valida gli allegati: decodifica una sola volta, calcola digest e size dai byte
+        prepared_attachments, normalized_attachments = normalize_and_validate_attachments(attachments)
 
         digest = compute_email_digest(
             to=to,
@@ -686,7 +775,7 @@ class EmailManager:
                 "audit": record,
             }
 
-        # Esecuzione invio di rete SMTP
+        # Esecuzione invio di rete SMTP con i byte decodificati
         try:
             result = sender.send_message(
                 to=to,
@@ -696,7 +785,7 @@ class EmailManager:
                 bcc=bcc,
                 in_reply_to=in_reply_to,
                 references=references,
-                attachments=attachments,
+                attachments=prepared_attachments,
                 message_id=assigned_msg_id,
             )
         except EmailError as exc:
@@ -757,14 +846,8 @@ class EmailManager:
         bcc = bcc or []
         attachments = attachments or []
 
-        normalized_attachments = []
-        for att in attachments:
-            if isinstance(att, dict) and "filename" in att:
-                normalized_attachments.append({
-                    "filename": str(att.get("filename", "")),
-                    "sha256": str(att.get("sha256", "")),
-                    "size_bytes": int(att.get("size_bytes", 0)),
-                })
+        # Normalizza e valida gli allegati prima della richiesta di approvazione
+        _, normalized_attachments = normalize_and_validate_attachments(attachments)
 
         digest = compute_email_digest(
             to=to,
@@ -912,15 +995,10 @@ class EmailManager:
         bcc_list = [str(b).strip() for b in (raw_bcc if isinstance(raw_bcc, list) else [raw_bcc]) if str(b).strip()]
 
         attachments = params.get("attachments", [])
-        normalized_attachments = []
-        if isinstance(attachments, list):
-            for att in attachments:
-                if isinstance(att, dict) and "filename" in att:
-                    normalized_attachments.append({
-                        "filename": str(att.get("filename", "")),
-                        "sha256": str(att.get("sha256", "")),
-                        "size_bytes": int(att.get("size_bytes", 0)),
-                    })
+        if attachments:
+            _, normalized_attachments = normalize_and_validate_attachments(attachments)
+        else:
+            normalized_attachments = []
 
         orig_subject = original.get("subject", "")
         subject = normalize_subject(orig_subject)

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import base64
 import json
 import os
 import platform
@@ -938,11 +939,18 @@ def main() -> int:
             }
             email_mgr = EmailManager(sender=demo_sender, approval_store=demo_store, audit_log=demo_audit)
             actor = 12345
+            demo_att = [
+                {
+                    "filename": "documento.pdf",
+                    "content_base64": base64.b64encode(b"Contenuto PDF demo").decode("ascii"),
+                }
+            ]
             stage = email_mgr.stage_email_send(
                 to=["recipient@example.com"],
                 subject="Test invio approvato",
                 body="Corpo della email verificata.",
                 actor_id=actor,
+                attachments=demo_att,
             )
             # Invio con token
             send_res = email_mgr.send_email(
@@ -952,6 +960,7 @@ def main() -> int:
                 approval_token=stage["approval_token"],
                 actor_id=actor,
                 message_id=stage["message_id"],
+                attachments=demo_att,
             )
 
         payload = {"scope": "isolated_email_demo",

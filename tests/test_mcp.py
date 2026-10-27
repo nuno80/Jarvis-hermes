@@ -1064,6 +1064,20 @@ class MCPTests(unittest.IsolatedAsyncioTestCase):
                 self.assertFalse(res_email_send['ok'])
                 self.assertIn(res_email_send['error']['code'], ('APPROVAL_DECLINED', 'APPROVER_NOT_CONFIGURED', 'PROVIDER_NOT_CONFIGURED'))
 
+                # 3b. Email send via MCP with invalid attachment metadata rejected immediately
+                res_email_send_bad_att = (await client.call_tool('email_send', {
+                    'to': ['colleague@example.com'],
+                    'subject': 'MCP Test Email Bad Att',
+                    'body': 'Test content via MCP',
+                    'attachments': [{
+                        'filename': 'tampered.txt',
+                        'content_base64': 'SGVsbG8=', # 'Hello' (5 bytes)
+                        'size_bytes': 999, # Mismatch
+                    }],
+                })).structuredContent
+                self.assertFalse(res_email_send_bad_att['ok'])
+                self.assertEqual(res_email_send_bad_att['error']['code'], 'ATTACHMENT_INTEGRITY_MISMATCH')
+
                 # 4. Email reconciliation via MCP (AT04)
                 res_recon = (await client.call_tool('reconcile_email', {
                     'message_id': '<unknown-msg@example.com>',

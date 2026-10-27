@@ -1,5 +1,7 @@
 """Unit tests for Email read + local reply draft (issue #25 / JARVIS-25, J16)."""
+import base64
 import email.message
+import hashlib
 import os
 from pathlib import Path
 import sqlite3
@@ -571,6 +573,144 @@ class SendEmailTests(unittest.TestCase):
             self.assertNotIn("password", full_text.lower())
             self.assertNotIn("super_app_password_987", full_text.lower())
             self.assertNotIn("app_password", full_text.lower())
+
+    def test_attachment_integrity_mismatch_rejected_before_smtp(self):
+        """Hash o dimensione non coincidenti con i byte provocano un rifiuto prima di SMTP."""
+        data = b"Contenuto allegato di prova"
+        b64 = base64.b64encode(data).decode("ascii")
+        real_sha256 = hashlib.sha256(data).hexdigest()
+
+        # Dimensione errata
+        att_bad_size = [{
+            "filename": "file.txt",
+            "content_base64": b64,
+            "size_bytes": len(data) + 10,
+            "sha256": real_sha256,
+        }]
+        with self.assertRaises(EmailError) as ctx:
+            self.mgr.stage_email_send(
+                to=["dest@example.com"],
+                subject="Test",
+                body="Test",
+                actor_id=self.actor_id,
+                attachments=att_bad_size,
+            )
+        self.assertEqual(ctx.exception.code, "ATTACHMENT_INTEGRITY_MISMATCH")
+
+        # Hash errato
+        att_bad_hash = [{
+            "filename": "file.txt",
+            "content_base64": b64,
+            "size_bytes": len(data),
+            "sha256": "0" * 64,
+        }]
+        with self.assertRaises(EmailError) as ctx:
+            self.mgr.stage_email_send(
+                to=["dest@example.com"],
+                subject="Test",
+                body="Test",
+                actor_id=self.actor_id,
+                attachments=att_bad_hash,
+            )
+        self.assertEqual(ctx.exception.code, "ATTACHMENT_INTEGRITY_MISMATCH")
+        self.assertEqual(self.sender.send_message.call_count, 0)
+
+    def test_attachment_size_limits_enforced(self):
+        """Limiti per singolo allegato (10 MiB) e totale (25 MiB) applicati fail-closed."""
+        from jarvis_hermes.email import MAX_ATTACHMENT_BYTES
+
+        too_large_bytes = b"x" * (MAX_ATTACHMENT_BYTES + 1)
+        att_too_large = [{
+            "filename": "huge.bin",
+            "content": too_large_bytes,
+        }]
+        with self.assertRaises(EmailError) as ctx:
+            self.mgr.stage_email_send(
+                to=["dest@example.com"],
+                subject="Test",
+                body="Test",
+                actor_id=self.actor_id,
+                attachments=att_too_large,
+            )
+        self.assertEqual(ctx.exception.code, "ATTACHMENT_TOO_LARGE")
+        self.assertEqual(self.sender.send_message.call_count, 0)
+
+    def test_attachment_mime_roundtrip_and_audit_digest(self):
+        """Testo e allegati binari superano il round-trip MIME senza corruzione e il digest coincide."""
+        binary_data = bytes(range(256)) * 4
+        text_data = "Hello attachment world!\nLine 2 with utf-8 characters: àéìòù"
+
+        real_sender = SmtpEmailSender(user="tester@yahoo.com", password="password")
+        captured_messages = []
+
+        def fake_send(msg, from_addr, to_addrs):
+            captured_messages.append(msg)
+
+        # Mocking SMTP over SSL
+        with unittest.mock.patch("smtplib.SMTP_SSL") as mock_smtp_cls:
+            mock_client = unittest.mock.MagicMock()
+            mock_smtp_cls.return_value = mock_client
+            mock_client.send_message.side_effect = fake_send
+
+            manager = EmailManager(
+                sender=real_sender,
+                approval_store=self.store,
+                audit_log=self.audit,
+            )
+
+            att = [
+                {
+                    "filename": "sample.bin",
+                    "content_base64": base64.b64encode(binary_data).decode("ascii"),
+                },
+                {
+                    "filename": "sample.txt",
+                    "content_base64": base64.b64encode(text_data.encode("utf-8")).decode("ascii"),
+                },
+            ]
+
+            stage = manager.stage_email_send(
+                to=["recipient@example.com"],
+                subject="MIME test",
+                body="Corpo email con allegati",
+                actor_id=self.actor_id,
+                attachments=att,
+            )
+
+            res = manager.send_email(
+                to=["recipient@example.com"],
+                subject="MIME test",
+                body="Corpo email con allegati",
+                approval_token=stage["approval_token"],
+                actor_id=self.actor_id,
+                attachments=att,
+            )
+
+            self.assertTrue(res["sent"])
+            self.assertEqual(res["digest"], stage["digest"])
+
+            # Verifica corrispondenza audit
+            audit_rec = self.audit.get_record(res["message_id"])
+            self.assertIsNotNone(audit_rec)
+            self.assertEqual(audit_rec["digest"], stage["digest"])
+            self.assertEqual(audit_rec["attachments_count"], 2)
+
+            # Verifica MIME round-trip dai byte trasmessi
+            self.assertEqual(len(captured_messages), 1)
+            sent_msg = captured_messages[0]
+            raw_mime = sent_msg.as_bytes()
+
+            parsed = email.message_from_bytes(raw_mime, policy=email.policy.default)
+            attachments_found = list(parsed.iter_attachments())
+            self.assertEqual(len(attachments_found), 2)
+
+            # Round-trip binario
+            bin_att = [a for a in attachments_found if a.get_filename() == "sample.bin"][0]
+            self.assertEqual(bin_att.get_payload(decode=True), binary_data)
+
+            # Round-trip testo
+            txt_att = [a for a in attachments_found if a.get_filename() == "sample.txt"][0]
+            self.assertEqual(txt_att.get_payload(decode=True).decode("utf-8"), text_data)
 
 
 if __name__ == "__main__":
