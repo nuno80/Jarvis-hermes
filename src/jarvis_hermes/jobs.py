@@ -190,13 +190,13 @@ class JobStore:
                 term_note += ' No process handle was associated with this job (process_stopped: null).'
             else:
                 # Process handle exists: attempt termination and verify
-                stopped = self._terminate_and_verify_process(pid=pid, pgid=pgid, timeout_seconds=timeout_seconds)
+                stopped = terminate_process_tree(pid=pid, pgid=pgid, timeout_seconds=timeout_seconds)
                 if stopped:
                     process_stopped = True
                     term_note += f' Process {pid} (pgid {pgid}) verified terminated.'
                 else:
                     process_stopped = False
-                    term_note += f' Cancel requested for process {pid}, but termination could not be verified within timeout.'
+                    term_note += f' Cancel requested for process {pid}, but active descendants remain or termination could not be verified within timeout.'
 
             return {
                 'job_id': job_id,
@@ -210,93 +210,12 @@ class JobStore:
     @staticmethod
     def _is_process_alive(pid: int) -> bool:
         """Check if process with given pid is still alive (not terminated or zombie)."""
-        if os.name == 'nt':
-            try:
-                out = subprocess.run(['tasklist', '/FI', f'PID eq {pid}'], capture_output=True, text=True, timeout=2)
-                return str(pid) in out.stdout
-            except Exception:
-                return False
-        else:
-            # Check if it's our child that exited (reap zombie if so)
-            try:
-                wpid, _ = os.waitpid(pid, os.WNOHANG)
-                if wpid == pid:
-                    return False
-            except (ChildProcessError, OSError):
-                pass
-
-            try:
-                os.kill(pid, 0)
-            except OSError:
-                return False
-
-            # On Linux, inspect /proc/<pid>/status to detect zombie state
-            proc_status = Path(f'/proc/{pid}/status')
-            if proc_status.exists():
-                try:
-                    for line in proc_status.read_text().splitlines():
-                        if line.startswith('State:'):
-                            # 'Z (zombie)' means terminated
-                            if 'Z' in line.split()[1]:
-                                return False
-                            break
-                except OSError:
-                    return False
-            return True
+        return len(get_active_descendants(pid=pid, pgid=None)) > 0
 
     @classmethod
     def _terminate_and_verify_process(cls, pid: int, pgid: int | None, timeout_seconds: float = 3.0) -> bool:
-        """Signal process group or pid with SIGTERM, then SIGKILL if needed, and verify termination."""
-        if not cls._is_process_alive(pid):
-            return True
-
-        if os.name == 'nt':
-            # On Windows: use taskkill /F /T (tree kill) to stop process group
-            try:
-                subprocess.run(['taskkill', '/F', '/T', '/PID', str(pid)], capture_output=True, timeout=timeout_seconds)
-            except Exception:
-                pass
-            time.sleep(0.1)
-            return not cls._is_process_alive(pid)
-
-        # POSIX: signal process group if available, else pid
-        target_pgid = pgid if (pgid and hasattr(os, 'killpg')) else None
-
-        def _send_signal(sig: int) -> None:
-            try:
-                if target_pgid:
-                    os.killpg(target_pgid, sig)
-                else:
-                    os.kill(pid, sig)
-            except ProcessLookupError:
-                pass
-            except OSError:
-                # Fallback to single pid if killpg failed
-                try:
-                    os.kill(pid, sig)
-                except OSError:
-                    pass
-
-        # 1. Send SIGTERM
-        _send_signal(signal.SIGTERM)
-
-        # Poll for termination
-        deadline = time.time() + (timeout_seconds / 2.0)
-        while time.time() < deadline:
-            if not cls._is_process_alive(pid):
-                return True
-            time.sleep(0.05)
-
-        # 2. Still alive: send SIGKILL
-        _send_signal(signal.SIGKILL)
-
-        kill_deadline = time.time() + (timeout_seconds / 2.0)
-        while time.time() < kill_deadline:
-            if not cls._is_process_alive(pid):
-                return True
-            time.sleep(0.05)
-
-        return not cls._is_process_alive(pid)
+        """Signal process group and descendants with SIGTERM, then SIGKILL if needed, and verify termination."""
+        return terminate_process_tree(pid=pid, pgid=pgid, timeout_seconds=timeout_seconds)
 
     def reconcile_on_startup(self) -> list[str]:
         """Mark active non-terminal jobs as outcome_unknown upon node restart."""
@@ -317,3 +236,188 @@ class JobStore:
                 reconciled.append(jid)
             conn.commit()
         return reconciled
+
+
+def _is_process_alive_nt(pid: int) -> bool:
+    try:
+        out = subprocess.run(['tasklist', '/FI', f'PID eq {pid}'], capture_output=True, text=True, timeout=2)
+        return str(pid) in out.stdout
+    except Exception:
+        return False
+
+
+def _get_windows_children(parent_pid: int) -> list[int]:
+    try:
+        cmd = ['powershell', '-NoProfile', '-Command',
+               f"(Get-CimInstance Win32_Process -Filter 'ParentProcessId = {parent_pid}').ProcessId"]
+        res = subprocess.run(cmd, capture_output=True, text=True, timeout=3)
+        if res.returncode == 0:
+            return [int(line.strip()) for line in res.stdout.splitlines() if line.strip().isdigit()]
+    except Exception:
+        pass
+    return []
+
+
+def get_active_descendants(pid: int, pgid: int | None = None) -> list[int]:
+    """Return list of active (non-zombie) process IDs belonging to pgid or descended from pid."""
+    if os.name == 'nt':
+        living: list[int] = []
+        if _is_process_alive_nt(pid):
+            living.append(pid)
+        for child_pid in _get_windows_children(pid):
+            if _is_process_alive_nt(child_pid) and child_pid not in living:
+                living.append(child_pid)
+        return living
+
+    # POSIX:
+    # 1. Try reaping direct child if it has already exited
+    try:
+        os.waitpid(pid, os.WNOHANG)
+    except (ChildProcessError, OSError):
+        pass
+
+    # 2. On Linux, inspect /proc to find all non-zombie processes matching pgid or descendant of pid
+    proc_dir = Path('/proc')
+    if proc_dir.exists():
+        active: set[int] = set()
+        children_map: dict[int, list[int]] = {}
+        for entry in proc_dir.iterdir():
+            if entry.name.isdigit():
+                try:
+                    stat_content = (entry / 'stat').read_text()
+                    comm, rest = stat_content.rsplit(') ', 1)
+                    fields = rest.split()
+                    state = fields[0]
+                    ppid = int(fields[1])
+                    pgrp = int(fields[2])
+                    p = int(entry.name)
+                    if state != 'Z':
+                        if pgid and pgrp == pgid:
+                            active.add(p)
+                        else:
+                            children_map.setdefault(ppid, []).append(p)
+                            if p == pid:
+                                active.add(p)
+                except (OSError, IndexError, ValueError):
+                    pass
+
+        # If any descendants were forked outside pgid or pgid not set
+        if pid in children_map or any(k in children_map for k in active):
+            queue = [pid] + list(active)
+            visited = set(queue)
+            while queue:
+                curr = queue.pop(0)
+                for child in children_map.get(curr, []):
+                    if child not in visited:
+                        visited.add(child)
+                        active.add(child)
+                        queue.append(child)
+
+        return sorted(active)
+
+    # Fallback for non-Linux POSIX (e.g. macOS / BSD)
+    active_set: set[int] = set()
+    if pgid:
+        try:
+            os.killpg(pgid, 0)
+            active_set.add(pgid)
+        except (ProcessLookupError, OSError):
+            pass
+    if pid:
+        try:
+            os.kill(pid, 0)
+            active_set.add(pid)
+        except (ProcessLookupError, OSError):
+            pass
+    return sorted(active_set)
+
+
+def terminate_process_tree(pid: int, pgid: int | None = None, timeout_seconds: float = 3.0) -> bool:
+    """Terminate a process and all its descendants with escalation (TERM then KILL)
+    and verify that no active descendants remain. Returns True if all stopped, False otherwise."""
+    if not get_active_descendants(pid, pgid):
+        return True
+
+    if os.name == 'nt':
+        try:
+            subprocess.run(['taskkill', '/F', '/T', '/PID', str(pid)], capture_output=True, timeout=timeout_seconds)
+        except Exception:
+            pass
+        for child in _get_windows_children(pid):
+            try:
+                subprocess.run(['taskkill', '/F', '/T', '/PID', str(child)], capture_output=True, timeout=timeout_seconds)
+            except Exception:
+                pass
+
+        deadline = time.time() + timeout_seconds
+        while time.time() < deadline:
+            if not get_active_descendants(pid, pgid):
+                return True
+            time.sleep(0.05)
+        return len(get_active_descendants(pid, pgid)) == 0
+
+    # POSIX:
+    effective_pgid = pgid if (pgid and hasattr(os, 'killpg')) else (pid if hasattr(os, 'killpg') else None)
+
+    def _send_signal(sig: int) -> None:
+        if effective_pgid:
+            try:
+                os.killpg(effective_pgid, sig)
+            except (ProcessLookupError, OSError):
+                pass
+        for p in get_active_descendants(pid, pgid):
+            try:
+                os.kill(p, sig)
+            except (ProcessLookupError, OSError):
+                pass
+
+    # 1. Send SIGTERM to entire process group / tree
+    _send_signal(signal.SIGTERM)
+
+    # Poll for graceful termination
+    term_grace = min(1.0, timeout_seconds / 2.0)
+    deadline = time.time() + term_grace
+    while time.time() < deadline:
+        if not get_active_descendants(pid, pgid):
+            return True
+        time.sleep(0.05)
+
+    # 2. Descendants or process still active: escalate to SIGKILL
+    _send_signal(signal.SIGKILL)
+
+    kill_deadline = time.time() + max(0.5, timeout_seconds - term_grace)
+    while time.time() < kill_deadline:
+        if not get_active_descendants(pid, pgid):
+            return True
+        time.sleep(0.05)
+
+    return len(get_active_descendants(pid, pgid)) == 0
+
+
+def drain_process_pipes(proc: subprocess.Popen, timeout: float = 1.0) -> tuple[str, str]:
+    """Drain stdout and stderr from proc with a strict timeout limit.
+    Ensures pipe handles are closed so reading never hangs indefinitely."""
+    out, err = "", ""
+    try:
+        raw_out, raw_err = proc.communicate(timeout=timeout)
+        if raw_out is not None:
+            out = raw_out.decode('utf-8', errors='replace') if isinstance(raw_out, bytes) else raw_out
+        if raw_err is not None:
+            err = raw_err.decode('utf-8', errors='replace') if isinstance(raw_err, bytes) else raw_err
+    except subprocess.TimeoutExpired as exc:
+        raw_out = exc.output
+        raw_err = exc.stderr
+        if raw_out is not None:
+            out = raw_out.decode('utf-8', errors='replace') if isinstance(raw_out, bytes) else raw_out
+        if raw_err is not None:
+            err = raw_err.decode('utf-8', errors='replace') if isinstance(raw_err, bytes) else raw_err
+    except Exception:
+        pass
+    finally:
+        for pipe in (proc.stdout, proc.stderr, proc.stdin):
+            if pipe:
+                try:
+                    pipe.close()
+                except Exception:
+                    pass
+    return out, err
