@@ -7,6 +7,7 @@ from hashlib import sha256
 from datetime import datetime, timezone
 from pathlib import Path
 import sqlite3
+import threading
 import time
 from typing import Any, Callable
 import urllib.error
@@ -16,6 +17,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from .core import resolve_state_file, sqlite_connection
 
 TERMINAL_REMINDER_STATES = ("cancelled", "fired", "missed_during_downtime")
+VALID_REMINDER_STATUSES = ("scheduled", "sending", "fired", "cancelled", "missed_during_downtime")
 
 
 class ReminderError(Exception):
@@ -24,6 +26,87 @@ class ReminderError(Exception):
         self.message = message
         self.retryable = retryable
         super().__init__(message)
+
+
+def send_telegram_reminder(actor_id: int, text: str) -> dict[str, Any]:
+    """Send reminder notification to Telegram for the given actor_id."""
+    token = os.environ.get("TELEGRAM_BOT_TOKEN")
+    if not token:
+        env_file = Path.home() / ".hermes" / ".env"
+        if env_file.is_file():
+            try:
+                for line in env_file.read_text(encoding="utf-8").splitlines():
+                    line = line.strip()
+                    if line.startswith("TELEGRAM_BOT_TOKEN="):
+                        token = line.split("=", 1)[1].strip().strip('"').strip("'")
+            except Exception:
+                pass
+
+    if not token:
+        raise ReminderError("TELEGRAM_NOT_CONFIGURED", "TELEGRAM_BOT_TOKEN non configurato.")
+
+    # Il destinatario primario è il chat/user associato all'actor_id
+    chat_id = str(actor_id)
+    url = f"https://api.telegram.org/bot{token}/sendMessage"
+    payload_dict = {
+        "chat_id": chat_id,
+        "text": f"⏰ *Promemoria*\n\n{text}",
+        "parse_mode": "Markdown",
+    }
+    payload = json.dumps(payload_dict).encode("utf-8")
+    req = urllib.request.Request(
+        url,
+        data=payload,
+        headers={"Content-Type": "application/json", "User-Agent": "Jarvis-Hermes/1.0"},
+    )
+    # Invio HTTP verso Bot API: timeout solleva TimeoutError / URLError
+    with urllib.request.urlopen(req, timeout=10) as resp:
+        body = resp.read().decode("utf-8")
+        result = json.loads(body)
+        if not result.get("ok"):
+            raise ReminderError("TELEGRAM_ERROR", f"Errore Telegram: {result}")
+        return result
+
+
+class ReminderScheduler:
+    """Supervised single background scheduler for due reminder dispatching."""
+
+    def __init__(
+        self,
+        store: ReminderStore,
+        sender_func: Callable[[int, str], dict[str, Any]],
+        poll_interval_seconds: float = 1.0,
+    ):
+        if sender_func is None:
+            raise ReminderError("SENDER_REQUIRED", "sender_func è obbligatorio per ReminderScheduler.")
+        self.store = store
+        self.sender_func = sender_func
+        self.poll_interval = poll_interval_seconds
+        self._stop_event = threading.Event()
+        self._thread: threading.Thread | None = None
+
+    def start(self) -> None:
+        if self._thread is not None and self._thread.is_alive():
+            return
+        self._stop_event.clear()
+        self._thread = threading.Thread(target=self._run_loop, name="ReminderScheduler", daemon=True)
+        self._thread.start()
+
+    def stop(self, timeout: float = 5.0) -> None:
+        self._stop_event.set()
+        if self._thread is not None and self._thread.is_alive():
+            self._thread.join(timeout=timeout)
+
+    def is_running(self) -> bool:
+        return self._thread is not None and self._thread.is_alive()
+
+    def _run_loop(self) -> None:
+        while not self._stop_event.is_set():
+            try:
+                self.store.dispatch_due(sender_func=self.sender_func)
+            except Exception:
+                pass
+            self._stop_event.wait(timeout=self.poll_interval)
 
 
 def normalize_due_datetime(due_at_input: str | datetime, timezone_name: str) -> tuple[datetime, str]:
@@ -178,6 +261,8 @@ class ReminderStore:
                 raise ReminderError("PERMISSION_DENIED", "Non autorizzato ad annullare questo reminder.")
             if row["status"] in TERMINAL_REMINDER_STATES:
                 raise ReminderError("INVALID_STATE", f"Il reminder è già nello stato terminale {row['status']!r}.")
+            if row["status"] == "sending":
+                raise ReminderError("INVALID_STATE", "Il reminder è in fase di invio e non può essere annullato.")
 
             now = time.time()
             conn.execute(
@@ -189,17 +274,40 @@ class ReminderStore:
         return self.get(reminder_id)
 
     def reconcile_on_startup(self, now_utc: datetime | None = None) -> list[dict[str, Any]]:
-        """Identify reminders scheduled for a time that passed while the node was offline."""
+        """Identify reminders scheduled for a time that passed while the node was offline,
+        and reconcile reminders stuck in 'sending' state due to process crash.
+        """
         now_dt = now_utc or datetime.now(timezone.utc)
         now_ts = now_dt.timestamp()
         reconciled = []
+        now_epoch = time.time()
 
         with self._connection() as conn:
+            # 1. Reminders rimasti in 'sending' al crash: esito incerto, nessun retry cieco
+            sending_rows = conn.execute(
+                "SELECT * FROM reminders WHERE status = 'sending'",
+            ).fetchall()
+            for r in sending_rows:
+                rid = r["reminder_id"]
+                warn = (r["warnings"] or "") + "\nInterrotto durante sending (possibile crash di processo); riconciliato come delivery_uncertain."
+                conn.execute(
+                    """
+                    UPDATE reminders SET
+                        status = 'fired',
+                        delivery_status = 'delivery_uncertain',
+                        updated_at = ?,
+                        warnings = ?
+                    WHERE reminder_id = ?
+                    """,
+                    (now_epoch, warn.strip(), rid),
+                )
+                reconciled.append(rid)
+
+            # 2. Reminders scaduti a nodo spento
             rows = conn.execute(
                 "SELECT * FROM reminders WHERE status = 'scheduled' AND due_timestamp <= ?",
                 (now_ts,),
             ).fetchall()
-            now_epoch = time.time()
             for r in rows:
                 rid = r["reminder_id"]
                 warn = (r["warnings"] or "") + "\nScaduto a nodo spento; contrassegnato come missed_during_downtime."
@@ -218,23 +326,52 @@ class ReminderStore:
 
         return [self.get(rid) for rid in reconciled]
 
+    def claim_due_reminders(self, now_utc: datetime | None = None, limit: int = 50) -> list[dict[str, Any]]:
+        """Claim atomically due reminders by transitioning them from 'scheduled' to 'sending'."""
+        now_dt = now_utc or datetime.now(timezone.utc)
+        now_ts = now_dt.timestamp()
+        now_epoch = time.time()
+        claimed_ids = []
+
+        with self._connection() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            rows = conn.execute(
+                "SELECT reminder_id FROM reminders WHERE status = 'scheduled' AND due_timestamp <= ? ORDER BY due_timestamp ASC LIMIT ?",
+                (now_ts, limit),
+            ).fetchall()
+            for r in rows:
+                rid = r["reminder_id"]
+                cur = conn.execute(
+                    """
+                    UPDATE reminders SET
+                        status = 'sending',
+                        delivery_status = 'sending',
+                        updated_at = ?
+                    WHERE reminder_id = ? AND status = 'scheduled'
+                    """,
+                    (now_epoch, rid),
+                )
+                if cur.rowcount > 0:
+                    claimed_ids.append(rid)
+            conn.commit()
+
+        return [self.get(rid) for rid in claimed_ids]
+
     def dispatch_due(
         self,
         now_utc: datetime | None = None,
         sender_func: Callable[[int, str], dict[str, Any]] | None = None,
     ) -> list[dict[str, Any]]:
-        """Find scheduled reminders that are now due, transition them, and invoke sender_func."""
-        now_dt = now_utc or datetime.now(timezone.utc)
-        now_ts = now_dt.timestamp()
+        """Find scheduled reminders that are now due, claim them atomically to 'sending',
+        perform delivery outside of transaction, and update final outcome.
+        """
+        if sender_func is None:
+            raise ReminderError("SENDER_REQUIRED", "sender_func è obbligatorio per il dispatch dei reminder.")
+
+        claimed = self.claim_due_reminders(now_utc=now_utc)
         dispatched = []
 
-        with self._connection() as conn:
-            rows = conn.execute(
-                "SELECT * FROM reminders WHERE status = 'scheduled' AND due_timestamp <= ? ORDER BY due_timestamp ASC",
-                (now_ts,),
-            ).fetchall()
-
-        for r in rows:
+        for r in claimed:
             rid = r["reminder_id"]
             actor_id = r["actor_id"]
             text = r["text"]
@@ -242,16 +379,15 @@ class ReminderStore:
             warning_msg = None
             metadata = {}
 
-            if sender_func:
-                try:
-                    res = sender_func(actor_id, text)
-                    metadata = res or {}
-                except (TimeoutError, ConnectionError, urllib.error.URLError) as exc:
-                    delivery_status = "delivery_uncertain"
-                    warning_msg = f"Invio Telegram incerto o timeout: {exc}"
-                except Exception as exc:
-                    delivery_status = "delivery_failed"
-                    warning_msg = f"Invio Telegram fallito: {exc}"
+            try:
+                res = sender_func(actor_id, text)
+                metadata = res or {}
+            except (TimeoutError, ConnectionError, urllib.error.URLError) as exc:
+                delivery_status = "delivery_uncertain"
+                warning_msg = f"Invio Telegram incerto o timeout: {exc}"
+            except Exception as exc:
+                delivery_status = "delivery_failed"
+                warning_msg = f"Invio Telegram fallito: {exc}"
 
             now_epoch = time.time()
             with self._connection() as conn:
@@ -265,14 +401,13 @@ class ReminderStore:
                         updated_at = ?,
                         warnings = ?,
                         delivery_metadata_json = ?
-                    WHERE reminder_id = ? AND status = 'scheduled'
+                    WHERE reminder_id = ? AND status = 'sending'
                     """,
                     (delivery_status, now_epoch, final_warn, json.dumps(metadata), rid),
                 )
                 conn.commit()
-                updated = cur.rowcount > 0
-            if updated:
-                dispatched.append(self.get(rid))
+                if cur.rowcount > 0:
+                    dispatched.append(self.get(rid))
 
         return dispatched
 
