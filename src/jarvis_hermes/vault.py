@@ -2,6 +2,7 @@
 import os
 import re
 import stat
+import threading
 from datetime import datetime, timezone
 from hashlib import sha256
 from pathlib import Path, PurePosixPath
@@ -22,6 +23,19 @@ class VaultError(Exception):
     def __init__(self, code: str, message: str):
         self.code, self.message = code, message
         super().__init__(message)
+
+
+class _CachedNote:
+    __slots__ = ('mtime_ns', 'size', 'version', 'frontmatter_note', 'preferences', 'error')
+
+    def __init__(self, mtime_ns: int, size: int, version: str | None,
+                 frontmatter_note: dict | None, preferences: dict | None, error: str | None = None):
+        self.mtime_ns = mtime_ns
+        self.size = size
+        self.version = version
+        self.frontmatter_note = frontmatter_note
+        self.preferences = preferences
+        self.error = error
 
 
 def is_candidate_content(text: str) -> bool:
@@ -46,8 +60,11 @@ def is_candidate_content(text: str) -> bool:
 
 
 class Vault:
-    def __init__(self, configured: str | None):
+    def __init__(self, configured: str | None, max_profile_notes: int = MAX_ENTRIES):
         self.configured = configured
+        self.max_profile_notes = max_profile_notes
+        self._lock = threading.RLock()
+        self._metadata_cache: dict[str, _CachedNote] = {}
 
     def root(self) -> Path:
         if not self.configured:
@@ -101,12 +118,13 @@ class Vault:
                 'next_offset': offset + limit if offset + limit < len(text) else None,
                 'untrusted_content': True}
 
-    def _list_safe_note_ids(self) -> tuple[list[str], int, bool]:
+    def _list_safe_note_ids(self, limit: int | None = MAX_SEARCH_NOTES) -> tuple[list[str], int, bool]:
         root = self.root()
         folders, candidates = [root], []
         entries = 0
         skipped = 0
         truncated = False
+        max_notes = limit if limit is not None else MAX_ENTRIES
         while folders and entries < MAX_ENTRIES:
             folder = folders.pop()
             if folder.is_symlink() or folder.is_junction() or not folder.resolve().is_relative_to(root):
@@ -128,8 +146,8 @@ class Vault:
                             candidates.append(path.relative_to(root).as_posix())
             except OSError:
                 skipped += 1
-        truncated = truncated or bool(folders) or len(candidates) > MAX_SEARCH_NOTES
-        return sorted(candidates)[:MAX_SEARCH_NOTES], skipped, truncated
+        truncated = truncated or bool(folders) or len(candidates) > max_notes
+        return sorted(candidates)[:max_notes], skipped, truncated
 
     def search(self, query: str, limit: int = 10) -> dict:
         if not query.strip() or len(query) > 200 or not 1 <= limit <= 20:
@@ -192,42 +210,44 @@ class Vault:
 
     def write_note(self, note_id: str, content: str, expected_version: str | None = None) -> dict:
         """Safely write/overwrite a Markdown note in the vault with concurrency check and safety boundaries."""
-        root = self.root()
-        parts = PurePosixPath(note_id)
-        if (not note_id or parts.is_absolute() or '\\' in note_id or ':' in note_id
-                or any(not p or p.startswith('.') for p in note_id.split('/'))
-                or parts.suffix.lower() != '.md'):
-            raise VaultError('PERMISSION_DENIED', 'Only visible Markdown notes within the vault are accessible.')
-        
-        target = root
-        for part in parts.parts:
-            target /= part
-            if target.exists() and (target.is_symlink() or target.is_junction()):
-                raise VaultError('PERMISSION_DENIED', 'Linked files and directories are not accessible.')
-        
-        if not target.resolve().is_relative_to(root):
-            raise VaultError('PERMISSION_DENIED', 'The note is outside the configured vault.')
+        with self._lock:
+            root = self.root()
+            parts = PurePosixPath(note_id)
+            if (not note_id or parts.is_absolute() or '\\' in note_id or ':' in note_id
+                    or any(not p or p.startswith('.') for p in note_id.split('/'))
+                    or parts.suffix.lower() != '.md'):
+                raise VaultError('PERMISSION_DENIED', 'Only visible Markdown notes within the vault are accessible.')
+            
+            target = root
+            for part in parts.parts:
+                target /= part
+                if target.exists() and (target.is_symlink() or target.is_junction()):
+                    raise VaultError('PERMISSION_DENIED', 'Linked files and directories are not accessible.')
+            
+            if not target.resolve().is_relative_to(root):
+                raise VaultError('PERMISSION_DENIED', 'The note is outside the configured vault.')
 
-        # Mandatory explicit version: 'new' for creation, current hash for overwrite.
-        self.check_write_version(note_id, expected_version)
+            # Mandatory explicit version: 'new' for creation, current hash for overwrite.
+            self.check_write_version(note_id, expected_version)
 
-        raw = content.encode('utf-8')
-        if len(raw) > MAX_NOTE_BYTES:
-            raise VaultError('NOTE_TOO_LARGE', 'The note exceeds the 256 KiB reading limit.')
+            raw = content.encode('utf-8')
+            if len(raw) > MAX_NOTE_BYTES:
+                raise VaultError('NOTE_TOO_LARGE', 'The note exceeds the 256 KiB reading limit.')
 
-        # Ensure parent dirs exist safely
-        target.parent.mkdir(parents=True, exist_ok=True)
-        temp_file = target.parent / f'.{target.name}.tmp.{uuid.uuid4().hex}'
-        try:
-            temp_file.write_bytes(raw)
-            temp_file.replace(target)
-        except Exception as exc:
-            if temp_file.exists():
-                temp_file.unlink()
-            raise VaultError('WRITE_FAILED', f'Failed to write note: {exc}')
+            # Ensure parent dirs exist safely
+            target.parent.mkdir(parents=True, exist_ok=True)
+            temp_file = target.parent / f'.{target.name}.tmp.{uuid.uuid4().hex}'
+            try:
+                temp_file.write_bytes(raw)
+                temp_file.replace(target)
+                self._metadata_cache.pop(note_id, None)
+            except Exception as exc:
+                if temp_file.exists():
+                    temp_file.unlink()
+                raise VaultError('WRITE_FAILED', f'Failed to write note: {exc}')
 
-        new_text, new_version = self.load(note_id)
-        return {'note_id': note_id, 'version': new_version, 'size_bytes': len(raw)}
+            new_text, new_version = self.load(note_id)
+            return {'note_id': note_id, 'version': new_version, 'size_bytes': len(raw)}
 
     def propose_memory(self, domain: str, key: str, value: Any,
                        evidence: str, confidence: float = 0.6,
@@ -319,62 +339,65 @@ class Vault:
 
     def forget_memory(self, note_id: str, key: str | None = None, expected_version: str | None = None) -> dict:
         """Remove or correct an inferred memory note/key, updating frontmatter and indices while preserving backups/unrelated notes."""
-        # Destructive even on candidates: candidate target and explicit version are mandatory.
-        current_version = self.check_forget_version(note_id, expected_version)
-        text, _ = self.load(note_id)
+        with self._lock:
+            # Destructive even on candidates: candidate target and explicit version are mandatory.
+            current_version = self.check_forget_version(note_id, expected_version)
+            text, _ = self.load(note_id)
 
-        root = self.root()
-        target = root / note_id
+            root = self.root()
+            target = root / note_id
 
-        # Declared backup retention before modification/deletion
-        backup_dir = root / '.jarvis_backups'
-        backup_dir.mkdir(parents=True, exist_ok=True)
-        retention_info = "Local backup stored in .jarvis_backups; retention declared per backup policy."
-        ts_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
-        backup_file = backup_dir / f"{target.name}.{ts_ms}.bak"
-        backup_file.write_bytes(target.read_bytes())
+            # Declared backup retention before modification/deletion
+            backup_dir = root / '.jarvis_backups'
+            backup_dir.mkdir(parents=True, exist_ok=True)
+            retention_info = "Local backup stored in .jarvis_backups; retention declared per backup policy."
+            ts_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
+            backup_file = backup_dir / f"{target.name}.{ts_ms}.bak"
+            backup_file.write_bytes(target.read_bytes())
 
-        if key is None:
-            # Full deletion of the inferred candidate note
-            target.unlink()
-            return {
-                'note_id': note_id,
-                'action': 'deleted',
-                'backup_retained': str(backup_file.relative_to(root).as_posix()),
-                'retention_policy': retention_info
-            }
+            if key is None:
+                # Full deletion of the inferred candidate note
+                target.unlink()
+                self._metadata_cache.pop(note_id, None)
+                return {
+                    'note_id': note_id,
+                    'action': 'deleted',
+                    'backup_retained': str(backup_file.relative_to(root).as_posix()),
+                    'retention_policy': retention_info
+                }
 
-        # Partial removal of a specific key in the note
-        if not text.startswith('---\n'):
-            raise VaultError('INVALID_ARGUMENT', 'Note does not contain YAML frontmatter.')
-        end_idx = text.find('\n---\n', 4)
-        if end_idx == -1:
-            raise VaultError('INVALID_ARGUMENT', 'Malformed YAML frontmatter.')
+            # Partial removal of a specific key in the note
+            if not text.startswith('---\n'):
+                raise VaultError('INVALID_ARGUMENT', 'Note does not contain YAML frontmatter.')
+            end_idx = text.find('\n---\n', 4)
+            if end_idx == -1:
+                raise VaultError('INVALID_ARGUMENT', 'Malformed YAML frontmatter.')
 
-        fm = yaml.safe_load(text[4:end_idx]) or {}
-        body = text[end_idx + 5:]
+            fm = yaml.safe_load(text[4:end_idx]) or {}
+            body = text[end_idx + 5:]
 
-        if isinstance(fm, dict) and 'preferences' in fm and isinstance(fm['preferences'], dict):
-            fm['preferences'].pop(key, None)
-            fm['updated_at'] = datetime.now(timezone.utc).isoformat()
-            new_fm_str = yaml.safe_dump(fm, sort_keys=False)
-            new_content = f"---\n{new_fm_str}---\n{body}"
-            res = self.write_note(note_id, new_content, expected_version=current_version)
-            return {
-                'note_id': note_id,
-                'action': 'key_removed',
-                'key': key,
-                'version': res['version'],
-                'backup_retained': str(backup_file.relative_to(root).as_posix()),
-                'retention_policy': retention_info
-            }
-        else:
-            return {
-                'note_id': note_id,
-                'action': 'key_not_found',
-                'key': key,
-                'version': current_version
-            }
+            if isinstance(fm, dict) and 'preferences' in fm and isinstance(fm['preferences'], dict):
+                fm['preferences'].pop(key, None)
+                fm['updated_at'] = datetime.now(timezone.utc).isoformat()
+                new_fm_str = yaml.safe_dump(fm, sort_keys=False)
+                new_content = f"---\n{new_fm_str}---\n{body}"
+                res = self.write_note(note_id, new_content, expected_version=current_version)
+                self._metadata_cache.pop(note_id, None)
+                return {
+                    'note_id': note_id,
+                    'action': 'key_removed',
+                    'key': key,
+                    'version': res['version'],
+                    'backup_retained': str(backup_file.relative_to(root).as_posix()),
+                    'retention_policy': retention_info
+                }
+            else:
+                return {
+                    'note_id': note_id,
+                    'action': 'key_not_found',
+                    'key': key,
+                    'version': current_version
+                }
 
     def load_preferences(self) -> tuple[dict, str]:
         """Load typed explicit preferences from preferences.yaml in the vault root."""
@@ -404,119 +427,204 @@ class Vault:
 
     def update_preference(self, key_path: str, value: Any, expected_version: str | None = None) -> dict:
         """Update a typed explicit preference in preferences.yaml with optimistic concurrency check."""
-        root = self.root()
-        pref_path = root / 'preferences.yaml'
-        # D14: an explicit version is mandatory, never a caller-supplied pass flag.
-        current_version = self.check_preference_version(expected_version)
-        current_prefs, _ = self.load_preferences()
+        with self._lock:
+            root = self.root()
+            pref_path = root / 'preferences.yaml'
+            # D14: an explicit version is mandatory, never a caller-supplied pass flag.
+            current_version = self.check_preference_version(expected_version)
+            current_prefs, _ = self.load_preferences()
 
-        # Check key path safety
-        parts = key_path.strip().split('.')
-        if not parts or any(not p for p in parts):
-            raise VaultError('INVALID_ARGUMENT', 'Invalid preference key path.')
-        if parts[0].lower() in FORBIDDEN_PREFERENCE_KEYS:
-            raise VaultError('PERMISSION_DENIED', f'Preferences cannot define permissions or security policies: {parts[0]}')
+            # Check key path safety
+            parts = key_path.strip().split('.')
+            if not parts or any(not p for p in parts):
+                raise VaultError('INVALID_ARGUMENT', 'Invalid preference key path.')
+            if parts[0].lower() in FORBIDDEN_PREFERENCE_KEYS:
+                raise VaultError('PERMISSION_DENIED', f'Preferences cannot define permissions or security policies: {parts[0]}')
 
-        # Backup preferences.yaml before update
-        backup_dir = root / '.jarvis_backups'
-        backup_dir.mkdir(parents=True, exist_ok=True)
-        if pref_path.exists():
-            ts_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
-            backup_file = backup_dir / f"preferences.yaml.{ts_ms}.bak"
-            backup_file.write_bytes(pref_path.read_bytes())
+            # Backup preferences.yaml before update
+            backup_dir = root / '.jarvis_backups'
+            backup_dir.mkdir(parents=True, exist_ok=True)
+            if pref_path.exists():
+                ts_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
+                backup_file = backup_dir / f"preferences.yaml.{ts_ms}.bak"
+                backup_file.write_bytes(pref_path.read_bytes())
 
-        # Navigate and update dict
-        cur = current_prefs
-        for p in parts[:-1]:
-            if p not in cur or not isinstance(cur[p], dict):
-                cur[p] = {}
-            cur = cur[p]
-        cur[parts[-1]] = value
+            # Navigate and update dict
+            cur = current_prefs
+            for p in parts[:-1]:
+                if p not in cur or not isinstance(cur[p], dict):
+                    cur[p] = {}
+                cur = cur[p]
+            cur[parts[-1]] = value
 
-        # Atomic write to preferences.yaml
-        new_content = yaml.safe_dump(current_prefs, sort_keys=False)
-        temp_file = root / f'.preferences.yaml.tmp.{uuid.uuid4().hex}'
-        try:
-            temp_file.write_text(new_content, encoding='utf-8')
-            temp_file.replace(pref_path)
-        except Exception as exc:
-            if temp_file.exists():
-                temp_file.unlink()
-            raise VaultError('WRITE_FAILED', f'Failed to write preferences.yaml: {exc}')
+            # Atomic write to preferences.yaml
+            new_content = yaml.safe_dump(current_prefs, sort_keys=False)
+            temp_file = root / f'.preferences.yaml.tmp.{uuid.uuid4().hex}'
+            try:
+                temp_file.write_text(new_content, encoding='utf-8')
+                temp_file.replace(pref_path)
+            except Exception as exc:
+                if temp_file.exists():
+                    temp_file.unlink()
+                raise VaultError('WRITE_FAILED', f'Failed to write preferences.yaml: {exc}')
 
-        new_prefs, new_version = self.load_preferences()
-        return {'key_path': key_path, 'value': value, 'version': new_version, 'preferences': new_prefs}
+            new_prefs, new_version = self.load_preferences()
+            return {'key_path': key_path, 'value': value, 'version': new_version, 'preferences': new_prefs}
 
-    def get_profile(self) -> dict:
+    def get_profile(self, max_notes: int | None = None) -> dict:
         """Return the compiled user profile combining explicit preferences and scanned markdown frontmatter."""
-        explicit, pref_version = self.load_preferences()
+        with self._lock:
+            explicit, pref_version = self.load_preferences()
 
-        # Scan vault notes for frontmatter preferences and notes (e.g. 00-System/Preferences.md or other notes)
-        frontmatter_notes = []
-        ambiguities = []
+            frontmatter_notes = []
+            ambiguities = []
+            errors = []
+            skipped_notes = 0
+            scanned_notes = 0
 
-        try:
-            candidates, _, _ = self._list_safe_note_ids()
+            limit = max_notes if max_notes is not None else self.max_profile_notes
+            try:
+                candidates, scan_skipped, scan_truncated = self._list_safe_note_ids(limit=limit)
+            except Exception as exc:
+                return {
+                    'explicit_preferences': explicit,
+                    'preferences_version': pref_version,
+                    'frontmatter_notes': [],
+                    'ambiguities': [],
+                    'complete': False,
+                    'truncated': True,
+                    'scanned_notes': 0,
+                    'skipped': 1,
+                    'skipped_notes': 0,
+                    'skipped_entries': 1,
+                    'errors': [{'note_id': '', 'error': str(exc)}],
+                    'untrusted_content': True
+                }
+
+            truncated = scan_truncated
+            active_ids = set(candidates)
+            for k in list(self._metadata_cache.keys()):
+                if k not in active_ids:
+                    del self._metadata_cache[k]
+
+            root = self.root()
             for rel_id in candidates:
+                scanned_notes += 1
+                note_path = root / rel_id
                 try:
-                    text, version = self.load(rel_id)
-                except Exception:
+                    st = note_path.stat()
+                    mtime_ns = st.st_mtime_ns
+                    size = st.st_size
+                except OSError as exc:
+                    skipped_notes += 1
+                    errors.append({'note_id': rel_id, 'error': f"Stat failed: {exc}"})
                     continue
 
-                if text.startswith('---\n'):
-                    end_idx = text.find('\n---\n', 4)
-                    if end_idx != -1:
-                        raw_fm = text[4:end_idx]
-                        try:
-                            fm = yaml.safe_load(raw_fm)
-                            if isinstance(fm, dict):
-                                fm_type = fm.get('type')
-                                domain = fm.get('domain')
-                                source = fm.get('source', 'inferred')
-                                status = fm.get('status', 'explicit' if source == 'explicit' else 'soft')
-                                if fm_type in ('preference', 'candidate_preference') or domain:
-                                    note_entry = {
-                                        'note_id': rel_id,
-                                        'type': fm_type,
-                                        'domain': domain,
-                                        'source': source,
-                                        'status': status,
-                                        'confidence': fm.get('confidence', 1.0),
-                                        'updated_at': fm.get('updated_at'),
-                                        'version': version,
-                                        'evidence': fm.get('evidence', [])
-                                    }
-                                    frontmatter_notes.append(note_entry)
+                cached = self._metadata_cache.get(rel_id)
+                if cached is not None and cached.mtime_ns == mtime_ns and cached.size == size:
+                    entry_meta = cached
+                else:
+                    try:
+                        text, version = self.load(rel_id)
+                        fm_note = None
+                        fm_prefs = None
+                        err = None
 
-                                    # Check for contradictions / ambiguity with explicit preferences
-                                    # Markdown frontmatter can define soft or inferred preferences or candidate preferences.
-                                    # If frontmatter provides a preference key that conflicts with explicit preferences or has low confidence,
-                                    # or contradicts an explicit preference, we surface an ambiguity.
-                                    fm_prefs = fm.get('preferences')
-                                    if isinstance(fm_prefs, dict):
-                                        for pref_k, pref_v in fm_prefs.items():
-                                            domain_prefs = explicit.get(domain, {}) if isinstance(explicit.get(domain), dict) else {}
-                                            if pref_k in domain_prefs and domain_prefs[pref_k] != pref_v:
-                                                ambiguities.append({
-                                                    'domain': domain,
-                                                    'key': pref_k,
-                                                    'status': status,
-                                                    'explicit_value': domain_prefs[pref_k],
-                                                    'note_value': pref_v,
-                                                    'note_id': rel_id,
-                                                    'source': source,
-                                                    'reason': f"Explicit preference '{domain}.{pref_k}={domain_prefs[pref_k]}' contradicts note '{rel_id}' value '{pref_v}'"
-                                                })
-                        except Exception:
-                            pass
-        except Exception:
-            pass
+                        if text.startswith('---\n'):
+                            end_idx = text.find('\n---\n', 4)
+                            if end_idx == -1:
+                                err = f"Unclosed YAML frontmatter in '{rel_id}'."
+                            else:
+                                raw_fm = text[4:end_idx]
+                                try:
+                                    fm = yaml.safe_load(raw_fm)
+                                    if isinstance(fm, dict):
+                                        fm_type = fm.get('type')
+                                        domain = fm.get('domain')
+                                        source = fm.get('source', 'inferred')
+                                        status = fm.get('status', 'explicit' if source == 'explicit' else 'soft')
+                                        if fm_type in ('preference', 'candidate_preference') or domain:
+                                            fm_note = {
+                                                'note_id': rel_id,
+                                                'type': fm_type,
+                                                'domain': domain,
+                                                'source': source,
+                                                'status': status,
+                                                'confidence': fm.get('confidence', 1.0),
+                                                'updated_at': fm.get('updated_at'),
+                                                'version': version,
+                                                'evidence': fm.get('evidence', [])
+                                            }
+                                            if isinstance(fm.get('preferences'), dict):
+                                                fm_prefs = fm['preferences']
+                                    elif fm is not None:
+                                        err = f"YAML frontmatter in '{rel_id}' is not a mapping."
+                                except Exception as exc:
+                                    err = f"Malformed YAML frontmatter in '{rel_id}': {exc}"
 
-        return {
-            'explicit_preferences': explicit,
-            'preferences_version': pref_version,
-            'frontmatter_notes': frontmatter_notes,
-            'ambiguities': ambiguities,
-            'untrusted_content': True
-        }
+                        entry_meta = _CachedNote(
+                            mtime_ns=mtime_ns,
+                            size=size,
+                            version=version,
+                            frontmatter_note=fm_note,
+                            preferences=fm_prefs,
+                            error=err
+                        )
+                        self._metadata_cache[rel_id] = entry_meta
+
+                    except (VaultError, OSError, UnicodeError) as exc:
+                        err = f"Failed to load note '{rel_id}': {exc}"
+                        entry_meta = _CachedNote(
+                            mtime_ns=mtime_ns,
+                            size=size,
+                            version=None,
+                            frontmatter_note=None,
+                            preferences=None,
+                            error=err
+                        )
+                        self._metadata_cache[rel_id] = entry_meta
+
+                if entry_meta.error is not None:
+                    skipped_notes += 1
+                    errors.append({'note_id': rel_id, 'error': entry_meta.error})
+                    continue
+
+                if entry_meta.frontmatter_note is not None:
+                    frontmatter_notes.append(entry_meta.frontmatter_note)
+                    domain = entry_meta.frontmatter_note.get('domain')
+                    status = entry_meta.frontmatter_note.get('status')
+                    source = entry_meta.frontmatter_note.get('source')
+
+                    if entry_meta.preferences is not None and domain:
+                        domain_prefs = explicit.get(domain, {}) if isinstance(explicit.get(domain), dict) else {}
+                        for pref_k, pref_v in entry_meta.preferences.items():
+                            if pref_k in domain_prefs and domain_prefs[pref_k] != pref_v:
+                                ambiguities.append({
+                                    'domain': domain,
+                                    'key': pref_k,
+                                    'status': status,
+                                    'explicit_value': domain_prefs[pref_k],
+                                    'note_value': pref_v,
+                                    'note_id': rel_id,
+                                    'source': source,
+                                    'reason': f"Explicit preference '{domain}.{pref_k}={domain_prefs[pref_k]}' contradicts note '{rel_id}' value '{pref_v}'"
+                                })
+
+            total_skipped = scan_skipped + skipped_notes
+            complete = (not truncated) and (total_skipped == 0)
+
+            return {
+                'explicit_preferences': explicit,
+                'preferences_version': pref_version,
+                'frontmatter_notes': frontmatter_notes,
+                'ambiguities': ambiguities,
+                'complete': complete,
+                'truncated': truncated,
+                'scanned_notes': scanned_notes,
+                'skipped': total_skipped,
+                'skipped_notes': skipped_notes,
+                'skipped_entries': total_skipped,
+                'errors': errors,
+                'untrusted_content': True
+            }
 
