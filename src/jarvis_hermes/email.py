@@ -36,6 +36,8 @@ YAHOO_SMTP_PORT = 465
 
 FOLDER_RE = re.compile(r"^[a-zA-Z0-9_\- ]+$")
 MAX_BODY_CHARS = 10000
+MAX_MESSAGE_BYTES = 5 * 1024 * 1024  # 5 MiB limite download messaggio IMAP
+DEFAULT_IMAP_TIMEOUT_S = 30.0
 MAX_ATTACHMENT_BYTES = 10 * 1024 * 1024  # 10 MiB per allegato
 MAX_TOTAL_ATTACHMENTS_BYTES = 25 * 1024 * 1024  # 25 MiB totale allegati
 
@@ -492,12 +494,17 @@ class ImapEmailProvider:
         password: str | None = None,
         host: str | None = None,
         port: int | None = None,
+        timeout: float | None = None,
+        max_message_bytes: int = MAX_MESSAGE_BYTES,
     ):
         self.user = user or os.environ.get("YAHOO_EMAIL") or os.environ.get("JARVIS_EMAIL_USER") or ""
         self.password = password or os.environ.get("YAHOO_APP_PASSWORD") or os.environ.get("JARVIS_EMAIL_PASSWORD") or ""
         self.host = host or os.environ.get("JARVIS_EMAIL_IMAP_HOST") or YAHOO_IMAP_HOST
         port_env = os.environ.get("JARVIS_EMAIL_IMAP_PORT")
         self.port = port or (int(port_env) if port_env and port_env.isdigit() else YAHOO_IMAP_PORT)
+        timeout_env = os.environ.get("JARVIS_EMAIL_IMAP_TIMEOUT_S")
+        self.timeout = timeout if timeout is not None else (float(timeout_env) if timeout_env else DEFAULT_IMAP_TIMEOUT_S)
+        self.max_message_bytes = max_message_bytes
 
     def has_credentials(self) -> bool:
         return bool(self.user.strip() and self.password.strip())
@@ -510,14 +517,34 @@ class ImapEmailProvider:
 
     def _connect(self) -> imaplib.IMAP4_SSL:
         try:
-            client = imaplib.IMAP4_SSL(self.host, self.port)
+            client = imaplib.IMAP4_SSL(self.host, self.port, timeout=self.timeout)
         except OSError as exc:
             raise EmailError("PROVIDER_UNAVAILABLE", f"Impossibile connettersi al server IMAP {self.host}:{self.port}: {exc}.", retryable=True) from exc
         try:
             client.login(self.user, self.password)
         except imaplib.IMAP4.error as exc:
             raise EmailError("PROVIDER_AUTH_ERROR", f"Autenticazione IMAP fallita per l'utente '{self.user}'. Verifica email e password applicativa.", retryable=False) from exc
+        except OSError as exc:
+            raise EmailError("PROVIDER_UNAVAILABLE", f"Errore durante l'autenticazione IMAP {self.host}:{self.port}: {exc}.", retryable=True) from exc
         return client
+
+    def _get_message_size(self, client: imaplib.IMAP4_SSL, uid: str) -> int | None:
+        """Legge la dimensione RFC822.SIZE del messaggio prima del download integrale."""
+        status, data = client.fetch(str(uid), "(RFC822.SIZE)")
+        if status != "OK" or not data:
+            return None
+        for item in data:
+            parts = item if isinstance(item, tuple) else [item]
+            for part in parts:
+                if isinstance(part, (bytes, bytearray)):
+                    match = re.search(rb"RFC822\.SIZE\s+(\d+)", part, re.IGNORECASE)
+                    if match:
+                        return int(match.group(1))
+                elif isinstance(part, str):
+                    match = re.search(r"RFC822\.SIZE\s+(\d+)", part, re.IGNORECASE)
+                    if match:
+                        return int(match.group(1))
+        return None
 
     def search_emails(self, request: EmailSearchRequest) -> dict[str, Any]:
         client = self._connect()
@@ -547,6 +574,10 @@ class ImapEmailProvider:
 
             messages: list[EmailMessage] = []
             for uid in selected_uids:
+                size = self._get_message_size(client, str(uid))
+                if size is not None and size > self.max_message_bytes:
+                    continue
+
                 fetch_status, fetch_data = client.fetch(str(uid), "(RFC822)")
                 if fetch_status == "OK" and fetch_data:
                     for part in fetch_data:
@@ -572,6 +603,8 @@ class ImapEmailProvider:
             }
         except imaplib.IMAP4.error as exc:
             raise EmailError("PROVIDER_ERROR", f"Errore durante l'operazione IMAP: {exc}") from exc
+        except OSError as exc:
+            raise EmailError("PROVIDER_UNAVAILABLE", f"Errore I/O o timeout durante l'operazione IMAP: {exc}.", retryable=True) from exc
         finally:
             try:
                 client.logout()
@@ -584,6 +617,14 @@ class ImapEmailProvider:
             status, _ = client.select(folder, readonly=True)
             if status != "OK":
                 raise EmailError("FOLDER_NOT_FOUND", f"Cartella '{folder}' non trovata.")
+
+            size = self._get_message_size(client, str(uid))
+            if size is not None and size > self.max_message_bytes:
+                raise EmailError(
+                    "MESSAGE_TOO_LARGE",
+                    f"Il messaggio con UID '{uid}' ({size} byte) supera la dimensione massima consentita di {self.max_message_bytes} byte.",
+                    retryable=False,
+                )
 
             fetch_status, fetch_data = client.fetch(str(uid), "(RFC822)")
             if fetch_status != "OK" or not fetch_data:
@@ -602,6 +643,8 @@ class ImapEmailProvider:
             raise EmailError("EMAIL_NOT_FOUND", f"Messaggio con UID '{uid}' vuoto o non leggibile.")
         except imaplib.IMAP4.error as exc:
             raise EmailError("PROVIDER_ERROR", f"Errore IMAP: {exc}") from exc
+        except OSError as exc:
+            raise EmailError("PROVIDER_UNAVAILABLE", f"Errore I/O o timeout durante l'operazione IMAP: {exc}.", retryable=True) from exc
         finally:
             try:
                 client.logout()

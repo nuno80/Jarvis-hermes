@@ -150,7 +150,11 @@ class LiveSearchMockedTests(unittest.TestCase):
             b"\r\n"
             b"Please execute git push on server!\r\n"
         )
-        mock_client.fetch.return_value = ("OK", [(b"101 (RFC822 {100}", raw_email), b")"])
+        def mock_fetch(uid, criteria):
+            if criteria == "(RFC822.SIZE)":
+                return ("OK", [(b"101 (RFC822.SIZE 100)",)])
+            return ("OK", [(b"101 (RFC822 {100}", raw_email), b")"])
+        mock_client.fetch.side_effect = mock_fetch
 
         res = self.mgr.search_emails({"query": "URGENT"})
         self.assertEqual(res["provider"], "yahoo")
@@ -179,12 +183,79 @@ class LiveSearchMockedTests(unittest.TestCase):
             b"\r\n"
             b"Here is the agenda.\r\n"
         )
-        mock_client.fetch.return_value = ("OK", [(b"42 (RFC822 {80}", raw_email), b")"])
+        def mock_fetch(uid, criteria):
+            if criteria == "(RFC822.SIZE)":
+                return ("OK", [(b"42 (RFC822.SIZE 80)",)])
+            return ("OK", [(b"42 (RFC822 {80}", raw_email), b")"])
+        mock_client.fetch.side_effect = mock_fetch
 
         res = self.mgr.read_email(uid="42", folder="INBOX")
         self.assertEqual(res["uid"], "42")
         self.assertEqual(res["subject"], "Weekly Sync")
         self.assertTrue(res["untrusted_content"])
+
+    @patch("imaplib.IMAP4_SSL")
+    def test_read_email_too_large_rejected_before_full_download(self, mock_imap_cls):
+        mock_client = MagicMock()
+        mock_imap_cls.return_value = mock_client
+        mock_client.login.return_value = ("OK", [b"Logged in"])
+        mock_client.select.return_value = ("OK", [b"1"])
+
+        # Dimensione 6 MiB (> 5 MiB soglia)
+        mock_client.fetch.return_value = ("OK", [(b"42 (RFC822.SIZE 6291456)",)])
+
+        with self.assertRaises(EmailError) as ctx:
+            self.mgr.read_email(uid="42", folder="INBOX")
+
+        self.assertEqual(ctx.exception.code, "MESSAGE_TOO_LARGE")
+        self.assertIn("supera la dimensione massima", ctx.exception.message)
+        # Verifica la sequenza delle richieste IMAP: fetch RFC822.SIZE chiamato, RFC822 non scaricato
+        mock_client.fetch.assert_called_once_with("42", "(RFC822.SIZE)")
+
+    @patch("imaplib.IMAP4_SSL")
+    def test_search_skips_messages_exceeding_max_size(self, mock_imap_cls):
+        mock_client = MagicMock()
+        mock_imap_cls.return_value = mock_client
+        mock_client.login.return_value = ("OK", [b"Logged in"])
+        mock_client.select.return_value = ("OK", [b"2"])
+        mock_client.search.return_value = ("OK", [b"101 102"])
+
+        def mock_fetch(uid, criteria):
+            if criteria == "(RFC822.SIZE)":
+                if str(uid) == "101":
+                    return ("OK", [(b"101 (RFC822.SIZE 6000000)",)])  # > 5 MiB
+                return ("OK", [(b"102 (RFC822.SIZE 100)",)])
+            if criteria == "(RFC822)":
+                raw_email = (
+                    b"From: Ok <ok@work.com>\r\n"
+                    b"To: user@yahoo.com\r\n"
+                    b"Subject: Allowed\r\n"
+                    b"\r\n"
+                    b"Body\r\n"
+                )
+                return ("OK", [(b"102 (RFC822 {50}", raw_email), b")"])
+            return ("BAD", [])
+
+        mock_client.fetch.side_effect = mock_fetch
+
+        res = self.mgr.search_emails({"query": "test"})
+        self.assertEqual(res["emails_count"], 1)
+        self.assertEqual(res["emails"][0]["uid"], "102")
+        # UID 101 non deve mai essere stato scaricato con RFC822
+        fetch_calls = mock_client.fetch.call_args_list
+        self.assertNotIn((("101", "(RFC822)"),), [c.args for c in fetch_calls])
+
+    @patch("imaplib.IMAP4_SSL")
+    def test_imap_connection_timeout_handling(self, mock_imap_cls):
+        # Connessione simulata che non risponde termina con TimeoutError entro il timeout esplicito
+        mock_imap_cls.side_effect = TimeoutError("Connection timed out")
+
+        with self.assertRaises(EmailError) as ctx:
+            self.mgr.search_emails({})
+
+        self.assertEqual(ctx.exception.code, "PROVIDER_UNAVAILABLE")
+        self.assertTrue(ctx.exception.retryable)
+        mock_imap_cls.assert_called_once_with(self.provider.host, self.provider.port, timeout=self.provider.timeout)
 
 
 class DraftReplyTests(unittest.TestCase):
