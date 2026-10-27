@@ -23,9 +23,25 @@ CONFIRMATION_POLICIES = {
     "write_note": "Controllo concorrenza ottimistica su versione SHA-256 nota",
     "update_preference": "Controllo concorrenza e divieto di bypass privilegi",
     "forget_memory": "Cancellazione memoria inferita con backup dichiarativo",
-    "pi_task": "Confinamento su ~/programmazione, lock concorrenza e tracciamento Job",
+    "propose_memory": "Registrazione memoria candidata soft state (nessuna conferma)",
+    "record_routing_correction": "Registrazione correzione su DB telemetria (nessuna conferma)",
+    "coding_session_init": "Avvio proxy locale e risoluzione workspace (nessuna conferma)",
+    "pi_task": "Admission control (lock concorrenza su progetto) e ownership tracciata su Job",
     "todoist_create_task_list": "Mutativo reversibile (nessuna conferma / task cancellabili da app)",
 }
+
+
+def get_effects(tool: Any) -> str:
+    ann = getattr(tool, "annotations", None)
+    if not ann:
+        return "Non annotato"
+    if ann.readOnlyHint:
+        if getattr(ann, "openWorldHint", False):
+            return "Read-only (open-world)"
+        return "Read-only"
+    if getattr(ann, "openWorldHint", False):
+        return "Mutativo (open-world)"
+    return "Mutativo"
 
 
 def get_policy(name: str) -> str:
@@ -33,12 +49,7 @@ def get_policy(name: str) -> str:
         return CONFIRMATION_POLICIES[name]
     if name.startswith("draft_"):
         return "Nessuna rete / Bozza puramente locale (fail-safe)"
-    return "Read-only / Nessun effetto collaterale distruttivo"
-
-
-def get_status(name: str) -> str:
-    # Most tools are fully implemented and covered by unit/integration MCP tests
-    return "Implementato & Testato via MCP"
+    return "Nessuna conferma richiesta"
 
 
 async def generate_markdown() -> str:
@@ -51,15 +62,15 @@ async def generate_markdown() -> str:
         "",
         f"> Generato automaticamente dal server FastMCP. Totale tool registrati: **{len(tools_sorted)}**.",
         "",
-        "| Tool | Politica di Conferma / Effetti | Stato Capacità | Descrizione Sintetica |",
+        "| Tool | Effetti | Politica di Conferma | Descrizione Sintetica |",
         "|---|---|---|---|",
     ]
 
     for t in tools_sorted:
         desc = (t.description or "").strip().splitlines()[0].replace("|", "\\|")
+        effects = get_effects(t)
         policy = get_policy(t.name)
-        status = get_status(t.name)
-        lines.append(f"| `{t.name}` | {policy} | {status} | {desc} |")
+        lines.append(f"| `{t.name}` | {effects} | {policy} | {desc} |")
 
     lines.append("")
     return "\n".join(lines)

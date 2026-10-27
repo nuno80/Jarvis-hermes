@@ -2,14 +2,14 @@
 
 Assistente personale MCP-first basato su Hermes, controllabile da Telegram, con memoria Obsidian e strumenti per Windows/WSL, sviluppo e viaggi.
 
-**Stato:** server MCP integrato con **50 tool registrati** (ispezione sistema, gestione file/checkpoint, workflow e commit atomici, push autorizzato, automazione GUI Windows, navigazione web protetta, vault/preferenze Obsidian, Gemini/routing LLM, vocale Telegram con Groq STT, Google Calendar, Yahoo IMAP/SMTP, ricerca voli e reminder persistenti). Suite automatizzata con oltre **340 test** unitari e di integrazione MCP. I tool con effetti collaterali reali sono rigorosamente vincolati a gate di approvazione esplicita (MCP elicitation Telegram) e a policy di confinamento deterministiche lato server.
+**Stato:** server MCP integrato con **52 tool registrati** (ispezione sistema, gestione file/checkpoint, workflow e commit atomici, push autorizzato, automazione GUI Windows, navigazione web protetta, vault/preferenze Obsidian, Gemini/routing LLM, vocale Telegram con Groq STT, Google Calendar, Yahoo IMAP/SMTP, ricerca voli e reminder persistenti). Suite automatizzata con oltre **340 test** unitari e di integrazione MCP. I tool con effetti collaterali reali sono rigorosamente vincolati a gate di approvazione esplicita (MCP elicitation Telegram) e a policy di confinamento deterministiche lato server.
 
 Bot Telegram collegato: **@nuno_agent_bot**.
 
 ## Documenti
 
 - [Specifica V1](docs/specs/jarvis-v1.md)
-- [Inventario Completo Tool MCP (50 tool)](docs/tools-inventory.md)
+- [Inventario Completo Tool MCP (52 tool)](docs/tools-inventory.md)
 - [Server MCP: contratti iniziali e confini](docs/mcp-readonly.md)
 - [Guida alla configurazione](config/README.md)
 - [Roadmap e avanzamento issue](docs/roadmap.md)
@@ -45,7 +45,7 @@ Nessuna issue host-dependent va chiusa senza prova sul dispositivo reale. Le pro
 
 ## Incremento e Architettura MCP
 
-`uv run jarvis serve` avvia il server FastMCP esponendo 50 strumenti tipizzati per Hermes e il client MCP.
+`uv run jarvis serve` avvia il server FastMCP esponendo 52 strumenti tipizzati per Hermes e il client MCP.
 L'architettura segue il principio del *fail-closed* e della separazione dei poteri:
 - **Operazioni di sola lettura / bozza**: operano senza mutazioni, trattando tutti i contenuti esterni (note, pagine web, email, output di ricerca) come dati grezzi non fidati (`untrusted_content`).
 - **Operazioni mutative protette**: modifiche a file di progetto (`write_project_file`, `restore_checkpoint`) sono vincolate a snapshot creati con `create_checkpoint`.

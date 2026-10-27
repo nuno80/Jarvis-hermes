@@ -163,8 +163,49 @@ class MCPTests(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(draft['ok'])
             self.assertEqual(draft['data']['status'], 'draft')
             self.assertFalse(draft['data']['created_event'])
-            self.assertTrue(all(t.annotations.readOnlyHint for t in catalog.tools
-                                if t.name not in ('simulate_with_approval', 'git_push', 'job_cancel', 'create_checkpoint', 'write_project_file', 'restore_checkpoint', 'commit_project_changes', 'execute_gui_action', 'run_command', 'submit_web_form', 'update_preference', 'propose_memory', 'forget_memory', 'write_note', 'pi_task', 'email_send', 'create_reminder', 'cancel_reminder', 'calendar_create_event', 'calendar_update_event', 'calendar_delete_event', 'todoist_create_task_list')))
+
+    async def test_tool_annotations_match_real_effects(self):
+        expected_mutating = {
+            'calendar_create_event', 'calendar_delete_event', 'calendar_update_event',
+            'cancel_reminder', 'coding_session_init', 'commit_project_changes',
+            'create_checkpoint', 'create_reminder', 'email_send', 'execute_gui_action',
+            'forget_memory', 'git_push', 'job_cancel', 'pi_task', 'propose_memory',
+            'record_routing_correction', 'restore_checkpoint', 'run_command',
+            'run_project_workflow', 'simulate_with_approval', 'submit_web_form',
+            'todoist_create_task_list', 'update_preference', 'write_note',
+            'write_project_file',
+        }
+        expected_readonly = {
+            'ask_gemini', 'calendar_search', 'compare_flights', 'device_status',
+            'disk_usage', 'draft_calendar_event', 'draft_email_reply', 'email_read',
+            'email_search', 'fetch_page', 'get_job_budget_usage', 'get_profile',
+            'get_routing_report', 'gui_status', 'job_status', 'list_reminders',
+            'read_note', 'read_project_file', 'read_web_page', 'reconcile_calendar_event',
+            'reconcile_email', 'route_request', 'search_flexible_flights',
+            'search_flights', 'search_notes', 'transcribe_voice_message', 'web_search',
+        }
+        async with connected() as client:
+            catalog = await client.list_tools()
+            tools_by_name = {t.name: t for t in catalog.tools}
+            self.assertEqual(set(tools_by_name.keys()), expected_mutating | expected_readonly)
+
+            # Workflow and coding session init must never be read-only
+            self.assertFalse(tools_by_name['run_project_workflow'].annotations.readOnlyHint)
+            self.assertFalse(tools_by_name['coding_session_init'].annotations.readOnlyHint)
+
+            # Mutating tools must explicitly have readOnlyHint=False and destructiveHint=True
+            for name in expected_mutating:
+                ann = tools_by_name[name].annotations
+                self.assertIsNotNone(ann, f"Tool {name} must have annotations")
+                self.assertFalse(ann.readOnlyHint, f"Tool {name} must not be read-only")
+                self.assertTrue(ann.destructiveHint, f"Tool {name} must be destructive")
+
+            # Read-only tools must have readOnlyHint=True and destructiveHint=False
+            for name in expected_readonly:
+                ann = tools_by_name[name].annotations
+                self.assertIsNotNone(ann, f"Tool {name} must have annotations")
+                self.assertTrue(ann.readOnlyHint, f"Tool {name} must be read-only")
+                self.assertFalse(ann.destructiveHint, f"Tool {name} must not be destructive")
 
     async def test_simulated_approval_records_once_and_counts_only_this_decision(self):
         from pathlib import Path
