@@ -179,13 +179,31 @@ def _reminder_store() -> ReminderStore:
     return store
 
 
+def reconcile_startup_state() -> dict[str, Any]:
+    """Reconcile persistent state (interrupted jobs and missed reminders) once upon real service startup."""
+    job_store = _job_store()
+    reconciled_jobs = job_store.reconcile_on_startup()
+    reminder_store = _reminder_store()
+    reconciled_reminders = reminder_store.reconcile_on_startup()
+    return {
+        "reconciled_jobs": reconciled_jobs,
+        "reconciled_reminders": reconciled_reminders,
+    }
+
+
 def build_server() -> FastMCP:
     server = FastMCP('Jarvis', log_level='WARNING')
     device = os.environ.get('JARVIS_DEVICE_ID', 'local')
     vault = Vault(os.environ.get('JARVIS_VAULT_PATH'))
     job_store = _job_store()
-    job_store.reconcile_on_startup()
-    current_env = 'wsl' if os.path.exists('/proc/version') and 'microsoft' in open('/proc/version').read().lower() else ('windows' if os.name == 'nt' else 'linux')
+    def _is_wsl() -> bool:
+        try:
+            with open('/proc/version', 'r') as f:
+                return 'microsoft' in f.read().lower()
+        except OSError:
+            return False
+
+    current_env = 'wsl' if _is_wsl() else ('windows' if os.name == 'nt' else 'linux')
     projects_config = os.environ.get('JARVIS_PROJECTS_CONFIG')
     approval_store = _approval_store()
     verifications_dir = _verifications_dir()
@@ -197,7 +215,6 @@ def build_server() -> FastMCP:
     calendar_audit_log = _calendar_audit_log()
     calendar_manager = CalendarManager(approval_store=approval_store, audit_log=calendar_audit_log)
     reminder_store = _reminder_store()
-    reminder_store.reconcile_on_startup()
     email_audit_log = _email_audit_log()
     email_manager = EmailManager(approval_store=approval_store, audit_log=email_audit_log)
     budget_tracker = _budget_tracker()
@@ -1498,4 +1515,5 @@ def load_dotenv_if_available() -> None:
 
 def main() -> None:
     load_dotenv_if_available()
+    reconcile_startup_state()
     build_server().run(transport='stdio')
