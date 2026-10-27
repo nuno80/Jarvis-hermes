@@ -561,7 +561,7 @@ class ProjectRegistry:
             # Verify that staged files exactly match authorized files
             norm_authorized = {p.replace('\\', '/').lstrip('./') for p in files}
             norm_staged = {p.replace('\\', '/').lstrip('./') for p in staged_files}
-            if not norm_staged.issubset(norm_authorized):
+            if norm_staged != norm_authorized:
                 raise ProjectError('UNAUTHORIZED_STAGED_FILES',
                                    f'Staged files {sorted(norm_staged)!r} do not match authorized files {sorted(norm_authorized)!r}.')
 
