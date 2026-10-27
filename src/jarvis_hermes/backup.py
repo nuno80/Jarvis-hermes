@@ -226,9 +226,6 @@ class BackupManager:
             if target_vault.exists() and any(target_vault.iterdir()):
                 raise BackupError("DESTINATION_NOT_EMPTY", f"Target vault directory {target_vault} is not empty. Use a clean path or explicit allow.")
 
-        target_state.mkdir(parents=True, exist_ok=True)
-        target_vault.mkdir(parents=True, exist_ok=True)
-
         with tempfile.TemporaryDirectory(prefix="jarvis-restore-staging-") as staging:
             staging_path = Path(staging)
             with tarfile.open(archive_file, "r:gz") as tar:
@@ -245,7 +242,46 @@ class BackupManager:
             staged_state = staging_path / "state"
             staged_vault = staging_path / "vault"
 
-            # 1. Restore state files
+            # 1. Safety reconciliation inside staging:
+            # A. Neutralize interrupted jobs: non-terminal jobs become outcome_unknown, never re-executed blindly
+            reconciled_jobs = 0
+            jobs_db = staged_state / "jobs.sqlite3"
+            if jobs_db.is_file():
+                try:
+                    with sqlite3.connect(jobs_db) as conn:
+                        conn.row_factory = sqlite3.Row
+                        now = time.time()
+                        rows = conn.execute(
+                            "SELECT job_id, warnings FROM jobs WHERE status NOT IN ('succeeded', 'failed', 'cancelled', 'interrupted', 'outcome_unknown')"
+                        ).fetchall()
+                        for r in rows:
+                            existing = r["warnings"] or ""
+                            warn = (existing + "\nRestored from backup; marked outcome_unknown to prevent blind re-execution.").strip()
+                            conn.execute(
+                                "UPDATE jobs SET status = 'outcome_unknown', updated_at = ?, warnings = ? WHERE job_id = ?",
+                                (now, warn, r["job_id"]),
+                            )
+                            reconciled_jobs += 1
+                        conn.commit()
+                except Exception as exc:
+                    raise BackupError("RECONCILIATION_ERROR", f"Job reconciliation failed during restore: {exc}") from exc
+
+            # B. Neutralize pending approvals: cancelled, never automatically executed
+            neutralized_approvals = 0
+            approvals_db = staged_state / "approvals.sqlite3"
+            if approvals_db.is_file():
+                try:
+                    with sqlite3.connect(approvals_db) as conn:
+                        cursor = conn.execute("UPDATE approvals SET status = 'cancelled' WHERE status = 'pending'")
+                        neutralized_approvals = cursor.rowcount
+                        conn.commit()
+                except Exception as exc:
+                    raise BackupError("RECONCILIATION_ERROR", f"Approval reconciliation failed during restore: {exc}") from exc
+
+            # 2. Reconciled staging is verified. Now copy state files to target
+            target_state.mkdir(parents=True, exist_ok=True)
+            target_vault.mkdir(parents=True, exist_ok=True)
+
             if staged_state.is_dir():
                 for item in staged_state.iterdir():
                     dest = target_state / item.name
@@ -256,7 +292,7 @@ class BackupManager:
                     else:
                         shutil.copy2(item, dest)
 
-            # 2. Restore vault files
+            # 3. Copy vault files to target
             if staged_vault.is_dir():
                 for root_dir, dirs, files in os.walk(staged_vault):
                     rel = Path(root_dir).relative_to(staged_vault)
@@ -265,43 +301,7 @@ class BackupManager:
                     for f in files:
                         shutil.copy2(Path(root_dir) / f, dest_dir / f)
 
-        # 3. Post-restore safety reconciliation:
-        # A. Neutralize interrupted jobs: non-terminal jobs become outcome_unknown, never re-executed blindly
-        reconciled_jobs = 0
-        jobs_db = target_state / "jobs.sqlite3"
-        if jobs_db.is_file():
-            try:
-                with sqlite3.connect(jobs_db) as conn:
-                    conn.row_factory = sqlite3.Row
-                    now = time.time()
-                    rows = conn.execute(
-                        "SELECT job_id, warnings FROM jobs WHERE status NOT IN ('succeeded', 'failed', 'cancelled', 'interrupted', 'outcome_unknown')"
-                    ).fetchall()
-                    for r in rows:
-                        existing = r["warnings"] or ""
-                        warn = (existing + "\nRestored from backup; marked outcome_unknown to prevent blind re-execution.").strip()
-                        conn.execute(
-                            "UPDATE jobs SET status = 'outcome_unknown', updated_at = ?, warnings = ? WHERE job_id = ?",
-                            (now, warn, r["job_id"]),
-                        )
-                        reconciled_jobs += 1
-                    conn.commit()
-            except Exception:
-                pass
-
-        # B. Neutralize pending approvals: cancelled, never automatically executed
-        neutralized_approvals = 0
-        approvals_db = target_state / "approvals.sqlite3"
-        if approvals_db.is_file():
-            try:
-                with sqlite3.connect(approvals_db) as conn:
-                    cursor = conn.execute("UPDATE approvals SET status = 'cancelled' WHERE status = 'pending'")
-                    neutralized_approvals = cursor.rowcount
-                    conn.commit()
-            except Exception:
-                pass
-
-        # C. Rebuild / verify indices and user profile from restored vault
+        # 4. Rebuild / verify indices and user profile from restored vault
         notes_indexed = 0
         explicit_prefs_restored = False
         if (target_vault / "preferences.yaml").is_file():

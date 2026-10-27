@@ -7,6 +7,7 @@ import shutil
 import sqlite3
 import tempfile
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 
 from jarvis_hermes.backup import BackupManager, BackupError
@@ -203,6 +204,90 @@ class BackupRestoreTests(unittest.TestCase):
         self.assertFalse(Path(b1["archive_path"]).exists())
         self.assertFalse(Path(b1["manifest_path"]).exists())
         self.assertTrue(Path(b2["archive_path"]).exists())
+
+    def test_restore_fails_closed_and_preserves_targets_on_job_reconciliation_error(self):
+        mgr = BackupManager(
+            state_dir=self.state_dir,
+            vault_dir=self.vault_dir,
+            backup_root=self.backup_dir,
+        )
+        backup_res = mgr.create_backup()
+
+        target_state = self.restore_dir / "state_canary_job"
+        target_vault = self.restore_dir / "vault_canary_job"
+        target_state.mkdir(parents=True, exist_ok=True)
+        target_vault.mkdir(parents=True, exist_ok=True)
+
+        canary_state_file = target_state / "canary.txt"
+        canary_state_file.write_text("state_canary_data", encoding="utf-8")
+        canary_vault_file = target_vault / "canary.txt"
+        canary_vault_file.write_text("vault_canary_data", encoding="utf-8")
+
+        # Mock sqlite3.connect when connecting to jobs.sqlite3 to raise an error
+        orig_connect = sqlite3.connect
+
+        def fake_connect(database, *args, **kwargs):
+            if "jobs.sqlite3" in str(database):
+                raise sqlite3.OperationalError("simulated database disk image is malformed")
+            return orig_connect(database, *args, **kwargs)
+
+        with patch("sqlite3.connect", side_effect=fake_connect):
+            with self.assertRaises(BackupError) as ctx:
+                mgr.restore(
+                    archive_path=backup_res["archive_path"],
+                    target_state_dir=target_state,
+                    target_vault_dir=target_vault,
+                    allow_existing=True,
+                )
+            self.assertEqual(ctx.exception.code, "RECONCILIATION_ERROR")
+
+        # Target directories must be preserved unchanged
+        self.assertEqual(canary_state_file.read_text(encoding="utf-8"), "state_canary_data")
+        self.assertEqual(canary_vault_file.read_text(encoding="utf-8"), "vault_canary_data")
+        self.assertFalse((target_state / "jobs.sqlite3").exists())
+        self.assertFalse((target_vault / "preferences.yaml").exists())
+
+    def test_restore_fails_closed_and_preserves_targets_on_approval_reconciliation_error(self):
+        mgr = BackupManager(
+            state_dir=self.state_dir,
+            vault_dir=self.vault_dir,
+            backup_root=self.backup_dir,
+        )
+        backup_res = mgr.create_backup()
+
+        target_state = self.restore_dir / "state_canary_app"
+        target_vault = self.restore_dir / "vault_canary_app"
+        target_state.mkdir(parents=True, exist_ok=True)
+        target_vault.mkdir(parents=True, exist_ok=True)
+
+        canary_state_file = target_state / "canary.txt"
+        canary_state_file.write_text("state_canary_data", encoding="utf-8")
+        canary_vault_file = target_vault / "canary.txt"
+        canary_vault_file.write_text("vault_canary_data", encoding="utf-8")
+
+        # Mock sqlite3.connect when connecting to approvals.sqlite3 to raise an error
+        orig_connect = sqlite3.connect
+
+        def fake_connect(database, *args, **kwargs):
+            if "approvals.sqlite3" in str(database):
+                raise sqlite3.OperationalError("simulated database lock / corruption")
+            return orig_connect(database, *args, **kwargs)
+
+        with patch("sqlite3.connect", side_effect=fake_connect):
+            with self.assertRaises(BackupError) as ctx:
+                mgr.restore(
+                    archive_path=backup_res["archive_path"],
+                    target_state_dir=target_state,
+                    target_vault_dir=target_vault,
+                    allow_existing=True,
+                )
+            self.assertEqual(ctx.exception.code, "RECONCILIATION_ERROR")
+
+        # Target directories must be preserved unchanged
+        self.assertEqual(canary_state_file.read_text(encoding="utf-8"), "state_canary_data")
+        self.assertEqual(canary_vault_file.read_text(encoding="utf-8"), "vault_canary_data")
+        self.assertFalse((target_state / "approvals.sqlite3").exists())
+        self.assertFalse((target_vault / "preferences.yaml").exists())
 
 
 if __name__ == "__main__":
