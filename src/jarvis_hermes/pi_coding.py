@@ -29,7 +29,7 @@ import urllib.parse
 import urllib.request
 
 from jarvis_hermes.core import ensure_secure_file_permissions, ensure_state_dir
-from jarvis_hermes.jobs import JobError, JobStore
+from jarvis_hermes.jobs import JobError, JobStore, terminate_process_tree, drain_process_pipes
 from jarvis_hermes.projects import redact_secrets
 
 _SAFE_MODEL_RE = re.compile(r"^[a-zA-Z0-9._:/-]+$")
@@ -334,14 +334,8 @@ def _run_pi_process(cmd: list[str], cwd: str, timeout: int,
     try:
         out, err = proc.communicate(timeout=timeout)
     except subprocess.TimeoutExpired:
-        try:
-            if os.name != "nt":
-                os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-            else:
-                proc.kill()
-        except (ProcessLookupError, PermissionError):
-            pass
-        proc.communicate()
+        terminate_process_tree(pid=proc.pid, pgid=pgid, timeout_seconds=3.0)
+        out, err = drain_process_pipes(proc, timeout=1.0)
         raise
     return subprocess.CompletedProcess(cmd, proc.returncode, out, err)
 

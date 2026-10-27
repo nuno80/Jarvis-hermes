@@ -12,6 +12,7 @@ from typing import Any
 import uuid
 
 from jarvis_hermes.approval import ApprovalStore, ApprovalError
+from jarvis_hermes.jobs import terminate_process_tree, drain_process_pipes
 
 MAX_PROJECT_FILE_BYTES = 524288  # 512 KiB
 DEFAULT_PAGE_SIZE = 8000
@@ -379,13 +380,14 @@ class ProjectRegistry:
                 **popen_args
             )
 
+            pgid = None
+            if os.name != 'nt':
+                try:
+                    pgid = os.getpgid(proc.pid)
+                except OSError:
+                    pgid = proc.pid
+
             if job_id and self.job_store:
-                pgid = None
-                if os.name != 'nt':
-                    try:
-                        pgid = os.getpgid(proc.pid)
-                    except OSError:
-                        pgid = proc.pid
                 try:
                     self.job_store.register_process(job_id=job_id, pid=proc.pid, pgid=pgid)
                 except Exception:
@@ -396,12 +398,14 @@ class ProjectRegistry:
             try:
                 stdout_data, stderr_data = proc.communicate(timeout=timeout_seconds)
             except subprocess.TimeoutExpired:
-                proc.kill()
-                stdout_data, stderr_data = proc.communicate()
+                stopped = terminate_process_tree(pid=proc.pid, pgid=pgid, timeout_seconds=3.0)
+                stdout_data, stderr_data = drain_process_pipes(proc, timeout=1.0)
                 elapsed = time.time() - start_time
                 passed = False
                 exit_code = -1
                 redacted_out = 'Workflow execution timed out.'
+                if not stopped:
+                    redacted_out += ' Warning: active descendants could not be verified terminated.'
             else:
                 elapsed = time.time() - start_time
                 raw_output = (stdout_data or '') + (stderr_data or '')

@@ -1,4 +1,5 @@
 import os
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -89,6 +90,76 @@ class JobStoreTests(unittest.TestCase):
         with self.assertRaises(JobError) as ctx:
             self.store.check_not_cancelled(job_id)
         self.assertEqual(ctx.exception.code, "JOB_CANCELLED")
+
+    def test_job_cancel_escalates_and_kills_descendant_ignoring_sigterm(self):
+        """A descendant ignoring SIGTERM must be killed via SIGKILL escalation and not survive."""
+        import subprocess
+        from jarvis_hermes.jobs import get_active_descendants
+        
+        # Script spawns child that ignores SIGTERM and stays alive, while leader exits or sleeps
+        script = (
+            "import os, time, signal, sys\n"
+            "pid = os.fork()\n"
+            "if pid == 0:\n"
+            "    signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
+            "    time.sleep(30)\n"
+            "    os._exit(0)\n"
+            "time.sleep(30)\n"
+        )
+        proc = subprocess.Popen(['python3', '-c', script], start_new_session=True)
+        try:
+            pid = proc.pid
+            pgid = os.getpgid(pid) if hasattr(os, 'getpgid') else pid
+            job = self.store.create_job(actor_id=1, target="sigterm_ignoring_tree", description="tree with sigterm ignorer")
+            job_id = job["job_id"]
+            self.store.register_process(job_id=job_id, pid=pid, pgid=pgid)
+
+            # Wait briefly for child to fork
+            time.sleep(0.3)
+            active_before = get_active_descendants(pid, pgid)
+            self.assertGreaterEqual(len(active_before), 2, "Both leader and child should be active")
+
+            # Cancel job with escalation
+            cancel_res = self.store.cancel_job(job_id, timeout_seconds=2.0)
+            self.assertEqual(cancel_res["status"], "cancelled")
+            self.assertTrue(cancel_res["process_stopped"])
+            self.assertIn("verified terminated", cancel_res["note"])
+
+            # Verify no descendants remain alive
+            active_after = get_active_descendants(pid, pgid)
+            self.assertEqual(active_after, [], "All descendants including SIGTERM ignorer must be terminated")
+        finally:
+            # Ensure cleanup
+            try:
+                proc.kill()
+                proc.wait(timeout=1.0)
+            except Exception:
+                pass
+
+    def test_job_cancel_reports_unverified_if_descendant_remains(self):
+        """If a descendant remains active, cancel_job reports process_stopped=False instead of false success."""
+        from unittest.mock import patch
+        proc = subprocess.Popen(['sleep', '10'], start_new_session=True)
+        try:
+            pid = proc.pid
+            pgid = os.getpgid(pid) if hasattr(os, 'getpgid') else pid
+            job = self.store.create_job(actor_id=1, target="stubborn_job", description="stubborn process")
+            job_id = job["job_id"]
+            self.store.register_process(job_id=job_id, pid=pid, pgid=pgid)
+
+            # Mock terminate_process_tree returning False (unverified / active remaining)
+            with patch('jarvis_hermes.jobs.terminate_process_tree', return_value=False):
+                cancel_res = self.store.cancel_job(job_id, timeout_seconds=1.0)
+
+            self.assertEqual(cancel_res["status"], "cancelled")
+            self.assertFalse(cancel_res["process_stopped"])
+            self.assertIn("could not be verified within timeout", cancel_res["note"])
+        finally:
+            try:
+                proc.kill()
+                proc.wait(timeout=1.0)
+            except Exception:
+                pass
 
     def test_reconcile_on_restart_marks_interrupted_as_outcome_unknown(self):
         # Simulate a job that was 'running' when server abruptly restarted

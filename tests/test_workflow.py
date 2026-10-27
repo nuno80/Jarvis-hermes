@@ -1,8 +1,9 @@
-import subprocess
-import unittest
-import tempfile
 import json
 from pathlib import Path
+import subprocess
+import tempfile
+import time
+import unittest
 from jarvis_hermes.projects import ProjectRegistry, ProjectError
 
 
@@ -143,6 +144,50 @@ class WorkflowAndCommitTests(unittest.TestCase):
         self.assertFalse(res["ok"])
         self.assertNotEqual(res["exit_code"], 0)
         self.assertIn("FAIL", res["output"])
+
+    def test_workflow_timeout_with_inherited_pipes_terminates_tree_and_does_not_hang(self):
+        """A workflow whose child inherits pipes must return boundedly on timeout with tree killed."""
+        from jarvis_hermes.jobs import JobStore
+        hang_script = self.proj_dir / "hang.py"
+        hang_script.write_text(
+            "import subprocess, time, sys\n"
+            "proc = subprocess.Popen(['sleep', '30'])\n"
+            "sys.stdout.write(f'{proc.pid}\\n')\n"
+            "sys.stdout.flush()\n"
+            "time.sleep(30)\n",
+            encoding="utf-8"
+        )
+        subprocess.run(["git", "add", "."], cwd=self.proj_dir, check=True)
+        subprocess.run(["git", "commit", "-m", "hang script"], cwd=self.proj_dir, check=True)
+
+        self.cfg_file.write_text(json.dumps({
+            "devices": {"local": {"environment": "wsl"}},
+            "projects": {
+                "sample": {
+                    "paths": {"local": str(self.proj_dir)},
+                    "workflows": {
+                        "hang": {"command": ["python3", "hang.py"]}
+                    }
+                }
+            }
+        }), encoding="utf-8")
+
+        registry = ProjectRegistry(self.cfg_file, current_device="local", current_environment="wsl")
+        t0 = time.time()
+        res = registry.run_project_workflow("sample", "hang", timeout_seconds=1)
+        elapsed = time.time() - t0
+
+        self.assertLess(elapsed, 5.0, "Workflow should not hang when child holds pipes")
+        self.assertFalse(res["ok"])
+        self.assertEqual(res["exit_code"], -1)
+        self.assertIn("timed out", res["output"])
+
+        # If child PID was output before timeout, verify it was terminated
+        lines = res["output"].strip().splitlines()
+        for line in lines:
+            if line.strip().isdigit():
+                child_pid = int(line.strip())
+                self.assertFalse(JobStore._is_process_alive(child_pid), f"Child process {child_pid} should be dead")
 
     def test_commit_project_changes_commits_only_specified_files_preserving_unrelated(self):
         """Commit stages and commits only relevant files modified by the job, preserving unrelated modifications."""

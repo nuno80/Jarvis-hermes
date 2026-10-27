@@ -26,6 +26,7 @@ from typing import Any
 
 from jarvis_hermes.approval import ApprovalError, ApprovalStore
 from jarvis_hermes.checkpoint import CheckpointError, CheckpointManager
+from jarvis_hermes.jobs import terminate_process_tree, drain_process_pipes
 from jarvis_hermes.projects import redact_secrets
 
 
@@ -521,21 +522,8 @@ class CommandPolicyManager:
             try:
                 stdout_data, stderr_data = proc.communicate(timeout=timeout_seconds)
             except subprocess.TimeoutExpired:
-                # Terminate entire process group on timeout
-                if os.name == 'nt':
-                    try:
-                        subprocess.run(['taskkill', '/F', '/T', '/PID', str(proc.pid)], capture_output=True, timeout=5)
-                    except Exception:
-                        pass
-                else:
-                    if pgid and hasattr(os, 'killpg'):
-                        try:
-                            import signal
-                            os.killpg(pgid, signal.SIGKILL)
-                        except OSError:
-                            pass
-                proc.kill()
-                stdout_data, stderr_data = proc.communicate()
+                terminate_process_tree(pid=proc.pid, pgid=pgid, timeout_seconds=3.0)
+                stdout_data, stderr_data = drain_process_pipes(proc, timeout=1.0)
                 if target_file_obj:
                     target_file_obj.close()
                 elapsed = round(time.time() - start_time, 3)
