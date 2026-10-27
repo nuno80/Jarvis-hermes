@@ -603,6 +603,17 @@ class SendEmailTests(unittest.TestCase):
         self.assertTrue(rec["reconciled"])
         self.assertEqual(rec["status"], "OUTCOME_UNKNOWN")
 
+        # Verifica riconciliazione per record inesistente
+        rec_not_found = self.mgr.reconcile_email_status("<nonexistent@example.com>")
+        self.assertFalse(rec_not_found["reconciled"])
+        self.assertEqual(rec_not_found["status"], "NOT_FOUND")
+
+        # Verifica riconciliazione senza audit log configurato
+        mgr_no_audit = EmailManager(sender=self.sender, approval_store=self.store, audit_log=None)
+        rec_no_audit = mgr_no_audit.reconcile_email_status("<any@example.com>")
+        self.assertFalse(rec_no_audit["reconciled"])
+        self.assertEqual(rec_no_audit["status"], "OUTCOME_UNKNOWN")
+
     def test_absence_of_secrets_in_audit_database(self):
         """Assenza totale di segreti o password applicative nell'audit log."""
         self.sender.user = "user@yahoo.com"
