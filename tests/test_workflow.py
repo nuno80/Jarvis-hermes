@@ -289,6 +289,60 @@ class WorkflowAndCommitTests(unittest.TestCase):
         self.assertEqual(head_before, head_after)
         self.assertEqual(status_before, status_after)
 
+    def test_commit_rejects_incomplete_staged_set(self):
+        """Regression test for #65: commit fails closed if only a subset of authorized files is staged."""
+        (self.proj_dir / "f1.py").write_text("orig 1\n", encoding="utf-8")
+        (self.proj_dir / "f2.py").write_text("orig 2\n", encoding="utf-8")
+        subprocess.run(["git", "add", "."], cwd=self.proj_dir, check=True)
+        subprocess.run(["git", "commit", "-m", "init"], cwd=self.proj_dir, check=True)
+
+        (self.proj_dir / "f1.py").write_text("modified 1\n", encoding="utf-8")
+        (self.proj_dir / "f2.py").write_text("modified 2\n", encoding="utf-8")
+
+        self.cfg_file.write_text(json.dumps({
+            "devices": {"local": {"environment": "wsl"}},
+            "projects": {
+                "sample": {
+                    "paths": {"local": str(self.proj_dir)},
+                    "workflows": {"check": {"command": ["python3", "-c", "print('ok')"]}}
+                }
+            }
+        }), encoding="utf-8")
+
+        state_dir = Path(self.tmp.name) / "state"
+        registry = ProjectRegistry(self.cfg_file, current_device="local", current_environment="wsl", state_dir=state_dir)
+        wf_res = registry.run_project_workflow("sample", "check")
+        vr_id = wf_res["verification_run_id"]
+
+        head_before = subprocess.run(["git", "rev-parse", "HEAD"], cwd=self.proj_dir, capture_output=True, text=True, check=True).stdout.strip()
+        status_before = subprocess.run(["git", "status", "--porcelain"], cwd=self.proj_dir, capture_output=True, text=True, check=True).stdout
+
+        real_run = subprocess.run
+        def fake_run(cmd, *args, **kwargs):
+            if isinstance(cmd, list) and len(cmd) >= 2 and cmd[0] == "git" and cmd[1] == "add":
+                # simulate git add staging only f1.py although [f1.py, f2.py] are authorized
+                return real_run(["git", "add", "f1.py"], cwd=self.proj_dir, check=True, capture_output=True)
+            return real_run(cmd, *args, **kwargs)
+
+        with patch("jarvis_hermes.projects.subprocess.run", side_effect=fake_run):
+            with self.assertRaises(ProjectError) as ctx:
+                registry.commit_project_changes(
+                    project_id="sample",
+                    files=["f1.py", "f2.py"],
+                    commit_message="commit f1 and f2",
+                    verification_run_id=vr_id
+                )
+            self.assertEqual(ctx.exception.code, "UNAUTHORIZED_STAGED_FILES")
+
+        head_after = subprocess.run(["git", "rev-parse", "HEAD"], cwd=self.proj_dir, capture_output=True, text=True, check=True).stdout.strip()
+        self.assertEqual(head_before, head_after)
+
+        # Index should have been reset, working tree changes preserved
+        diff_cached = subprocess.run(["git", "diff", "--cached", "--name-only"], cwd=self.proj_dir, capture_output=True, text=True, check=True)
+        self.assertEqual(diff_cached.stdout.strip(), "")
+        status_after = subprocess.run(["git", "status", "--porcelain"], cwd=self.proj_dir, capture_output=True, text=True, check=True).stdout
+        self.assertEqual(status_before, status_after)
+
     def test_commit_rejects_unauthorized_staged_set(self):
         """If staged files do not match authorized files after staging, commit is prevented and index reset."""
         (self.proj_dir / "f1.py").write_text("orig 1\n", encoding="utf-8")
