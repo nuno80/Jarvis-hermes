@@ -935,28 +935,6 @@ class EmailManager:
             "summary_text": summary_text,
             "expires_at": req["expires_at"],
         }
-        """Riconciliazione esito per message_id (AT04): legge l'audit log senza eseguire retry cieco."""
-        if not self.audit_log:
-            return {
-                "message_id": message_id,
-                "status": "OUTCOME_UNKNOWN",
-                "reconciled": False,
-                "note": "Audit log non configurato per la riconciliazione.",
-            }
-        rec = self.audit_log.get_record(message_id)
-        if not rec:
-            return {
-                "message_id": message_id,
-                "status": "NOT_FOUND",
-                "reconciled": False,
-                "note": "Nessun tentativo registrato con questo message_id.",
-            }
-        return {
-            "message_id": message_id,
-            "status": rec["status"],
-            "reconciled": True,
-            "audit": rec,
-        }
 
     def reconcile_email_status(self, message_id: str) -> dict[str, Any]:
         """Riconciliazione esito per message_id (AT04): legge l'audit log senza eseguire retry cieco."""
