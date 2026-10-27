@@ -16,7 +16,7 @@ from .email import EmailAuditLog, EmailError, EmailManager
 from .checkpoint import CheckpointError, CheckpointManager
 from .cli import diagnose
 from .command_policy import CommandPolicyError, CommandPolicyManager
-from .gui import GuiAutomationManager, GuiError
+from .gui import GuiAutomationManager, GuiError, OBSERVATIONAL_ACTIONS, MUTATING_ACTIONS
 from .jobs import JobError, JobStore
 from .llm import BudgetTracker, LLMClient, LLMConfig, LLMError
 from .telemetry import RoutingDecisionStore
@@ -399,11 +399,86 @@ def build_server() -> FastMCP:
         return respond(lambda: gui_manager.get_gui_status(), request_id)
 
     @server.tool(annotations=destructive)
-    def execute_gui_action(app_name: str, action: str = "open_and_inspect",
-                           job_id: str | None = None,
-                           request_id: str | None = None) -> dict[str, Any]:
-        """Perform a benign observable GUI action with before/after screenshots and concurrency guard."""
-        return respond(lambda: gui_manager.execute_gui_action(app_name=app_name, action=action, job_id=job_id), request_id)
+    async def execute_gui_action(app_name: str, ctx: Context,
+                                 action: str = "open_and_inspect",
+                                 job_id: str | None = None,
+                                 request_id: str | None = None) -> dict[str, Any]:
+        """Perform a benign observable GUI action with before/after screenshots and concurrency guard. Mutating actions require owner approval."""
+        observed = {'schema_version': '1.0', 'device_id': device, 'request_id': request_id,
+                    'observed_at': datetime.now(timezone.utc).isoformat(),
+                    'provenance': {'source': 'local_process', 'scope': 'current_host_only'}}
+        try:
+            norm_app, _ = gui_manager.validate_action(app_name, action)
+
+            if action not in OBSERVATIONAL_ACTIONS:
+                actor_id = _configured_approver()
+                store = _approval_store()
+                target = f"execute_gui_action:{norm_app}:{action}"
+                arguments = {'app_name': norm_app, 'action': action}
+                pending = store.request(actor_id=actor_id, target=target, arguments=arguments)
+
+                prompt = (
+                    f"Jarvis: autorizzi l'azione GUI '{action}' per l'applicazione '{norm_app}'?\n"
+                    f"Azione: {action}\n"
+                    f"Applicazione: {norm_app}\n"
+                    f"SHA-256 digest: {pending['digest']}"
+                )
+                try:
+                    choice = await asyncio.wait_for(ctx.elicit(prompt, _ApprovalResponse), timeout=305)
+                except Exception:
+                    choice = None
+
+                decision = getattr(choice, 'action', None)
+                if decision != 'accept':
+                    store.decide(
+                        token=pending['token'],
+                        actor_id=actor_id,
+                        target=target,
+                        arguments=arguments,
+                        approve=False,
+                    )
+                    return {
+                        **observed,
+                        'ok': False,
+                        'data': None,
+                        'error': {
+                            'code': 'APPROVAL_DECLINED',
+                            'message': 'GUI action was declined by owner or elicitation timed out.',
+                            'retryable': False,
+                        },
+                    }
+
+                store.decide(
+                    token=pending['token'],
+                    actor_id=actor_id,
+                    target=target,
+                    arguments=arguments,
+                    approve=True,
+                )
+
+            res = gui_manager.execute_gui_action(app_name=norm_app, action=action, job_id=job_id)
+            return {**observed, 'ok': True, 'data': res, 'error': None}
+        except ApprovalError as exc:
+            return {
+                **observed,
+                'ok': False,
+                'data': None,
+                'error': {'code': exc.code, 'message': f'Approval error: {exc.code}', 'retryable': False},
+            }
+        except GuiError as exc:
+            return {
+                **observed,
+                'ok': False,
+                'data': None,
+                'error': {'code': exc.code, 'message': exc.message, 'retryable': False},
+            }
+        except Exception as exc:
+            return {
+                **observed,
+                'ok': False,
+                'data': None,
+                'error': {'code': 'EXECUTION_FAILED', 'message': f'GUI action failed: {exc}', 'retryable': False},
+            }
 
     @server.tool(annotations=destructive)
     async def run_command(
