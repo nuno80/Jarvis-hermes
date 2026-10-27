@@ -203,8 +203,117 @@ class PreferencesTests(unittest.TestCase):
         # Backup file exists and declared
         self.assertTrue((self.vault_path / del_note_res["backup_retained"]).is_file())
 
+    def test_profile_includes_501st_note_or_declares_incomplete(self):
+        # Synthetic vault with 501 notes; note 501 contains preference
+        for i in range(1, 501):
+            (self.vault_path / f"note_{i:04d}.md").write_text(f"# Note {i}\nBody content\n", encoding="utf-8")
+        (self.vault_path / "note_0501.md").write_text(
+            "---\ntype: preference\ndomain: travel\nsource: inferred\npreferences:\n  airline: AZ\n---\n# Note 501\n",
+            encoding="utf-8"
+        )
+
+        # 1. Full scan includes 501st note
+        profile = self.vault.get_profile()
+        self.assertTrue(profile.get("complete"))
+        self.assertFalse(profile.get("truncated"))
+        found = any(n.get("domain") == "travel" and n.get("note_id") == "note_0501.md" for n in profile["frontmatter_notes"])
+        self.assertTrue(found, "Preference in 501st note must be included in profile")
+
+        # 2. When truncated, profile explicitly declares incompleteness
+        truncated_profile = self.vault.get_profile(max_notes=500)
+        self.assertFalse(truncated_profile.get("complete"))
+        self.assertTrue(truncated_profile.get("truncated"))
+
+    def test_external_obsidian_edit_reflected_in_next_read(self):
+        note = self.vault_path / "Editor.md"
+        note.write_text(
+            "---\ntype: preference\ndomain: editor\nsource: inferred\npreferences:\n  theme: dark\n---\n# Editor\n",
+            encoding="utf-8"
+        )
+        p1 = self.vault.get_profile()
+        self.assertEqual(len(p1["frontmatter_notes"]), 1)
+        self.assertEqual(p1["frontmatter_notes"][0]["domain"], "editor")
+
+        # Simulate Obsidian editing the file externally
+        import time
+        time.sleep(0.01)  # ensure timestamp advances
+        note.write_text(
+            "---\ntype: preference\ndomain: editor\nsource: inferred\npreferences:\n  theme: light\n---\n# Editor\n",
+            encoding="utf-8"
+        )
+        p2 = self.vault.get_profile()
+        self.assertEqual(len(p2["frontmatter_notes"]), 1)
+        # Verify version or timestamp changed and file was refreshed
+        self.assertNotEqual(p1["frontmatter_notes"][0]["version"], p2["frontmatter_notes"][0]["version"])
+
+    def test_second_request_without_modifications_does_not_reopen_files(self):
+        for i in range(5):
+            (self.vault_path / f"pref_{i}.md").write_text(
+                f"---\ntype: preference\ndomain: d{i}\nsource: inferred\n---\n# D{i}\n",
+                encoding="utf-8"
+            )
+        # First call populates metadata cache
+        p1 = self.vault.get_profile()
+        self.assertEqual(len(p1["frontmatter_notes"]), 5)
+
+        # Second call should not reload notes
+        from unittest.mock import patch
+        with patch.object(self.vault, "load", wraps=self.vault.load) as mock_load:
+            p2 = self.vault.get_profile()
+            self.assertEqual(mock_load.call_count, 0, "Second request without modifications must not reopen note files")
+            self.assertEqual(len(p2["frontmatter_notes"]), 5)
+
+    def test_malformed_note_increments_skipped_without_emptying_profile(self):
+        (self.vault_path / "Valid1.md").write_text(
+            "---\ntype: preference\ndomain: dev\nsource: inferred\npreferences:\n  lang: python\n---\n# Valid 1\n",
+            encoding="utf-8"
+        )
+        (self.vault_path / "Malformed.md").write_text(
+            "---\n[this is broken yaml: { unclosed\n---\n# Malformed\n",
+            encoding="utf-8"
+        )
+        (self.vault_path / "Valid2.md").write_text(
+            "---\ntype: preference\ndomain: dev\nsource: inferred\npreferences:\n  shell: zsh\n---\n# Valid 2\n",
+            encoding="utf-8"
+        )
+
+        profile = self.vault.get_profile()
+        self.assertGreater(profile.get("skipped_notes", 0), 0)
+        self.assertFalse(profile.get("complete"))
+        self.assertGreater(len(profile.get("errors", [])), 0)
+        # Ensure rest of profile is not emptied
+        self.assertEqual(len(profile["frontmatter_notes"]), 2)
+
+    def test_concurrent_profile_access_synthetic_vault(self):
+        import concurrent.futures
+        for i in range(10):
+            (self.vault_path / f"note_{i}.md").write_text(
+                f"---\ntype: preference\ndomain: dom_{i}\nsource: inferred\npreferences:\n  k: v{i}\n---\n# N{i}\n",
+                encoding="utf-8"
+            )
+
+        def worker(idx):
+            if idx % 3 == 0:
+                # Intermittent modification
+                (self.vault_path / f"note_{idx % 10}.md").write_text(
+                    f"---\ntype: preference\ndomain: dom_{idx % 10}\nsource: inferred\npreferences:\n  k: v_mod_{idx}\n---\n# N\n",
+                    encoding="utf-8"
+                )
+            return self.vault.get_profile()
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
+            futures = [executor.submit(worker, i) for i in range(30)]
+            results = [f.result() for f in concurrent.futures.as_completed(futures)]
+
+        self.assertEqual(len(results), 30)
+        for res in results:
+            self.assertIn("explicit_preferences", res)
+            self.assertIn("frontmatter_notes", res)
+            self.assertGreater(len(res["frontmatter_notes"]), 0)
+
 
 if __name__ == "__main__":
+
     unittest.main()
 
 
