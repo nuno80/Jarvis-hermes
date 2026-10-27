@@ -1,6 +1,6 @@
 # MCP locale: contratti iniziali e confini
 
-> **Nota storica:** Questo documento descrive l'architettura base iniziale (slice read-only per #2, #3 e #12). Per l'inventario completo dei 50 tool attualmente implementati e le rispettive policy di conferma, consultare **[`docs/tools-inventory.md`](tools-inventory.md)** e **[`config/README.md`](../config/README.md)**.
+> **Nota storica:** Questo documento descrive l'architettura base iniziale (slice read-only per #2, #3 e #12). Per l'inventario completo dei 52 tool attualmente implementati e le rispettive policy di conferma, consultare **[`docs/tools-inventory.md`](tools-inventory.md)** e **[`config/README.md`](../config/README.md)**.
 
 Inizialmente concepito per esporre `device_status`, `disk_usage`, `search_notes`, `read_note` e `simulate_with_approval` attraverso il protocollo MCP stdio. Il client MCP avvia il processo; stdout è riservato al protocollo. Nessun endpoint HTTP, secondo gateway Telegram o comando remoto è avviato.
 

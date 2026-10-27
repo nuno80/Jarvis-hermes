@@ -639,7 +639,7 @@ def build_server() -> FastMCP:
             checkpoint_id, expected_job_id=expected_job_id,
             expected_current_hash=expected_current_hash), request_id)
 
-    @server.tool(annotations=readonly)
+    @server.tool(annotations=destructive)
     def run_project_workflow(project_id: str, workflow_name: str,
                              device_id: str | None = None, timeout_seconds: int = 120,
                              job_id: str | None = None, files: list[str] | None = None,
@@ -793,7 +793,7 @@ def build_server() -> FastMCP:
         """Generate summary report of routing telemetry decisions, p50/p95 latency, and escalation rates."""
         return respond(lambda: telemetry_store.generate_report(), request_id)
 
-    @server.tool(annotations=readonly)
+    @server.tool(annotations=destructive)
     def record_routing_correction(decision_id: int, correction: str, request_id: str | None = None) -> dict[str, Any]:
         """Record user correction on a prior routing decision for telemetry and calibration datasets."""
         return respond(lambda: {"updated": telemetry_store.record_correction(decision_id, correction)}, request_id)
@@ -1460,7 +1460,7 @@ def build_server() -> FastMCP:
             return {**observed, 'ok': False, 'data': None,
                     'error': {'code': 'SUBMISSION_FAILED', 'message': f'Web submission failed: {exc}', 'retryable': False}}
 
-    @server.tool()
+    @server.tool(annotations=destructive)
     async def simulate_with_approval(target: str, arguments: dict[str, Any],
                                      ctx: Context,
                                      request_id: str | None = None) -> dict[str, Any]:
@@ -1497,7 +1497,7 @@ def build_server() -> FastMCP:
             return {**observed, 'ok': False, 'data': None,
                     'error': {'code': exc.code, 'message': 'Approval is unavailable or invalid.', 'retryable': False}}
 
-    @server.tool(annotations=readonly)
+    @server.tool(annotations=destructive)
     def coding_session_init(
         project_name_or_query: str | None = None,
         request_id: str | None = None,

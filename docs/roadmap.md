@@ -5,7 +5,7 @@ Issue pubblicate da `to-tickets`, dopo approvazione dell’utente. Questo indice
 La label `ready-for-agent` indica task revisionato.
 Gran parte dei componenti cardine dell'Onda 1 e dell'Onda 2 (MCP, approvazioni monouso, workflow di progetto, git push con elicitation, GUI Windows, web scraping/form, vault/memoria, routing e Jev pre-turn, Telegram voice STT, calendar, email, travel e reminder) risultano implementati ed integrati su `main` con test completi.
 
-Per il catalogo completo e aggiornato dei 50 tool disponibili e le rispettive politiche di conferma, fare riferimento a **[`docs/tools-inventory.md`](tools-inventory.md)**.
+Per il catalogo completo e aggiornato dei 52 tool disponibili e le rispettive politiche di conferma, fare riferimento a **[`docs/tools-inventory.md`](tools-inventory.md)**.
 
 | Task | Issue | Bloccato da | Stato Implementativo Core |
 |---|---|---|---|

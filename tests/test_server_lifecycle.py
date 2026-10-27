@@ -90,12 +90,49 @@ class ServerLifecycleTests(unittest.TestCase):
             check=True,
         )
         self.assertIn("# Inventario Tool MCP", res.stdout)
+        self.assertNotIn("Implementato & Testato via MCP", res.stdout)
+        self.assertIn("| Effetti | Politica di Conferma |", res.stdout)
 
-        # Verify job and reminder states were not reconciled
+        # Verify job and reminder states were not reconciled or modified
         j_current = job_store.get_job(jid)
         self.assertEqual(j_current["status"], "running")
+        self.assertEqual(j_current["last_step"], "processing")
+        with job_store._connection() as conn:
+            self.assertEqual(conn.execute('SELECT COUNT(*) FROM jobs').fetchone()[0], 1)
+
         r_current = rem_store.get(rid)
         self.assertEqual(r_current["status"], "scheduled")
+        self.assertEqual(len(rem_store.list_reminders(status="scheduled")), 1)
+
+    def test_inventory_and_readme_tool_count_consistency(self):
+        """README.md and inventory must report the exact same tool count and reflect actual effects."""
+        repo_root = Path(__file__).resolve().parents[1]
+        readme_path = repo_root / "README.md"
+        readme_text = readme_path.read_text(encoding="utf-8")
+
+        res = subprocess.run(
+            [sys.executable, str(repo_root / "scripts" / "inventory_tools.py")],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        inventory_text = res.stdout
+
+        import re
+        inv_match = re.search(r"Totale tool registrati:\s*\*\*(\d+)\*\*", inventory_text)
+        self.assertIsNotNone(inv_match, "Inventory must declare total registered tools")
+        tool_count = int(inv_match.group(1))
+
+        # Check README consistency
+        self.assertIn(f"**{tool_count} tool registrati**", readme_text)
+        self.assertIn(f"({tool_count} tool)", readme_text)
+        self.assertIn(f"{tool_count} strumenti tipizzati", readme_text)
+        self.assertNotIn("50 tool", readme_text)
+
+        # Inventory must not declare indiscriminate test coverage
+        self.assertNotIn("Implementato & Testato via MCP", inventory_text)
+        # pi_task must describe admission control and ownership
+        self.assertIn("Admission control", inventory_text)
 
     def test_doctor_command_is_read_only_and_does_not_modify_state(self):
         """Executing 'jarvis doctor --json' must not reconcile jobs or reminders."""

@@ -11,7 +11,7 @@ La CI è configurata su Linux e Windows tramite GitHub Actions (`.github/workflo
 
 ## Verifica Capacità & Tool
 
-Tutti i 50 tool MCP registrati sono coperti da test unitari ed end-to-end con client MCP reale e trasporto stdio isolato (`tests/test_mcp.py` e suite dedicate per calendar, email, travel, routing, checkpoint, gui, ecc.).
+Tutti i 52 tool MCP registrati sono coperti da test unitari ed end-to-end con client MCP reale e trasporto stdio isolato (`tests/test_mcp.py` e suite dedicate per calendar, email, travel, routing, checkpoint, gui, ecc.).
 
 Per l'inventario aggiornato di tutti i tool registrati nel server FastMCP e il dettaglio delle relative policy di sicurezza e conferma:
 ```bash
