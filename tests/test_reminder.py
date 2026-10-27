@@ -163,6 +163,141 @@ class ReminderTests(unittest.TestCase):
         self.assertEqual(dispatched2[0]["delivery_status"], "delivery_uncertain")
         self.assertIn("Telegram gateway timeout", dispatched2[0]["warnings"])
 
+        # Verifica che delivery_uncertain non venga ri-tentato automaticamente da un secondo dispatch_due
+        dispatched_retry = self.store.dispatch_due(now_utc=datetime.now(timezone.utc), sender_func=mock_sender_ok)
+        self.assertEqual(len(dispatched_retry), 0)
+
+
+    def test_atomic_claim_and_concurrent_dispatchers(self):
+        """Due dispatcher concorrenti producono un solo invio tramite claim atomico."""
+        import threading
+
+        due_now = datetime.now(timezone.utc) - timedelta(seconds=5)
+        rem = self.store.create(
+            actor_id=123456,
+            text="Reminder claim atomico",
+            due_at=due_now.isoformat(),
+            timezone_str="Europe/Rome",
+        )
+
+        call_count = 0
+        lock = threading.Lock()
+
+        def slow_sender(actor_id, text):
+            import time
+            nonlocal call_count
+            with lock:
+                call_count += 1
+            time.sleep(0.05)
+            return {"ok": True, "message_id": 1001}
+
+        res1, res2 = [], []
+
+        def worker1():
+            s = ReminderStore(self.db_path)
+            res1.extend(s.dispatch_due(now_utc=datetime.now(timezone.utc), sender_func=slow_sender))
+
+        def worker2():
+            s = ReminderStore(self.db_path)
+            res2.extend(s.dispatch_due(now_utc=datetime.now(timezone.utc), sender_func=slow_sender))
+
+        t1 = threading.Thread(target=worker1)
+        t2 = threading.Thread(target=worker2)
+        t1.start()
+        t2.start()
+        t1.join()
+        t2.join()
+
+        self.assertEqual(call_count, 1)
+        dispatched_total = len(res1) + len(res2)
+        self.assertEqual(dispatched_total, 1)
+        final = self.store.get(rem["reminder_id"])
+        self.assertEqual(final["status"], "fired")
+        self.assertEqual(final["delivery_status"], "delivered")
+
+    def test_reconcile_sending_after_crash(self):
+        """Un record rimasto in sending dopo un crash viene riconciliato come incerto all'avvio."""
+        now_dt = datetime.now(timezone.utc)
+        rem = self.store.create(
+            actor_id=123456,
+            text="Reminder interrupted during sending",
+            due_at=now_dt.isoformat(),
+            timezone_str="Europe/Rome",
+        )
+        # Forziamo lo stato in 'sending' per simulare un crash del processo durante la chiamata al sender
+        with self.store._connection() as conn:
+            conn.execute(
+                "UPDATE reminders SET status = 'sending', delivery_status = 'sending' WHERE reminder_id = ?",
+                (rem["reminder_id"],),
+            )
+            conn.commit()
+
+        # Riavvio e riconciliazione all'avvio
+        reconciled = self.store.reconcile_on_startup(now_utc=datetime.now(timezone.utc))
+        rec_ids = [r["reminder_id"] for r in reconciled]
+        self.assertIn(rem["reminder_id"], rec_ids)
+
+        final = self.store.get(rem["reminder_id"])
+        # Uno stato che rappresenta la riconciliazione deterministica come incerto senza retry cieco
+        self.assertEqual(final["status"], "fired")
+        self.assertEqual(final["delivery_status"], "delivery_uncertain")
+        self.assertIn("crash", final["warnings"].lower())
+
+    def test_sender_mandatory_for_dispatch(self):
+        """Sender assente non può produrre delivered (solleva ValueError / ReminderError o fallisce)."""
+        due_now = datetime.now(timezone.utc) - timedelta(seconds=5)
+        rem = self.store.create(
+            actor_id=123456,
+            text="Reminder test mandatory sender",
+            due_at=due_now.isoformat(),
+            timezone_str="Europe/Rome",
+        )
+        with self.assertRaises((ValueError, ReminderError)):
+            self.store.dispatch_due(now_utc=datetime.now(timezone.utc), sender_func=None)
+
+        # Il reminder deve rimanere 'scheduled' e non 'delivered'
+        current = self.store.get(rem["reminder_id"])
+        self.assertEqual(current["status"], "scheduled")
+        self.assertEqual(current["delivery_status"], "pending")
+
+    def test_reminder_scheduler_loop(self):
+        """Un reminder che scade a server attivo viene inviato una volta tramite scheduler."""
+        import time
+
+        sent = []
+        def test_sender(actor_id, text):
+            sent.append((actor_id, text))
+            return {"ok": True, "message_id": 123}
+
+        from jarvis_hermes.reminder import ReminderScheduler
+        scheduler = ReminderScheduler(self.store, sender_func=test_sender, poll_interval_seconds=0.05)
+        self.assertFalse(scheduler.is_running())
+        scheduler.start()
+        self.assertTrue(scheduler.is_running())
+
+        # Creiamo un reminder che scade quasi subito (0.1s nel futuro)
+        due_soon = datetime.now(timezone.utc) + timedelta(milliseconds=100)
+        rem = self.store.create(
+            actor_id=123456,
+            text="Reminder via scheduler",
+            due_at=due_soon.isoformat(),
+            timezone_str="Europe/Rome",
+        )
+
+        # Attendiamo che lo scheduler lo consegni
+        start_t = time.time()
+        while time.time() - start_t < 2.0 and not sent:
+            time.sleep(0.05)
+
+        scheduler.stop()
+        self.assertFalse(scheduler.is_running())
+
+        self.assertEqual(len(sent), 1)
+        self.assertEqual(sent[0], (123456, "Reminder via scheduler"))
+        final = self.store.get(rem["reminder_id"])
+        self.assertEqual(final["status"], "fired")
+        self.assertEqual(final["delivery_status"], "delivered")
+
     def test_no_spontaneous_monitoring_without_explicit_request(self):
         """D11: Nessun monitoraggio spontaneo; il database non accetta reminder privi di testo o attore."""
         with self.assertRaises(ReminderError) as ctx:

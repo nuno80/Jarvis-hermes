@@ -1591,4 +1591,10 @@ def load_dotenv_if_available() -> None:
 def main() -> None:
     load_dotenv_if_available()
     reconcile_startup_state()
-    build_server().run(transport='stdio')
+    from .reminder import ReminderScheduler, send_telegram_reminder
+    scheduler = ReminderScheduler(store=_reminder_store(), sender_func=send_telegram_reminder)
+    scheduler.start()
+    try:
+        build_server().run(transport='stdio')
+    finally:
+        scheduler.stop()
