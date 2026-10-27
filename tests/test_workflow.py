@@ -1,5 +1,6 @@
 import subprocess
 import unittest
+from unittest.mock import patch
 import tempfile
 import json
 from pathlib import Path
@@ -197,6 +198,134 @@ class WorkflowAndCommitTests(unittest.TestCase):
         self.assertIn("f1.py", diff_proc.stdout)
         self.assertNotIn("f2.py", diff_proc.stdout)
         self.assertNotIn("f3.txt", diff_proc.stdout)
+
+    def test_commit_rejects_pre_staged_changes(self):
+        """Pre-existing staged changes block commit with INDEX_NOT_CLEAN leaving repo untouched."""
+        (self.proj_dir / "f1.py").write_text("orig 1\n", encoding="utf-8")
+        (self.proj_dir / "f2.py").write_text("orig 2\n", encoding="utf-8")
+        subprocess.run(["git", "add", "."], cwd=self.proj_dir, check=True)
+        subprocess.run(["git", "commit", "-m", "init"], cwd=self.proj_dir, check=True)
+
+        # Job edits f1.py, user pre-stages f2.py
+        (self.proj_dir / "f1.py").write_text("job change\n", encoding="utf-8")
+        (self.proj_dir / "f2.py").write_text("pre-staged change\n", encoding="utf-8")
+        subprocess.run(["git", "add", "f2.py"], cwd=self.proj_dir, check=True)
+
+        self.cfg_file.write_text(json.dumps({
+            "devices": {"local": {"environment": "wsl"}},
+            "projects": {
+                "sample": {
+                    "paths": {"local": str(self.proj_dir)},
+                    "workflows": {"check": {"command": ["python3", "-c", "print('ok')"]}}
+                }
+            }
+        }), encoding="utf-8")
+
+        state_dir = Path(self.tmp.name) / "state"
+        registry = ProjectRegistry(self.cfg_file, current_device="local", current_environment="wsl", state_dir=state_dir)
+        wf_res = registry.run_project_workflow("sample", "check")
+        vr_id = wf_res["verification_run_id"]
+
+        head_before = subprocess.run(["git", "rev-parse", "HEAD"], cwd=self.proj_dir, capture_output=True, text=True, check=True).stdout.strip()
+        status_before = subprocess.run(["git", "status", "--porcelain"], cwd=self.proj_dir, capture_output=True, text=True, check=True).stdout
+
+        with self.assertRaises(ProjectError) as ctx:
+            registry.commit_project_changes(
+                project_id="sample",
+                files=["f1.py"],
+                commit_message="commit f1",
+                verification_run_id=vr_id
+            )
+        self.assertEqual(ctx.exception.code, "INDEX_NOT_CLEAN")
+
+        # After rejection: HEAD, index and working tree are unchanged
+        head_after = subprocess.run(["git", "rev-parse", "HEAD"], cwd=self.proj_dir, capture_output=True, text=True, check=True).stdout.strip()
+        status_after = subprocess.run(["git", "status", "--porcelain"], cwd=self.proj_dir, capture_output=True, text=True, check=True).stdout
+        self.assertEqual(head_before, head_after)
+        self.assertEqual(status_before, status_after)
+
+    def test_commit_rejects_unauthorized_staged_set(self):
+        """If staged files do not match authorized files after staging, commit is prevented and index reset."""
+        (self.proj_dir / "f1.py").write_text("orig 1\n", encoding="utf-8")
+        (self.proj_dir / "f2.py").write_text("orig 2\n", encoding="utf-8")
+        subprocess.run(["git", "add", "."], cwd=self.proj_dir, check=True)
+        subprocess.run(["git", "commit", "-m", "init"], cwd=self.proj_dir, check=True)
+
+        (self.proj_dir / "f1.py").write_text("modified 1\n", encoding="utf-8")
+        (self.proj_dir / "f2.py").write_text("modified 2\n", encoding="utf-8")
+
+        self.cfg_file.write_text(json.dumps({
+            "devices": {"local": {"environment": "wsl"}},
+            "projects": {
+                "sample": {
+                    "paths": {"local": str(self.proj_dir)},
+                    "workflows": {"check": {"command": ["python3", "-c", "print('ok')"]}}
+                }
+            }
+        }), encoding="utf-8")
+
+        state_dir = Path(self.tmp.name) / "state"
+        registry = ProjectRegistry(self.cfg_file, current_device="local", current_environment="wsl", state_dir=state_dir)
+        wf_res = registry.run_project_workflow("sample", "check")
+        vr_id = wf_res["verification_run_id"]
+
+        # Suppose git add staged an extra file through mock/alias or git hook
+        head_before = subprocess.run(["git", "rev-parse", "HEAD"], cwd=self.proj_dir, capture_output=True, text=True, check=True).stdout.strip()
+        real_run = subprocess.run
+        def fake_run(cmd, *args, **kwargs):
+            if isinstance(cmd, list) and len(cmd) >= 2 and cmd[0] == "git" and cmd[1] == "add":
+                # simulate pre-commit hook or race staging an extra file f2.py
+                return real_run(["git", "add", "f1.py", "f2.py"], cwd=self.proj_dir, check=True, capture_output=True)
+            return real_run(cmd, *args, **kwargs)
+
+        with patch("jarvis_hermes.projects.subprocess.run", side_effect=fake_run):
+            with self.assertRaises(ProjectError) as ctx:
+                registry.commit_project_changes(
+                    project_id="sample",
+                    files=["f1.py"],
+                    commit_message="commit f1",
+                    verification_run_id=vr_id
+                )
+            self.assertEqual(ctx.exception.code, "UNAUTHORIZED_STAGED_FILES")
+
+        head_after = subprocess.run(["git", "rev-parse", "HEAD"], cwd=self.proj_dir, capture_output=True, text=True, check=True).stdout.strip()
+        self.assertEqual(head_before, head_after)
+
+        # Index should have been reset
+        diff_cached = subprocess.run(["git", "diff", "--cached", "--name-only"], cwd=self.proj_dir, capture_output=True, text=True, check=True)
+        self.assertEqual(diff_cached.stdout.strip(), "")
+
+    def test_commit_new_untracked_verified_file(self):
+        """Committing newly created verified file works."""
+        (self.proj_dir / "f1.py").write_text("orig 1\n", encoding="utf-8")
+        subprocess.run(["git", "add", "."], cwd=self.proj_dir, check=True)
+        subprocess.run(["git", "commit", "-m", "init"], cwd=self.proj_dir, check=True)
+
+        (self.proj_dir / "new_file.py").write_text("new content\n", encoding="utf-8")
+
+        self.cfg_file.write_text(json.dumps({
+            "devices": {"local": {"environment": "wsl"}},
+            "projects": {
+                "sample": {
+                    "paths": {"local": str(self.proj_dir)},
+                    "workflows": {"check": {"command": ["python3", "-c", "print('ok')"]}}
+                }
+            }
+        }), encoding="utf-8")
+
+        state_dir = Path(self.tmp.name) / "state"
+        registry = ProjectRegistry(self.cfg_file, current_device="local", current_environment="wsl", state_dir=state_dir)
+        wf_res = registry.run_project_workflow("sample", "check")
+        vr_id = wf_res["verification_run_id"]
+
+        res = registry.commit_project_changes(
+            project_id="sample",
+            files=["new_file.py"],
+            commit_message="add new file",
+            verification_run_id=vr_id
+        )
+        self.assertTrue(res["committed"])
+        self.assertEqual(res["files"], ["new_file.py"])
 
     def test_commit_rejects_dictionary_verification(self):
         """Dict verification (untrusted model claim) is rejected with VERIFICATION_REQUIRED."""

@@ -309,9 +309,10 @@ class ProjectRegistry:
                     hashes[rel.replace('\\', '/')] = sha256(p.read_bytes()).hexdigest()
             return hashes
 
-        # If file_list is None, snapshot all files changed or tracked via git
+        # If file_list is None, snapshot all files changed or tracked via git (including untracked files)
         try:
-            res = subprocess.run(['git', 'ls-files'], cwd=root, capture_output=True, text=True, check=True)
+            res = subprocess.run(['git', 'ls-files', '--cached', '--others', '--exclude-standard'],
+                                 cwd=root, capture_output=True, text=True, check=True)
             for line in res.stdout.splitlines():
                 rel = line.strip()
                 if not rel:
@@ -499,6 +500,12 @@ class ProjectRegistry:
                 # If specific files were tracked in verification and this file wasn't verified
                 raise ProjectError('VERIFICATION_REQUIRED', f'File {rel_file!r} was not verified in verification run {verification_run_id!r}.')
 
+        # Fail-closed check: ensure git index has no pre-existing staged changes
+        pre_staged = subprocess.run(['git', 'diff', '--cached', '--name-only'],
+                                    cwd=root, capture_output=True, text=True)
+        if pre_staged.returncode == 0 and pre_staged.stdout.strip():
+            raise ProjectError('INDEX_NOT_CLEAN', 'Git index already contains staged changes before commit.')
+
         # Check git hooks before git commit
         cfg = self._load_config()
         proj = cfg.get('projects', {}).get(project_id, {})
@@ -528,6 +535,13 @@ class ProjectRegistry:
             if not staged_files:
                 raise ProjectError('NOTHING_TO_COMMIT', 'None of the specified files have changes to commit.')
 
+            # Verify that staged files exactly match authorized files
+            norm_authorized = {p.replace('\\', '/').lstrip('./') for p in files}
+            norm_staged = {p.replace('\\', '/').lstrip('./') for p in staged_files}
+            if not norm_staged.issubset(norm_authorized):
+                raise ProjectError('UNAUTHORIZED_STAGED_FILES',
+                                   f'Staged files {sorted(norm_staged)!r} do not match authorized files {sorted(norm_authorized)!r}.')
+
             # Commit staged changes
             commit_cmd = ['git', 'commit', '-m', commit_message] + commit_flags
             commit_proc = subprocess.run(
@@ -552,8 +566,12 @@ class ProjectRegistry:
                 'device_id': resolved_device
             }
         except subprocess.CalledProcessError as exc:
+            subprocess.run(['git', 'reset', 'HEAD', '--'], cwd=root, capture_output=True)
             stderr = exc.stderr.decode('utf-8', errors='replace') if isinstance(exc.stderr, bytes) else str(exc.stderr)
             raise ProjectError('GIT_ERROR', f'Git operation failed: {stderr}')
+        except Exception:
+            subprocess.run(['git', 'reset', 'HEAD', '--'], cwd=root, capture_output=True)
+            raise
 
     def verify_remote_commit(self, project_id: str, remote: str, branch: str,
                              commit_hash: str, device_id: str | None = None) -> bool:
