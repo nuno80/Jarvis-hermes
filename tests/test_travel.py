@@ -6,7 +6,7 @@ import unittest
 from unittest.mock import MagicMock, patch
 import urllib.error
 
-from jarvis_hermes.travel_old import (
+from jarvis_hermes.travel import (
     DuffelProvider,
     Offer,
     Segment,
@@ -438,7 +438,7 @@ class ValidationStrictnessTests(unittest.TestCase):
     def test_cache_db_permissions(self):
         import stat
         import tempfile
-        from jarvis_hermes.travel_old import TravelCacheAndBudget
+        from jarvis_hermes.travel import TravelCacheAndBudget
         db_file = os.path.join(tempfile.mkdtemp(), "test_perm.sqlite3")
         TravelCacheAndBudget(db_path=db_file)
         mode = stat.S_IMODE(os.stat(db_file).st_mode)
@@ -515,7 +515,7 @@ class _ComboStubProvider:
         self.calls: list[tuple[str, str | None]] = []
 
     def search_offers(self, request):
-        from jarvis_hermes.travel_old import Offer
+        from jarvis_hermes.travel import Offer
         self.calls.append((request.departure_date, request.return_date))
         dep_day = int(request.departure_date[-2:])
         amount = float(100 + 10 * (dep_day - 10))
@@ -534,7 +534,7 @@ class _ComboStubProvider:
 class FlexibleSearchTests(unittest.TestCase):
     def setUp(self):
         import tempfile
-        from jarvis_hermes.travel_old import TravelCacheAndBudget
+        from jarvis_hermes.travel import TravelCacheAndBudget
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.cache = TravelCacheAndBudget(
@@ -553,7 +553,7 @@ class FlexibleSearchTests(unittest.TestCase):
         return base
 
     def test_valid_combinations_count_and_order(self):
-        from jarvis_hermes.travel_old import FlexibleTravelRequest
+        from jarvis_hermes.travel import FlexibleTravelRequest
         flex = FlexibleTravelRequest.from_params(self._params())
         combos = flex.valid_combinations()
         # 3 partenze x 2 ritorni, tutte valide (ritorno >= partenza)
@@ -561,7 +561,7 @@ class FlexibleSearchTests(unittest.TestCase):
         self.assertEqual(combos[0], ("2026-10-09", "2026-10-20"))
 
     def test_plan_limited_by_max_searches_declares_partial(self):
-        from jarvis_hermes.travel_old import search_flexible_flights
+        from jarvis_hermes.travel import search_flexible_flights
         prov = _ComboStubProvider()
         res = search_flexible_flights(self._params(max_searches=2), provider=prov, cache=self.cache)
         self.assertEqual(len(prov.calls), 2)
@@ -573,7 +573,7 @@ class FlexibleSearchTests(unittest.TestCase):
         self.assertEqual(prov.calls[0], ("2026-10-10", "2026-10-20"))
 
     def test_plan_prioritizes_requested_dates_over_chronological(self):
-        from jarvis_hermes.travel_old import search_flexible_flights
+        from jarvis_hermes.travel import search_flexible_flights
         prov = _ComboStubProvider()
         # Con departure_window=5 e stay_extra=3 ci sono 44 combinazioni.
         # Con max_searches=1, senza ordinamento per distanza verrebbe cercato 2026-10-05 anziché la base.
@@ -586,7 +586,7 @@ class FlexibleSearchTests(unittest.TestCase):
         self.assertEqual(prov.calls[0], ("2026-10-10", "2026-10-20"))
 
     def test_transient_error_mid_run_keeps_collected_offers(self):
-        from jarvis_hermes.travel_old import TravelError, search_flexible_flights
+        from jarvis_hermes.travel import TravelError, search_flexible_flights
 
         class _TransientProvider(_ComboStubProvider):
             def search_offers(self, request):
@@ -602,7 +602,7 @@ class FlexibleSearchTests(unittest.TestCase):
         self.assertEqual(res["offers_count"], 1)
 
     def test_second_run_is_full_cache_hit_no_new_calls(self):
-        from jarvis_hermes.travel_old import search_flexible_flights
+        from jarvis_hermes.travel import search_flexible_flights
         prov = _ComboStubProvider()
         res1 = search_flexible_flights(self._params(max_searches=6), provider=prov, cache=self.cache)
         self.assertEqual(res1["coverage"]["searched_live"], 6)
@@ -614,7 +614,7 @@ class FlexibleSearchTests(unittest.TestCase):
 
     def test_expired_cache_recounts_as_live(self):
         import time
-        from jarvis_hermes.travel_old import TravelCacheAndBudget, search_flexible_flights
+        from jarvis_hermes.travel import TravelCacheAndBudget, search_flexible_flights
         short = TravelCacheAndBudget(
             db_path=os.path.join(self.tmp.name, "short.sqlite3"),
             daily_limit=1000, monthly_limit=1000, ttl_seconds=1,
@@ -627,7 +627,7 @@ class FlexibleSearchTests(unittest.TestCase):
         self.assertEqual(res["coverage"]["searched_live"], 1)
 
     def test_budget_exhaustion_gives_partial_coverage_not_error(self):
-        from jarvis_hermes.travel_old import TravelCacheAndBudget, search_flexible_flights
+        from jarvis_hermes.travel import TravelCacheAndBudget, search_flexible_flights
         tight = TravelCacheAndBudget(
             db_path=os.path.join(self.tmp.name, "tight.sqlite3"),
             daily_limit=2, monthly_limit=1000, ttl_seconds=3600,
@@ -640,7 +640,7 @@ class FlexibleSearchTests(unittest.TestCase):
         self.assertEqual(res["offers_count"], 2)
 
     def test_provider_quota_exhaustion_gives_partial_coverage(self):
-        from jarvis_hermes.travel_old import TravelError, search_flexible_flights
+        from jarvis_hermes.travel import TravelError, search_flexible_flights
 
         class _QuotaProvider(_ComboStubProvider):
             def search_offers(self, request):
@@ -655,7 +655,7 @@ class FlexibleSearchTests(unittest.TestCase):
         self.assertIn("Quota provider", res["coverage"]["partial_reason"])
 
     def test_stay_extra_without_return_rejected(self):
-        from jarvis_hermes.travel_old import FlexibleTravelRequest, TravelError
+        from jarvis_hermes.travel import FlexibleTravelRequest, TravelError
         with self.assertRaises(TravelError) as ctx:
             FlexibleTravelRequest.from_params({
                 "origin": "FCO", "destination": "DPS",
@@ -665,7 +665,7 @@ class FlexibleSearchTests(unittest.TestCase):
         self.assertEqual(ctx.exception.code, "INVALID_FLEXIBLE_PARAMS")
 
     def test_one_way_expands_departures_only(self):
-        from jarvis_hermes.travel_old import FlexibleTravelRequest
+        from jarvis_hermes.travel import FlexibleTravelRequest
         flex = FlexibleTravelRequest.from_params({
             "origin": "FCO", "destination": "DPS",
             "departure_date": "2026-10-10", "passengers": 1,
@@ -779,7 +779,7 @@ class SerpApiFallbackKeyTests(unittest.TestCase):
         self.assertEqual(len(offers), 0)
 
     def test_flexible_search_marks_from_cache_on_cached_offers(self):
-        from jarvis_hermes.travel_old import search_flexible_flights, TravelCacheAndBudget
+        from jarvis_hermes.travel import search_flexible_flights, TravelCacheAndBudget
         import tempfile
         with tempfile.TemporaryDirectory() as tmp:
             cache = TravelCacheAndBudget(db_path=os.path.join(tmp, "t.sqlite3"))
