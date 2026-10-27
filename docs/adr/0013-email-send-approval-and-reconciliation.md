@@ -22,8 +22,9 @@ La specifica J16 (§2 priorità 5, §5 `personal-mcp`, §12.3) e la decisione ar
 
 2. **Digest crittografico SHA-256 e gate monouso (`ApprovalStore`)**:
    - Calcolo deterministico di `compute_email_digest` su `to`, `cc`, `bcc`, `subject`, `body` e metadati normalizzati degli allegati (`filename`, `sha256`, `size_bytes`).
+   - Validazione e limiti allegati: contenuto base64 validato (`content_base64`), decodificato una sola volta; hash SHA-256 e dimensione derivati direttamente dai byte decodificati (senza fidarsi di metadati dichiarati non coincidenti). Limite per singolo allegato di 10 MiB e totale di 25 MiB.
    - Il target di approvazione è vincolato a `email_send:<destinatari>` e gli argomenti includono il digest esatto.
-   - Fail-closed: se l'utente rifiuta, il token scade o uno qualsiasi dei campi viene modificato, l'invio fallisce con eccezione tipizzata (`APPROVAL_DENIED`, `APPROVAL_EXPIRED`, `APPROVAL_DECLINED`) e la rete non viene toccata.
+   - Fail-closed: se l'utente rifiuta, il token scade, uno qualsiasi dei campi viene modificato, o i metadati degli allegati non corrispondono ai byte, l'invio fallisce con eccezione tipizzata (`APPROVAL_DENIED`, `APPROVAL_EXPIRED`, `APPROVAL_DECLINED`, `ATTACHMENT_INTEGRITY_MISMATCH`, `ATTACHMENT_TOO_LARGE`) e la rete non viene toccata.
 
 3. **Audit Log SQLite permanente e Idempotenza (AT04)**:
    - Registro permanente `sent_emails` in SQLite locale (`$XDG_STATE_HOME/jarvis-hermes/email_audit.sqlite3`).
